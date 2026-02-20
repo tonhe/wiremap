@@ -79,8 +79,12 @@ class NetworkVisualizer:
             device_type = device_info.get('device_type', 'unknown')
             has_routing = device_info.get('has_routing', False)
             
-            # Extract short hostname (everything before first dot)
-            short_name = device_name.split('.')[0]
+            # Extract short hostname (strip domain suffix, but keep full IP addresses)
+            parts = device_name.split('.')
+            if len(parts) == 4 and all(p.isdigit() for p in parts):
+                short_name = device_name  # It's an IP — show it in full
+            else:
+                short_name = parts[0]
             
             # Check if this is the seed device
             is_seed = (device_name == self.seed_device)
@@ -98,26 +102,43 @@ class NetworkVisualizer:
         
         # Create edges with interface labels
         edge_set = set()  # Track edges to avoid duplicates
-        
+
+        L2_PROTOS = {'CDP', 'LLDP'}
+        L3_PROTOS = {'OSPF', 'EIGRP', 'BGP', 'IS-IS'}
+
         for device_name, device_info in self.topology.items():
             for neighbor in device_info.get('neighbors', []):
                 neighbor_device = neighbor['neighbor_device']
                 local_int = neighbor['local_interface']
                 remote_int = neighbor['remote_interface']
-                
+                protocols = neighbor.get('protocols', [])
+
+                # Classify link as l2, l3, or both
+                proto_set = {p.upper() for p in protocols}
+                has_l2 = bool(proto_set & L2_PROTOS)
+                has_l3 = bool(proto_set & L3_PROTOS)
+                if has_l2 and has_l3:
+                    link_type = 'both'
+                elif has_l3:
+                    link_type = 'l3'
+                else:
+                    link_type = 'l2'
+
                 # Shorten interface names
                 local_int_short = self.shorten_interface_name(local_int)
                 remote_int_short = self.shorten_interface_name(remote_int)
-                
+
                 # Create a unique edge identifier (sorted to avoid duplicates)
                 edge_id = tuple(sorted([device_name, neighbor_device]))
-                
+
                 if edge_id not in edge_set:
                     edge = {
                         'source': device_name,
                         'target': neighbor_device,
                         'local_interface': local_int_short,
-                        'remote_interface': remote_int_short
+                        'remote_interface': remote_int_short,
+                        'link_type': link_type,
+                        'protocols': '+'.join(protocols) if protocols else '',
                     }
                     self.edges.append(edge)
                     edge_set.add(edge_id)
@@ -187,11 +208,25 @@ class NetworkVisualizer:
         }}
         
         .link {{
-            stroke: #999;
             stroke-opacity: 0.6;
             stroke-width: 2px;
+            fill: none;
         }}
-        
+
+        .link-l2 {{
+            stroke: #999;
+        }}
+
+        .link-l3 {{
+            stroke: #FF9944;
+            stroke-dasharray: 6,4;
+        }}
+
+        .link-both {{
+            stroke: #BB77FF;
+            stroke-dasharray: 10,3;
+        }}
+
         .link:hover {{
             stroke: #4ECDC4;
             stroke-opacity: 1;
@@ -313,6 +348,27 @@ class NetworkVisualizer:
                 <span>Seed Device</span>
             </div>
         </div>
+        <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #555;">
+            <div style="font-weight: bold; margin-bottom: 8px; color: #ccc; font-size: 13px;">Link Types</div>
+            <div class="legend-item">
+                <svg width="30" height="12" style="margin-right: 10px; flex-shrink: 0;">
+                    <line x1="0" y1="6" x2="30" y2="6" stroke="#999" stroke-width="2"/>
+                </svg>
+                <span>L2 (CDP/LLDP)</span>
+            </div>
+            <div class="legend-item">
+                <svg width="30" height="12" style="margin-right: 10px; flex-shrink: 0;">
+                    <line x1="0" y1="6" x2="30" y2="6" stroke="#FF9944" stroke-width="2" stroke-dasharray="6,4"/>
+                </svg>
+                <span>L3 only</span>
+            </div>
+            <div class="legend-item">
+                <svg width="30" height="12" style="margin-right: 10px; flex-shrink: 0;">
+                    <line x1="0" y1="6" x2="30" y2="6" stroke="#BB77FF" stroke-width="2" stroke-dasharray="10,3"/>
+                </svg>
+                <span>L2 + L3</span>
+            </div>
+        </div>
     </div>
     
     <div class="tooltip" id="tooltip"></div>
@@ -357,7 +413,9 @@ class NetworkVisualizer:
             .data(links)
             .enter()
             .append("line")
-            .attr("class", "link");
+            .attr("class", d => "link link-" + d.link_type)
+            .on("mouseover", showLinkTooltip)
+            .on("mouseout", hideTooltip);
         
         // Create interface labels for links
         const linkLabels = g.append("g")
@@ -511,6 +569,19 @@ class NetworkVisualizer:
                 `);
         }}
         
+        function showLinkTooltip(event, d) {{
+            const protos = d.protocols || (d.link_type === 'l2' ? 'CDP/LLDP' : d.link_type.toUpperCase());
+            tooltip
+                .style("opacity", 1)
+                .style("left", (event.pageX + 10) + "px")
+                .style("top", (event.pageY - 10) + "px")
+                .html(`
+                    <strong>${{d.source.id}} ↔ ${{d.target.id}}</strong><br>
+                    Protocols: ${{protos}}<br>
+                    ${{d.local_interface}} ↔ ${{d.remote_interface}}
+                `);
+        }}
+
         function hideTooltip() {{
             tooltip.style("opacity", 0);
         }}

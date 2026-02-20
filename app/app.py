@@ -157,7 +157,8 @@ def discover():
                     neighbors.append({
                         'neighbor_device': link.remote_device,
                         'local_interface': link.local_intf,
-                        'remote_interface': link.remote_intf
+                        'remote_interface': link.remote_intf,
+                        'protocols': link.protocols or [],
                     })
                 
                 # Use device_category for visualization, fallback to 'unknown'

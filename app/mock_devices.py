@@ -33,6 +33,8 @@ BGP neighbor is 10.0.0.1,  remote AS 65001, ebgp link,  Peer index 1
   Last read 00:00:43, Last write 00:00:19
   Hold time is 180, keepalive interval is 60 seconds
   Configured hold time is 180, keepalive interval is 60 seconds
+  Local host: 192.168.1.1, Local port: 179
+  Foreign host: 10.0.0.1, Foreign port: 63042
 """,
             "cdp_output": """
 Device ID: DIST-EXTREME-01
@@ -604,6 +606,8 @@ BGP neighbor is 192.168.1.1,  remote AS 65000, ebgp link,  Peer index 1
   BGP state = Established, up for 2d17h
   Last read 00:00:43, Last write 00:00:19
   Hold time is 180, keepalive interval is 60 seconds
+  Local host: 10.0.0.1, Local port: 179
+  Foreign host: 192.168.1.1, Foreign port: 63042
 """,
             "ospf_output": "",
         }

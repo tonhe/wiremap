@@ -267,18 +267,19 @@ def parse_bgp_neighbors(output: str) -> List[Dict]:
     neighbors = []
     current_ip = None
     current_state = None
+    current_local_host = None
 
     for line in output.splitlines():
         line_stripped = line.strip()
 
-        # "BGP neighbor is X.X.X.X" or "Neighbor: X.X.X.X"
+        # "BGP neighbor is X.X.X.X"
         if line_stripped.startswith('BGP neighbor is '):
             # Save previous if established
             if current_ip and current_state and 'ESTABLISHED' in current_state.upper():
                 neighbors.append({
                     'remote_ip': current_ip,
                     'remote_device': None,
-                    'local_intf': None,
+                    'local_intf': current_local_host,
                     'remote_intf': None,
                     'remote_platform': None,
                     'remote_capabilities': 'Router',
@@ -288,17 +289,24 @@ def parse_bgp_neighbors(output: str) -> List[Dict]:
                 })
             current_ip = line_stripped.split('BGP neighbor is ')[1].split(',')[0].strip()
             current_state = None
+            current_local_host = None
 
         elif line_stripped.startswith('BGP state =') or 'BGP state=' in line_stripped:
             state_part = line_stripped.replace('BGP state=', 'BGP state = ')
             current_state = state_part.split('BGP state =')[1].split(',')[0].strip()
+
+        # "Local host: X.X.X.X, Local port: NNNNN"
+        elif line_stripped.startswith('Local host:'):
+            local_host = line_stripped.split('Local host:')[1].split(',')[0].strip()
+            if _is_ip(local_host):
+                current_local_host = local_host
 
     # Last neighbor
     if current_ip and current_state and 'ESTABLISHED' in current_state.upper():
         neighbors.append({
             'remote_ip': current_ip,
             'remote_device': None,
-            'local_intf': None,
+            'local_intf': current_local_host,
             'remote_intf': None,
             'remote_platform': None,
             'remote_capabilities': 'Router',
