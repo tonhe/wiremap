@@ -101,6 +101,32 @@ class Topology:
                 platform=platform
             )
     
+    def find_hostname_by_ip(self, ip: str) -> Optional[str]:
+        """Return the hostname of the device whose mgmt_ip matches ip, or None."""
+        if not ip:
+            return None
+        for hostname, device in self.devices.items():
+            if device.mgmt_ip == ip:
+                return hostname
+        return None
+
+    def rename_device(self, old_name: str, new_name: str):
+        """
+        Rename an IP-placeholder device to its real hostname.
+        Updates the device entry and all link references.
+        """
+        if old_name not in self.devices or old_name == new_name:
+            return
+        device = self.devices.pop(old_name)
+        device.hostname = new_name
+        self.devices[new_name] = device
+        for d in self.devices.values():
+            for link in d.links:
+                if link.local_device == old_name:
+                    link.local_device = new_name
+                if link.remote_device == old_name:
+                    link.remote_device = new_name
+
     def add_link(self, link: Link):
         """Add a link and ensure both devices exist"""
         # Ensure devices exist
@@ -196,7 +222,15 @@ class TopologyDiscoverer:
                 # Get hostname
                 hostname = self._get_hostname(conn)
                 logger.info(f"Connected to {hostname} ({ip})")
-                
+
+                # If an IP-placeholder node exists for this IP (created when
+                # a neighbor referenced it before we SSH'd in), rename it so
+                # all existing links automatically point to the real hostname.
+                existing = self.topology.find_hostname_by_ip(ip)
+                if existing and existing != hostname:
+                    self.topology.rename_device(existing, hostname)
+                    logger.info(f"Renamed placeholder '{existing}' → '{hostname}'")
+
                 # Add device to topology
                 self.topology.add_device(hostname, ip, device_type)
                 
@@ -239,9 +273,11 @@ class TopologyDiscoverer:
                     # Log what we found
                     logger.info(f"Neighbor: {neighbor.get('remote_device', 'Unknown')} - Type: {neighbor_device_type} - Category: {neighbor_device_category} - L3: {neighbor_has_routing} - Caps: {neighbor.get('remote_capabilities', 'None')}")
                     
-                    # Create link and add to topology
-                    # Use IP as device name for L3-only neighbors that have no hostname yet
+                    # Create link and add to topology.
+                    # For L3-only neighbors with no hostname, check if the IP is already
+                    # known in the topology (avoids duplicate IP-placeholder nodes).
                     remote_name = (neighbor.get('remote_device')
+                                   or self.topology.find_hostname_by_ip(neighbor.get('remote_ip'))
                                    or neighbor.get('remote_ip')
                                    or 'Unknown')
                     link = Link(
