@@ -371,6 +371,68 @@ def parse_l3_neighbors(output: str, protocol: str) -> List[Dict]:
     return []
 
 
+def parse_arp_table(output: str) -> List[Dict]:
+    """
+    Parse ARP table output into a list of host entries.
+
+    Handles:
+    - Cisco IOS/XE/NX-OS/Arista: 'show ip arp'
+      Internet  10.1.1.100  15  0050.56aa.bb01  ARPA  GigabitEthernet0/1
+    - Juniper JunOS: 'show arp'
+      00:50:56:aa:bb:cc  10.1.1.100  10.1.1.100  ge-0/0/1.0  none
+
+    Returns list of dicts with keys: ip, mac, interface, age
+    """
+    entries = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Skip header/summary lines
+        if line.startswith(('Protocol', 'MAC', 'Destination', 'Address',
+                             'IP', 'Total', 'ARP', '#')):
+            continue
+
+        parts = line.split()
+
+        # Cisco IOS/XE/NX-OS/Arista tabular format:
+        # Internet  <ip>  <age>  <mac>  ARPA  <interface>
+        if len(parts) >= 5 and parts[0] == 'Internet':
+            ip = parts[1]
+            age = parts[2] if parts[2] != '-' else '0'
+            mac_raw = parts[3]
+            interface = parts[5] if len(parts) > 5 else ''
+            if _is_ip(ip):
+                entries.append({
+                    'ip': ip,
+                    'mac': _normalize_mac(mac_raw),
+                    'age': age,
+                    'interface': interface,
+                })
+            continue
+
+        # Juniper format: <mac>  <ip>  <name>  <interface>  <flags>
+        if len(parts) >= 4 and ':' in parts[0] and _is_ip(parts[1]):
+            entries.append({
+                'ip': parts[1],
+                'mac': parts[0],
+                'age': '?',
+                'interface': parts[3],
+            })
+
+    logger.info(f"Parsed {len(entries)} ARP entries")
+    return entries
+
+
+def _normalize_mac(mac: str) -> str:
+    """Normalize MAC to xx:xx:xx:xx:xx:xx. Handles Cisco dotted notation."""
+    if '.' in mac:
+        raw = mac.replace('.', '')
+        if len(raw) == 12:
+            return ':'.join(raw[i:i+2] for i in range(0, 12, 2))
+    return mac
+
+
 def _is_ip(s: str) -> bool:
     """Return True if s looks like an IPv4 address."""
     parts = s.split('.')

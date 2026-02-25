@@ -11,7 +11,7 @@ from netmiko import ConnectHandler, NetmikoTimeoutException, NetmikoAuthenticati
 
 from device_detector import DeviceTypeDetector
 from parsers import (parse_cdp_neighbors_detail, parse_lldp_neighbors_detail,
-                     merge_neighbor_info, parse_l3_neighbors)
+                     merge_neighbor_info, parse_l3_neighbors, parse_arp_table)
 from mock_devices import is_mock_mode, get_mock_connection
 
 logger = logging.getLogger(__name__)
@@ -60,6 +60,18 @@ L3_COMMANDS = {
 }
 
 
+ARP_COMMANDS = {
+    'cisco_ios':     'show ip arp',
+    'cisco_xe':      'show ip arp',
+    'cisco_nxos':    'show ip arp',
+    'arista_eos':    'show ip arp',
+    'extreme':       'show iparp',
+    'extreme_vsp':   'show ip arp',
+    'juniper_junos': 'show arp',
+    'default':       'show ip arp',
+}
+
+
 @dataclass
 class Device:
     """Represents a discovered network device"""
@@ -70,6 +82,7 @@ class Device:
     has_routing: bool = False  # Whether device has routing capabilities (for L3 switches)
     platform: Optional[str] = None
     links: List['Link'] = field(default_factory=list)
+    arp_entries: List[Dict] = field(default_factory=list)
 
 
 @dataclass
@@ -91,7 +104,7 @@ class Topology:
     devices: Dict[str, Device] = field(default_factory=dict)
     
     def add_device(self, hostname: str, mgmt_ip: str = None, device_type: str = None, device_category: str = None, platform: str = None):
-        """Add a device to the topology"""
+        """Add a device to the topology, or update fields if it already exists."""
         if hostname not in self.devices:
             self.devices[hostname] = Device(
                 hostname=hostname,
@@ -100,6 +113,18 @@ class Topology:
                 device_category=device_category,
                 platform=platform
             )
+        else:
+            # Device may have been created as a placeholder by add_link before SSH.
+            # Fill in fields that weren't available at placeholder-creation time.
+            d = self.devices[hostname]
+            if device_type and not d.device_type:
+                d.device_type = device_type
+            if mgmt_ip and not d.mgmt_ip:
+                d.mgmt_ip = mgmt_ip
+            if device_category and not d.device_category:
+                d.device_category = device_category
+            if platform and not d.platform:
+                d.platform = platform
     
     def find_hostname_by_ip(self, ip: str) -> Optional[str]:
         """Return the hostname of the device whose mgmt_ip matches ip, or None."""
@@ -234,6 +259,11 @@ class TopologyDiscoverer:
                 # Add device to topology
                 self.topology.add_device(hostname, ip, device_type)
                 
+                # Collect ARP table (optional)
+                if self.filters.get('include_arp', False):
+                    arp_entries = self._discover_arp(conn, hostname, device_type)
+                    self.topology.devices[hostname].arp_entries = arp_entries
+
                 # Discover neighbors
                 neighbors = self._discover_neighbors(conn, hostname, device_type)
                 
@@ -291,6 +321,14 @@ class TopologyDiscoverer:
                         protocols=neighbor.get('protocols', [])
                     )
                     self.topology.add_link(link)
+                    # Persist the CDP/LLDP platform string on the remote device so
+                    # it shows up in exports (device_type is set when we SSH in;
+                    # platform is only available from the advertising neighbor here).
+                    remote_platform = neighbor.get('remote_platform')
+                    if remote_platform and remote_name in self.topology.devices:
+                        d = self.topology.devices[remote_name]
+                        if not d.platform:
+                            d.platform = remote_platform
                     logger.info(f"✓ Added link: {hostname} ↔ {neighbor.get('remote_device', 'Unknown')}")
                     
                     # Queue for discovery if we have an IP AND device should be crawled
@@ -449,6 +487,19 @@ class TopologyDiscoverer:
         merged = merge_neighbor_info(cdp_neighbors, lldp_neighbors, l3_neighbors)
         return merged
     
+    def _discover_arp(self, conn: ConnectHandler, hostname: str,
+                      device_type: str = None) -> List[Dict]:
+        """Collect the ARP table from a device. Returns list of ARP entry dicts."""
+        command = ARP_COMMANDS.get(device_type, ARP_COMMANDS['default'])
+        try:
+            output = conn.send_command(command, read_timeout=15)
+            entries = parse_arp_table(output)
+            logger.info(f"Collected {len(entries)} ARP entries from {hostname}")
+            return entries
+        except Exception as e:
+            logger.debug(f"ARP collection failed on {hostname}: {e}")
+            return []
+
     def _detect_neighbor_type(self, neighbor: Dict) -> Optional[tuple]:
         """
         Detect Netmiko device type and category for a neighbor
