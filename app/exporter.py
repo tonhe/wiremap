@@ -3,16 +3,13 @@ Export and reporting module for Network Neighbor Mapper
 Generates JSON, CSV, and PDF exports of discovered topology data
 """
 
-import io
 import csv
+import html
+import io
 import json
 from datetime import datetime
 
-from reportlab.lib.pagesizes import letter
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+import weasyprint
 
 
 def topology_to_dict(topology, seed_ip=None, params=None):
@@ -116,148 +113,306 @@ def generate_csv(data):
     return output.getvalue()
 
 
-def generate_pdf(data):
-    """
-    Return topology data as a PDF (bytes) using reportlab.
-    Includes a header, summary stats, device table, and link table.
-    """
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=letter,
-        rightMargin=0.75 * inch,
-        leftMargin=0.75 * inch,
-        topMargin=0.75 * inch,
-        bottomMargin=0.75 * inch,
-    )
+# ---------------------------------------------------------------------------
+# PDF helpers
+# ---------------------------------------------------------------------------
 
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Title'],
-        fontSize=18,
-        spaceAfter=6,
-    )
-    heading_style = ParagraphStyle(
-        'CustomHeading',
-        parent=styles['Heading2'],
-        fontSize=13,
-        spaceBefore=14,
-        spaceAfter=6,
-    )
-    normal_style = styles['Normal']
+_CATEGORY_BADGE = {
+    'router':   ('badge-router',   'Router'),
+    'switch':   ('badge-switch',   'Switch'),
+    'l3switch': ('badge-switch',   'L3 Switch'),
+    'firewall': ('badge-firewall', 'Firewall'),
+    'ap':       ('badge-ap',       'AP'),
+    'wireless': ('badge-ap',       'Wireless'),
+    'phone':    ('badge-phone',    'Phone'),
+    'server':   ('badge-server',   'Server'),
+}
 
-    elements = []
+_PDF_CSS = """
+@page {
+    size: letter;
+    margin: 0.75in;
+    @bottom-center {
+        content: "Page " counter(page) " of " counter(pages);
+        font-size: 8pt;
+        color: #888;
+    }
+}
 
-    # --- Title and metadata ---
-    elements.append(Paragraph('Network Topology Report', title_style))
-    elements.append(Spacer(1, 4))
+body {
+    font-family: Liberation Sans, Arial, sans-serif;
+    font-size: 10pt;
+    color: #222;
+    line-height: 1.45;
+}
 
+.report-header {
+    border-bottom: 3px solid #667eea;
+    padding-bottom: 10pt;
+    margin-bottom: 18pt;
+}
+
+h1 {
+    font-size: 20pt;
+    color: #667eea;
+    margin: 0 0 4pt 0;
+    font-weight: bold;
+}
+
+.meta {
+    font-size: 8.5pt;
+    color: #666;
+}
+
+h2 {
+    font-size: 13pt;
+    color: #667eea;
+    border-bottom: 1px solid #d8dcff;
+    padding-bottom: 3pt;
+    margin-top: 22pt;
+    margin-bottom: 10pt;
+    font-weight: bold;
+}
+
+/* Summary stat boxes */
+.summary-grid {
+    display: flex;
+    gap: 12pt;
+    margin-bottom: 6pt;
+}
+
+.stat-box {
+    flex: 1;
+    background: #f4f5ff;
+    border: 1px solid #c8ccf5;
+    border-radius: 4pt;
+    padding: 10pt 14pt;
+    text-align: center;
+}
+
+.stat-value {
+    font-size: 24pt;
+    font-weight: bold;
+    color: #667eea;
+    line-height: 1.1;
+}
+
+.stat-label {
+    font-size: 8pt;
+    color: #666;
+    text-transform: uppercase;
+    letter-spacing: 0.4pt;
+    margin-top: 2pt;
+}
+
+/* Tables */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 9pt;
+    margin-bottom: 10pt;
+}
+
+thead th {
+    background: #667eea;
+    color: white;
+    padding: 6pt 8pt;
+    text-align: left;
+    font-weight: bold;
+}
+
+tbody td {
+    padding: 5pt 8pt;
+    border-bottom: 1px solid #eaebf5;
+    vertical-align: top;
+}
+
+tbody tr:nth-child(even) td {
+    background: #f8f8ff;
+}
+
+/* Link section group header row */
+.group-row td {
+    background: #eef0ff !important;
+    font-weight: bold;
+    color: #444;
+    border-top: 2px solid #c8ccf5;
+    font-size: 9.5pt;
+    padding: 5pt 8pt;
+}
+
+/* Category badges */
+.badge {
+    display: inline-block;
+    padding: 1pt 6pt;
+    border-radius: 3pt;
+    font-size: 7.5pt;
+    font-weight: bold;
+    text-transform: uppercase;
+}
+
+.badge-router   { background: #fde8e8; color: #b03020; }
+.badge-switch   { background: #e3f0fd; color: #1a6fa8; }
+.badge-firewall { background: #fef5e0; color: #b85c00; }
+.badge-ap       { background: #e3fdf0; color: #1a8050; }
+.badge-phone    { background: #f0e8fd; color: #6030a0; }
+.badge-server   { background: #e8f8e8; color: #207020; }
+.badge-other    { background: #f0f0f0; color: #555; }
+
+/* Protocol tag */
+.proto {
+    display: inline-block;
+    padding: 1pt 5pt;
+    border-radius: 2pt;
+    background: #ede8ff;
+    color: #5533aa;
+    font-size: 7.5pt;
+    font-weight: bold;
+}
+"""
+
+
+def _esc(value):
+    """HTML-escape a value, returning empty string for None."""
+    return html.escape(str(value)) if value else ''
+
+
+def _category_badge(cat):
+    cat_lower = (cat or '').lower()
+    css_cls, label = _CATEGORY_BADGE.get(cat_lower, ('badge-other', cat or 'Unknown'))
+    return f'<span class="badge {css_cls}">{_esc(label)}</span>'
+
+
+def _build_pdf_html(data):
+    """Build the complete HTML string for the PDF report."""
     seed_ip = data.get('seed_ip', 'Unknown')
     generated_at = data.get('generated_at', '')
-    elements.append(Paragraph(f'Seed Device: {seed_ip}', normal_style))
-    elements.append(Paragraph(f'Generated: {generated_at}', normal_style))
-
     params = data.get('params', {})
-    if params:
-        max_depth = params.get('max_depth', '')
-        if max_depth:
-            elements.append(Paragraph(f'Max Discovery Depth: {max_depth}', normal_style))
-
-    elements.append(Spacer(1, 12))
-
-    # --- Summary stats ---
-    elements.append(Paragraph('Summary', heading_style))
     summary = data.get('summary', {})
-    summary_table_data = [
-        ['Metric', 'Value'],
-        ['Devices Discovered', str(summary.get('device_count', 0))],
-        ['Links Found', str(summary.get('link_count', 0))],
-    ]
-    failed_count = params.get('failed_count', 0)
-    if failed_count:
-        summary_table_data.append(['Failed Connections', str(failed_count)])
-
-    summary_table = Table(summary_table_data, colWidths=[3 * inch, 2 * inch])
-    summary_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#667eea')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, -1), 10),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f0f0f0')]),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cccccc')),
-        ('LEFTPADDING', (0, 0), (-1, -1), 8),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-        ('TOPPADDING', (0, 0), (-1, -1), 5),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
-    ]))
-    elements.append(summary_table)
-
-    # --- Device inventory ---
-    elements.append(Paragraph('Device Inventory', heading_style))
     devices = data.get('devices', [])
-    if devices:
-        device_table_data = [['Hostname', 'Management IP', 'Category', 'Device Type', 'Platform']]
-        for device in devices:
-            device_table_data.append([
-                device.get('hostname', ''),
-                device.get('mgmt_ip', '') or '',
-                device.get('device_category', '') or '',
-                device.get('device_type', '') or '',
-                device.get('platform', '') or '',
-            ])
-        col_widths = [1.8 * inch, 1.2 * inch, 1.0 * inch, 1.2 * inch, 1.8 * inch]
-        device_table = Table(device_table_data, colWidths=col_widths, repeatRows=1)
-        device_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#667eea')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 9),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f0f0f0')]),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cccccc')),
-            ('LEFTPADDING', (0, 0), (-1, -1), 6),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 6),
-            ('TOPPADDING', (0, 0), (-1, -1), 4),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-            ('WORDWRAP', (0, 0), (-1, -1), True),
-        ]))
-        elements.append(device_table)
-    else:
-        elements.append(Paragraph('No devices found.', normal_style))
-
-    # --- Link inventory ---
-    elements.append(Paragraph('Link Inventory', heading_style))
     links = data.get('links', [])
-    if links:
-        link_table_data = [['Local Device', 'Local Intf', 'Remote Device', 'Remote Intf', 'Remote IP', 'Protocols']]
-        for link in links:
-            link_table_data.append([
-                link.get('local_device', ''),
-                link.get('local_interface', ''),
-                link.get('remote_device', ''),
-                link.get('remote_interface', ''),
-                link.get('remote_ip', '') or '',
-                link.get('protocols', '') or '',
-            ])
-        col_widths = [1.4 * inch, 1.0 * inch, 1.4 * inch, 1.0 * inch, 1.0 * inch, 0.9 * inch]
-        link_table = Table(link_table_data, colWidths=col_widths, repeatRows=1)
-        link_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#667eea')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 9),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f0f0f0')]),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cccccc')),
-            ('LEFTPADDING', (0, 0), (-1, -1), 6),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 6),
-            ('TOPPADDING', (0, 0), (-1, -1), 4),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-            ('WORDWRAP', (0, 0), (-1, -1), True),
-        ]))
-        elements.append(link_table)
-    else:
-        elements.append(Paragraph('No links found.', normal_style))
 
-    doc.build(elements)
-    buffer.seek(0)
-    return buffer.read()
+    max_depth = params.get('max_depth', '')
+    failed_count = params.get('failed_count', 0)
+
+    # --- Meta line ---
+    meta_parts = [f'Seed: {_esc(seed_ip)}', f'Generated: {_esc(generated_at)}']
+    if max_depth:
+        meta_parts.append(f'Max Depth: {_esc(str(max_depth))}')
+    meta_html = ' &nbsp;·&nbsp; '.join(meta_parts)
+
+    # --- Summary stat boxes ---
+    failed_box = ''
+    if failed_count:
+        failed_box = (
+            f'<div class="stat-box">'
+            f'<div class="stat-value">{failed_count}</div>'
+            f'<div class="stat-label">Failed</div>'
+            f'</div>'
+        )
+    summary_html = (
+        f'<div class="summary-grid">'
+        f'<div class="stat-box">'
+        f'<div class="stat-value">{summary.get("device_count", 0)}</div>'
+        f'<div class="stat-label">Devices</div>'
+        f'</div>'
+        f'<div class="stat-box">'
+        f'<div class="stat-value">{summary.get("link_count", 0)}</div>'
+        f'<div class="stat-label">Links</div>'
+        f'</div>'
+        f'{failed_box}'
+        f'</div>'
+    )
+
+    # --- Device inventory table ---
+    if devices:
+        device_rows = ''
+        for d in devices:
+            device_rows += (
+                f'<tr>'
+                f'<td><strong>{_esc(d.get("hostname", ""))}</strong></td>'
+                f'<td>{_esc(d.get("mgmt_ip", ""))}</td>'
+                f'<td>{_category_badge(d.get("device_category", ""))}</td>'
+                f'<td>{_esc(d.get("device_type", ""))}</td>'
+                f'<td>{_esc(d.get("platform", ""))}</td>'
+                f'</tr>'
+            )
+        device_section = (
+            f'<table>'
+            f'<thead><tr>'
+            f'<th>Hostname</th><th>Mgmt IP</th><th>Category</th>'
+            f'<th>Device Type</th><th>Platform</th>'
+            f'</tr></thead>'
+            f'<tbody>{device_rows}</tbody>'
+            f'</table>'
+        )
+    else:
+        device_section = '<p>No devices found.</p>'
+
+    # --- Link inventory table (grouped by local device) ---
+    if links:
+        # Group links by local device
+        groups = {}
+        for link in links:
+            src = link.get('local_device', 'Unknown')
+            groups.setdefault(src, []).append(link)
+
+        link_rows = ''
+        for src in sorted(groups.keys()):
+            link_rows += (
+                f'<tr class="group-row"><td colspan="5">{_esc(src)}</td></tr>'
+            )
+            for link in sorted(groups[src], key=lambda x: x.get('local_interface', '')):
+                proto = link.get('protocols', '')
+                proto_html = f'<span class="proto">{_esc(proto)}</span>' if proto else ''
+                link_rows += (
+                    f'<tr>'
+                    f'<td>{_esc(link.get("local_interface", ""))}</td>'
+                    f'<td>{_esc(link.get("remote_device", ""))}</td>'
+                    f'<td>{_esc(link.get("remote_interface", ""))}</td>'
+                    f'<td>{_esc(link.get("remote_ip", ""))}</td>'
+                    f'<td>{proto_html}</td>'
+                    f'</tr>'
+                )
+        link_section = (
+            f'<table>'
+            f'<thead><tr>'
+            f'<th>Local Interface</th><th>Remote Device</th>'
+            f'<th>Remote Interface</th><th>Remote IP</th><th>Protocols</th>'
+            f'</tr></thead>'
+            f'<tbody>{link_rows}</tbody>'
+            f'</table>'
+        )
+    else:
+        link_section = '<p>No links found.</p>'
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>{_PDF_CSS}</style>
+</head>
+<body>
+
+<div class="report-header">
+  <h1>Network Topology Report</h1>
+  <div class="meta">{meta_html}</div>
+</div>
+
+<h2>Summary</h2>
+{summary_html}
+
+<h2>Device Inventory</h2>
+{device_section}
+
+<h2>Link Inventory</h2>
+{link_section}
+
+</body>
+</html>"""
+
+
+def generate_pdf(data):
+    """Return topology data as a PDF (bytes) using WeasyPrint."""
+    html_source = _build_pdf_html(data)
+    return weasyprint.HTML(string=html_source).write_pdf()
