@@ -574,10 +574,10 @@ class NetworkVisualizer:
         
         // Create the simulation
         let simulation = d3.forceSimulation(nodes)
-            .force("link", d3.forceLink(links).id(d => d.id).distance(150))
-            .force("charge", d3.forceManyBody().strength(-300))
+            .force("link", d3.forceLink(links).id(d => d.id).distance(180))
+            .force("charge", d3.forceManyBody().strength(-500))
             .force("center", d3.forceCenter(width / 2, height / 2))
-            .force("collision", d3.forceCollide().radius(40));
+            .force("collision", d3.forceCollide().radius(60));
         
         // Create links
         const link = g.append("g")
@@ -912,21 +912,44 @@ class NetworkVisualizer:
             
             // Clone the SVG and modify colors for light background
             const svgClone = svgElement.cloneNode(true);
-            
-            // Change text colors to black for visibility on white
+
+            // text-shadow is CSS-only and does not render when SVG is drawn to canvas.
+            // Use SVG paint-order + stroke to create a visible halo on white background.
             svgClone.querySelectorAll('.node-label').forEach(label => {{
-                label.setAttribute('fill', '#000000');
+                label.setAttribute('fill', '#111111');
+                label.setAttribute('stroke', '#ffffff');
+                label.setAttribute('stroke-width', '3');
+                label.setAttribute('paint-order', 'stroke');
                 label.style.textShadow = 'none';
             }});
-            
+
             svgClone.querySelectorAll('.interface-label').forEach(label => {{
-                label.setAttribute('fill', '#CC6600');
+                label.setAttribute('fill', '#994400');
+                label.setAttribute('stroke', '#ffffff');
+                label.setAttribute('stroke-width', '3');
+                label.setAttribute('paint-order', 'stroke');
                 label.style.textShadow = 'none';
             }});
-            
-            // Change link colors to dark gray
-            svgClone.querySelectorAll('.link').forEach(link => {{
-                link.setAttribute('stroke', '#666666');
+
+            svgClone.querySelectorAll('.l3-label').forEach(label => {{
+                label.setAttribute('stroke', '#000000');
+                label.setAttribute('stroke-width', '3');
+                label.setAttribute('paint-order', 'stroke');
+            }});
+
+            // Adapt node and link colors for white background
+            svgClone.querySelectorAll('.node').forEach(n => {{
+                n.setAttribute('stroke', '#444444');
+            }});
+
+            svgClone.querySelectorAll('.link-l2').forEach(link => {{
+                link.setAttribute('stroke', '#888888');
+            }});
+            svgClone.querySelectorAll('.link-l3').forEach(link => {{
+                link.setAttribute('stroke', '#CC5500');
+            }});
+            svgClone.querySelectorAll('.link-both').forEach(link => {{
+                link.setAttribute('stroke', '#7755CC');
             }});
             
             // Serialize modified SVG to string
