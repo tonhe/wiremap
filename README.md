@@ -287,3 +287,7 @@ To add support for new device types:
 - **Update patterns:** Add patterns as you discover new device types
 - **Test credentials:** Verify SSH access before running discovery
 - **Network segments:** May need to run from jump host if devices are isolated
+
+## 🤖 AI-Generated Code
+
+This project was developed with [Claude Code](https://claude.ai/claude-code), Anthropic's AI coding assistant (claude-sonnet-4-6). The application logic, parsers, visualizations, and supporting infrastructure were all written through an iterative, conversational development process with Claude as the primary code author.
