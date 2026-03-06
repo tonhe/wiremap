@@ -85,7 +85,7 @@ def discover():
     username = request.form.get('username', '').strip()
     password = request.form.get('password', '')
     max_depth = int(request.form.get('max_depth', 3))
-    max_workers = int(request.form.get('max_workers', 5))
+    max_workers = int(request.form.get('max_workers', 10))
     protocol = request.form.get('protocol', 'ssh').strip()
     filters = {
         'include_routers': request.form.get('include_routers') == 'true',

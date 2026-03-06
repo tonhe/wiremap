@@ -1,4 +1,8 @@
+.venv/
 logs/*
 __pycache__/
 *.pyc
 *.pyo
+example.xlsx
+.worktrees/
+inventories/

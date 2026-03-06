@@ -52,7 +52,7 @@ class DiscoveryEngine:
                  filters: dict = None,
                  inventory_dir: str = None,
                  device_detector=None,
-                 max_workers: int = 5):
+                 max_workers: int = 10):
         self.seed_ip = seed_ip
         self.seed_device_type = seed_device_type
         self.username = username

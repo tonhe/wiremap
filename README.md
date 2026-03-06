@@ -1,95 +1,112 @@
-# Network Neighbor Mapper
+# Wiremap
 
-A Flask-based web application that discovers network topology using CDP and LLDP protocols. Automatically detects device types and recursively maps network neighbors.
+**Network topology discovery and assessment tool.** Connects to a seed device, discovers neighbors via CDP/LLDP, recursively crawls the network, collects data from every device, and generates detailed assessment reports.
 
-## 🎯 Features
+> Built on [neighbor-mapper](https://github.com/aconaway-rens/neighbor-mapper) by **Aaron Conaway**. Wiremap extends his original CDP/LLDP discovery tool with a modular collector/report architecture, multi-vendor support, recursive BFS crawling, discovery inventories, and automated network assessment reporting.
 
-- **Web Interface** - Easy-to-use HTML form for discovery
-- **Interactive Network Diagrams** - Beautiful, interactive visualizations with color-coded nodes and interface labels
-- **Multi-Protocol** - Discovers neighbors via both CDP and LLDP
-- **Multi-Vendor Support** - Cisco, Arista, Juniper, Palo Alto, MikroTik, Fortinet, HPE, Dell, Extreme, Ubiquiti, Barracuda
-- **Smart Detection** - YAML-based device type detection
-- **Recursive Discovery** - Automatically crawls neighbors (routers/switches only)
-- **Device Type Filtering** - Choose which devices to include (routers, switches, phones, servers, APs)
-- **Interface Mapping** - Shows local and remote interface connections
-- **Management IPs** - Displays IP addresses for discovered devices
-- **Text-Based Map** - Clean ASCII tree visualization
-- **Docker Ready** - Containerized for easy deployment
+---
 
-## 📋 Prerequisites
+## Features
 
-- Docker and Docker Compose
-- Network access to devices
-- SSH credentials with appropriate privileges
-- Devices with CDP and/or LLDP enabled
+### Discovery
+- **SSH, Telnet, or Auto-detect** -- Tries SSH first, falls back to Telnet automatically
+- **Recursive BFS Crawling** -- Discovers neighbors hop-by-hop from a seed device with configurable depth (1-5)
+- **Multi-threaded** -- Parallel device collection with configurable worker threads (1-20)
+- **L3 Neighbor Discovery** -- Optionally discover OSPF, EIGRP, BGP, and ISIS neighbors alongside CDP/LLDP
+- **Device Type Auto-detection** -- YAML-based pattern matching against CDP platform strings and LLDP system descriptions
+- **Loop Prevention** -- Tracks visited devices and enforces depth limits
 
-## 🚀 Quick Start
+### Multi-Vendor Support
+Cisco IOS / IOS-XE / NX-OS / IOS-XR, Arista EOS, Juniper JunOS, Palo Alto PAN-OS, MikroTik RouterOS, Fortinet FortiGate, HPE Comware / ProCurve, Aruba OS-CX, Dell OS10, Extreme ExtremeXOS / VOSS, Ubiquiti EdgeOS, Barracuda
 
-### Option 1: Docker Compose (Recommended)
+### Data Collection (15 Collectors)
+All collectors run automatically on every device -- no pre-selection needed.
+
+| Collector | Data Gathered |
+|-----------|--------------|
+| CDP/LLDP | Neighbor adjacencies and protocols |
+| Interfaces | Port status, descriptions, IP assignments, etherchannel |
+| Device Inventory | Version, hardware modules, serial numbers, stack members |
+| Config | Running configuration backup |
+| ARP | ARP table entries with interface mappings |
+| MAC Table | MAC address to port mappings |
+| STP/VLAN | Root bridges, blocked ports, VLAN list, VTP status |
+| STP Detail | Port roles, costs, topology change counts, inconsistent ports |
+| L3 Routing | OSPF/EIGRP/BGP/ISIS neighbors and route tables |
+| Routing Detail | Protocol summaries, route counts by protocol |
+| VRF | VRF definitions and interface assignments |
+| Switchport | Port-security, BPDU guard, storm-control, trunk config |
+| HSRP | HSRP/VRRP state, virtual IPs, active/standby roles |
+| Edge Services | ACLs, applied ACLs per interface, proxy-ARP, uRPF |
+| NTP/Logging | NTP sync, logging config, SNMP settings (credentials redacted) |
+
+Parsing uses [NTC Templates](https://github.com/networktocode/ntc-templates) (TextFSM) with regex fallbacks for vendor-aware structured output.
+
+### Reports (On-Demand)
+Generate reports from the results page after discovery or from a saved inventory. Reports are grouped by category.
+
+| Report | Format | Description |
+|--------|--------|-------------|
+| Topology Map | HTML | Interactive D3.js network diagram with color-coded device types |
+| Device Inventory | XLSX | Device summary, stack members, modules and line cards |
+| Link Inventory | XLSX | All discovered neighbor links (CDP/LLDP + L3) |
+| Interface Summary | XLSX | Port status, descriptions, IP assignments |
+| ARP Summary | XLSX | ARP entries by device with summary and detail tabs |
+| MAC Table | XLSX | MAC-to-port mappings per device |
+| L2 Discovery | XLSX | VLAN documentation, routed interfaces, anomaly findings |
+| Routing Summary | XLSX | Protocol neighbors, route tables, routed interfaces |
+| Config Archive | ZIP | Running configs as individual text files |
+
+### Inventory Management
+- Every discovery saves a JSON inventory file (raw command output + parsed data)
+- List, download, and delete saved inventories from the UI
+- Load any saved inventory to generate reports without re-scanning
+- Export full ZIP archives (inventory JSON + device configs)
+
+### Demo Mode
+Built-in mock device simulator with a multi-vendor topology for testing without real hardware. Use seed IP `192.168.1.1` with any credentials.
+
+---
+
+## Quick Start
+
+### Docker Compose (Recommended)
 
 ```bash
-# Clone or extract the project
-cd neighbor-mapper-v2
-
-# Start the application
+git clone <repo-url>
+cd wiremap
 docker-compose up -d
-
-# View logs
-docker-compose logs -f
-
-# Stop the application
-docker-compose down
 ```
 
-Access the web interface at: **http://localhost:8000**
+Access the UI at **http://localhost:8888**
 
-### Option 2: Docker Build
+Persistent volumes for logs, config, and inventories are configured automatically.
 
-```bash
-# Build the image
-docker build -t neighbor-mapper .
-
-# Run the container
-docker run -d -p 8000:8000 --name neighbor-mapper neighbor-mapper
-
-# View logs
-docker logs -f neighbor-mapper
-```
-
-### Option 3: Local Development
+### Local Development
 
 ```bash
-# Install dependencies
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-
-# Run the application
-cd app
-python app.py
+cd app && python app.py
 ```
 
-## 🎮 Usage
+## Usage
 
-1. **Open Web Interface** - Navigate to http://localhost:8000
-2. **Enter Seed Device** - Provide IP address of starting device
-3. **Select Device Type** - Choose the Netmiko device type from dropdown
-4. **Enter Credentials** - SSH username and password
-5. **Set Depth** - Choose how many hops to discover (1-5)
-6. **Start Discovery** - Click "Start Discovery" button
-7. **View Results** - See topology map with devices, interfaces, and IPs
+1. Open the web UI at `http://localhost:8888`
+2. Enter a seed device IP and select the platform type
+3. Choose connection protocol (SSH / Telnet / Auto)
+4. Provide credentials
+5. Set crawl depth and worker threads (up to 20)
+6. Toggle device type filters (routers, switches, phones, servers, APs)
+7. Click **Start Discovery**
+8. Generate reports on-demand from the results page
 
-## 📊 Example Output
+### Load Previous Inventory
 
-```
-CORE-SW-01 (192.168.1.1)
-├─[CDP+LLDP] Gi1/0/1 ↔ Gi1/0/48 (192.168.1.10)
-│   DIST-SW-01 (192.168.1.10)
-│   └─[CDP+LLDP] Gi1/0/10 ↔ Gi0/1 (192.168.1.20)
-│      ACCESS-SW-01 (192.168.1.20)
-└─[CDP+LLDP] Gi1/0/2 ↔ Gi1/0/48 (192.168.1.11)
-   DIST-SW-02 (192.168.1.11)
-```
+Upload a saved inventory JSON or select from the inventory list to generate reports without re-scanning.
 
-## ⚙️ Configuration
+## Configuration
 
 ### Device Type Detection
 
@@ -101,193 +118,53 @@ device_types:
     platforms:
       - catalyst
       - c3750
-      - c2960
     system_descriptions:
       - "Cisco IOS Software"
     priority: 50
 ```
 
-**Pattern Matching:**
-- `platforms`: Match against CDP platform string
-- `system_descriptions`: Match against LLDP system description
-- `priority`: Higher priority patterns are preferred (0-100)
-
-**Add New Patterns:**
-1. Edit `config/device_type_patterns.yaml`
-2. Add platform or description patterns
-3. Restart the container: `docker-compose restart`
-
 ### Discovery Settings
-
-In `config/device_type_patterns.yaml`:
 
 ```yaml
 discovery:
-  max_depth: 3              # Default maximum hops
-  connection_timeout: 15    # SSH connection timeout (seconds)
-  command_timeout: 30       # Command execution timeout (seconds)
+  max_depth: 3
+  connection_timeout: 15
+  command_timeout: 30
 ```
 
 ### Capability Filtering
 
-Control which devices are crawled:
+Control which device types are crawled during recursive discovery:
 
 ```yaml
 allowed_capabilities:
-  - Router    # Full word
+  - Router
   - Switch
-  - R         # Abbreviated
-  - S
-  - B         # Bridge (switch)
+  - Bridge
 ```
 
-Devices without these capabilities (like phones, access points) are ignored.
-
-## 🗂️ Project Structure
+## Project Structure
 
 ```
-neighbor-mapper-v2/
+wiremap/
 ├── app/
-│   ├── app.py              # Flask application
-│   ├── discovery.py        # Topology discovery engine
-│   ├── parsers.py          # CDP/LLDP parsers
-│   └── device_detector.py  # Device type detection
+│   ├── app.py                # Flask application
+│   ├── discovery.py          # BFS topology discovery engine
+│   ├── connection_manager.py # SSH/Telnet connection handling
+│   ├── device_detector.py    # Device type detection
+│   ├── parsers.py            # CDP/LLDP parsers
+│   ├── mock_devices.py       # Demo mode simulator
+│   ├── collectors/           # 15 modular data collectors
+│   └── reports/              # On-demand report generators
 ├── config/
-│   └── device_type_patterns.yaml  # Detection patterns
-├── templates/
-│   └── index.html          # Web interface
-├── logs/                   # Application logs
-├── Dockerfile              # Container definition
-├── docker-compose.yml      # Docker Compose config
-├── requirements.txt        # Python dependencies
-└── README.md              # This file
+│   └── device_type_patterns.yaml
+├── templates/                # Jinja2 web UI templates
+├── inventories/              # Saved discovery inventories
+├── Dockerfile
+├── docker-compose.yml
+└── requirements.txt
 ```
 
-## 🔍 How It Works
+## License
 
-1. **Initial Connection**
-   - SSH to seed device using provided credentials
-   - Extract hostname from prompt
-
-2. **Neighbor Discovery**
-   - Run `show cdp neighbors detail`
-   - Run `show lldp neighbors detail`
-   - Parse outputs to extract neighbor information
-
-3. **Device Type Detection**
-   - Match platform strings against YAML patterns
-   - Determine appropriate Netmiko device type
-   - Check capabilities (Router/Switch only)
-
-4. **Recursive Crawl**
-   - Queue neighbors for discovery
-   - Repeat process for each neighbor
-   - Track visited devices to avoid loops
-   - Respect maximum depth setting
-
-5. **Topology Rendering**
-   - Build adjacency graph
-   - Generate ASCII tree visualization
-   - Show interface mappings and IPs
-
-## 📝 Logs
-
-Logs are written to `logs/app.log` and displayed in the container output.
-
-**View logs:**
-```bash
-# Docker Compose
-docker-compose logs -f
-
-# Docker
-docker logs -f neighbor-mapper
-
-# Local file
-tail -f logs/app.log
-```
-
-**Log Levels:**
-- INFO: Discovery progress, device connections
-- WARNING: Failed CDP/LLDP queries, skipped devices
-- ERROR: Connection failures, authentication errors
-
-## 🐛 Troubleshooting
-
-### No neighbors found
-- **Check:** CDP/LLDP enabled on devices
-- **Command:** `show cdp neighbors` / `show lldp neighbors`
-- **Fix:** `cdp run` / `lldp run` in global config
-
-### Authentication failed
-- **Check:** Username/password correct
-- **Check:** Account has privilege level 15 or appropriate access
-- **Fix:** Test SSH manually: `ssh user@device-ip`
-
-### Connection timeout
-- **Check:** Network connectivity to device
-- **Check:** SSH enabled and accessible
-- **Fix:** Verify firewall rules, ping device
-
-### Wrong device type detected
-- **Check:** Pattern matching in YAML config
-- **Fix:** Add specific platform pattern for your device
-- **Example:** Add `c9300-24p` to cisco_xe platforms
-
-### Device skipped during crawl
-- **Check:** Device capabilities
-- **Reason:** Only Router/Switch devices are crawled
-- **Fix:** Verify device is reporting R or S capability
-
-## 🔒 Security Considerations
-
-- **Credentials:** Passwords are not stored, only used during discovery
-- **Network Access:** Ensure container can reach network devices
-- **SSH Keys:** Currently uses password auth (key auth can be added)
-- **HTTPS:** Consider adding TLS/SSL for production use
-- **Authentication:** Add web app authentication for production
-
-## 🚧 Limitations
-
-- **SSH Only:** Telnet not supported
-- **Cisco Focus:** Best tested on Cisco devices
-- **Single Credential:** Uses same credentials for all devices
-- **No Persistence:** Discovery results not saved (add database for this)
-- **Text Output:** No graphical topology (can add vis.js, D3, etc.)
-
-## 🔮 Future Enhancements
-
-- [ ] Save topologies to database
-- [ ] Export to formats (JSON, GraphML, CSV)
-- [ ] Graphical topology visualization
-- [ ] Multiple credential sets
-- [ ] SSH key authentication
-- [ ] Web authentication/authorization
-- [ ] REST API endpoints
-- [ ] Scheduled discoveries
-- [ ] Change detection
-- [ ] More vendor support
-
-## 📄 License
-
-Open source - feel free to modify and extend!
-
-## 🤝 Contributing
-
-To add support for new device types:
-
-1. Edit `config/device_type_patterns.yaml`
-2. Add platform/description patterns
-3. Set appropriate priority
-4. Test and submit PR
-
-## 💡 Tips
-
-- **Start small:** Use depth=1 for initial testing
-- **Check logs:** Monitor logs during discovery
-- **Update patterns:** Add patterns as you discover new device types
-- **Test credentials:** Verify SSH access before running discovery
-- **Network segments:** May need to run from jump host if devices are isolated
-
-## 🤖 AI-Generated Code
-
-This project was developed with [Claude Code](https://claude.ai/claude-code), Anthropic's AI coding assistant (claude-sonnet-4-6). The application logic, parsers, visualizations, and supporting infrastructure were all written through an iterative, conversational development process with Claude as the primary code author.
+Open source -- feel free to modify and extend.
