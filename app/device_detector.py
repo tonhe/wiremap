@@ -127,43 +127,45 @@ class DeviceTypeDetector:
             - has_routing: Boolean indicating if device has Router capability
         """
         has_routing = any(c in caps for c in ['ROUTER', 'R'])
-        
+        has_switch = any(c in caps for c in ['SWITCH', 'S', 'BRIDGE', 'B'])
+
         # Platform-based detection for firewalls (check FIRST before capability-based)
-        # Firewalls typically report "Router" capability but we can detect them by platform or system description
-        firewall_keywords = ['palo alto', 'paloalto', 'fortinet', 'fortigate', 'checkpoint', 
+        firewall_keywords = ['palo alto', 'paloalto', 'fortinet', 'fortigate', 'checkpoint',
                             'cisco asa', 'firepower', 'sophos', 'sonicwall', 'watchguard',
                             'barracuda', 'juniper srx', 'pa-', 'fw-', 'pan-os']
-        
-        # Check both platform and system_desc (LLDP uses system_desc for platform info)
+
         text_to_check = (platform + " " + system_desc).lower()
         if any(keyword in text_to_check for keyword in firewall_keywords):
             return ('firewall', has_routing)
-        
+
         # Access Point detection (check BEFORE bridge, since Trans-Bridge = AP)
         if any(c in caps for c in ['WLAN', 'W', 'AP']):
             return ('access_point', has_routing)
-        
-        # Check for Trans-Bridge (Cisco APs report as this)
-        if 'TRANS-BRIDGE' in caps:
-            return ('access_point', has_routing)
-        
-        # Phone detection
-        if any(c in caps for c in ['PHONE', 'P', 'T']):  # T = telephone
+
+        # Trans-Bridge: could be AP or switch. Check for AP indicators first.
+        # Cisco APs often report Trans-Bridge capability.
+        if 'TRANS-BRIDGE' in caps or 'T' in caps:
+            # If it also has switch/bridge caps, it's a switch (e.g., Nexus with Trans-Bridge)
+            if not has_switch:
+                return ('access_point', has_routing)
+
+        # Switch/Bridge detection - CHECK BEFORE phone/server
+        if has_switch:
+            return ('switch', has_routing)
+
+        # Phone detection — use only unambiguous codes
+        # CDP detail uses full word "Phone"; single-letter 'H' can mean Host or CVTA/Phone
+        if 'PHONE' in caps:
             return ('phone', has_routing)
-        
+
         # Server/Host detection
         if any(c in caps for c in ['HOST', 'H', 'SERVER']):
             return ('server', has_routing)
-        
-        # Switch/Bridge detection - CHECK THIS BEFORE ROUTER
-        # Many switches report both "Router Switch" but should be categorized as switches
-        if any(c in caps for c in ['SWITCH', 'S', 'BRIDGE', 'B']):
-            return ('switch', has_routing)
-        
-        # Router detection - AFTER switch check
+
+        # Router detection
         if has_routing:
             return ('router', has_routing)
-        
+
         # Default to other
         return ('other', has_routing)
     

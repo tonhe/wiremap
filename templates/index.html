@@ -3,405 +3,611 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Network Neighbor Mapper</title>
+    <title>Wiremap</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
+        :root {
+            --bg-page:        #0b1219;
+            --bg-card:        #131d2a;
+            --bg-card-alt:    #182436;
+            --bg-input:       #0e1620;
+            --bg-hover:       #1a2940;
+            --bg-selected:    #1e3a5f;
+            --border:         #1e2d3d;
+            --border-subtle:  #162231;
+            --border-focus:   #2d7ff9;
+            --accent:         #2d7ff9;
+            --accent-hover:   #1a6de0;
+            --accent-muted:   rgba(45, 127, 249, 0.15);
+            --cyan:           #06d6a0;
+            --cyan-muted:     rgba(6, 214, 160, 0.12);
+            --success:        #06d6a0;
+            --warning:        #fbbf24;
+            --danger:         #f43f5e;
+            --info:           #38bdf8;
+            --text:           #c9d6e3;
+            --text-bright:    #e8eef4;
+            --text-muted:     #5e7a94;
+            --text-dim:       #3a5068;
+            --radius:         3px;
+            --radius-lg:      4px;
+            --transition:     150ms ease;
+        }
+
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
-        
+
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: var(--bg-page);
+            background-image:
+                radial-gradient(ellipse at 20% 0%, rgba(45, 127, 249, 0.04) 0%, transparent 60%),
+                radial-gradient(ellipse at 80% 100%, rgba(6, 214, 160, 0.03) 0%, transparent 50%);
+            font-family: 'IBM Plex Sans', sans-serif;
+            color: var(--text);
             min-height: 100vh;
-            padding: 20px;
+            padding: 32px 24px;
         }
-        
+
         .container {
-            max-width: 1200px;
+            max-width: 960px;
             margin: 0 auto;
         }
-        
+
         .header {
-            background: white;
-            border-radius: 10px;
-            padding: 30px;
-            margin-bottom: 20px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            margin-bottom: 16px;
         }
-        
+
         h1 {
-            color: #333;
-            margin-bottom: 10px;
+            font-family: 'Barlow Semi Condensed', sans-serif;
+            font-weight: 700;
+            font-size: 28px;
+            color: var(--text-bright);
+            line-height: 1.2;
+            text-transform: uppercase;
+            letter-spacing: 0.02em;
         }
-        
-        .subtitle {
-            color: #666;
-            font-size: 14px;
+
+        h2 {
+            font-family: 'Barlow Semi Condensed', sans-serif;
+            font-weight: 600;
+            font-size: 20px;
+            color: var(--text-bright);
+            margin-bottom: 16px;
+            text-transform: uppercase;
+            letter-spacing: 0.02em;
         }
-        
-        .card {
-            background: white;
-            border-radius: 10px;
-            padding: 30px;
-            margin-bottom: 20px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-        }
-        
-        .form-group {
-            margin-bottom: 20px;
-        }
-        
+
         label {
             display: block;
-            font-weight: 600;
-            margin-bottom: 8px;
-            color: #333;
-        }
-        
-        input, select {
-            width: 100%;
-            padding: 12px;
-            border: 2px solid #e0e0e0;
-            border-radius: 6px;
+            font-weight: 500;
+            margin-bottom: 6px;
+            color: var(--text);
             font-size: 14px;
-            transition: border-color 0.3s;
         }
-        
+
+        .helper-text {
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+        }
+
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        .text-muted { color: var(--text-muted); }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 24px;
+            margin-bottom: 16px;
+        }
+
+        .form-group { margin-bottom: 20px; }
+        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .form-row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }
+
+        input, select {
+            background: var(--bg-input);
+            color: var(--text-bright);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 10px 12px;
+            font-family: 'IBM Plex Sans', sans-serif;
+            font-size: 14px;
+            transition: border-color var(--transition);
+            width: 100%;
+        }
         input:focus, select:focus {
             outline: none;
-            border-color: #667eea;
+            border-color: var(--border-focus);
+            box-shadow: 0 0 0 2px var(--accent-muted);
         }
-        
-        .form-row {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-        }
-        
-        .btn {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 14px 30px;
-            border: none;
-            border-radius: 6px;
-            font-size: 16px;
+        input::placeholder { color: var(--text-dim); }
+
+        .btn-primary {
+            background: var(--accent);
+            color: #fff;
+            font-family: 'IBM Plex Sans', sans-serif;
             font-weight: 600;
+            font-size: 14px;
+            padding: 10px 24px;
+            border: none;
+            border-radius: var(--radius);
             cursor: pointer;
-            transition: transform 0.2s, box-shadow 0.2s;
+            transition: background var(--transition);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
             width: 100%;
         }
-        
-        .btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
-        }
-        
-        .btn:active {
-            transform: translateY(0);
-        }
-        
+        .btn-primary:hover { background: var(--accent-hover); }
+        .btn-primary:active { transform: scale(0.98); }
+
         .alert {
-            padding: 15px 20px;
-            border-radius: 6px;
-            margin-bottom: 20px;
-            font-weight: 500;
-        }
-        
-        .alert-error {
-            background: #fee;
-            border-left: 4px solid #c33;
-            color: #c33;
-        }
-        
-        .alert-success {
-            background: #efe;
-            border-left: 4px solid #3c3;
-            color: #3c3;
-        }
-        
-        .topology-output {
-            background: #1e1e1e;
-            color: #d4d4d4;
-            padding: 20px;
-            border-radius: 6px;
-            font-family: 'Courier New', monospace;
+            padding: 12px 16px;
+            border-radius: var(--radius);
+            border-left: 3px solid;
             font-size: 13px;
-            line-height: 1.6;
-            overflow-x: auto;
-            white-space: pre;
+            margin-bottom: 16px;
         }
-        
-        .summary {
-            background: #f8f9fa;
-            padding: 20px;
-            border-radius: 6px;
-            margin-bottom: 20px;
+        .alert-error {
+            background: rgba(244, 63, 94, 0.08);
+            border-left-color: var(--danger);
+            color: var(--danger);
+        }
+        .alert-success {
+            background: rgba(6, 214, 160, 0.08);
+            border-left-color: var(--success);
+            color: var(--success);
+        }
+
+        /* Tabs */
+        .tab-bar {
+            display: flex;
+            gap: 0;
+            border-bottom: 1px solid var(--border);
+        }
+        .tab-bar button {
+            background: none;
+            border: none;
+            border-bottom: 2px solid transparent;
+            color: var(--text-muted);
+            font-family: 'Barlow Semi Condensed', sans-serif;
+            font-weight: 600;
+            font-size: 15px;
+            padding: 12px 24px;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            transition: color var(--transition), border-color var(--transition);
+        }
+        .tab-bar button.active {
+            color: var(--text-bright);
+            border-bottom-color: var(--accent);
+        }
+        .tab-bar button:hover:not(.active) { color: var(--text); }
+
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        .tab-body {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-top: none;
+            border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+            padding: 24px;
+            margin-bottom: 16px;
+        }
+
+        /* Checkbox grid */
+        .checkbox-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+            background: var(--bg-card-alt);
+            padding: 15px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
         }
-        
-        .summary-item {
+        .checkbox-grid label {
+            display: flex;
+            align-items: center;
+            font-weight: normal;
+            cursor: pointer;
+            color: var(--text);
+        }
+        .checkbox-grid input[type="checkbox"] {
+            width: auto;
+            margin-right: 8px;
+            accent-color: var(--accent);
+        }
+
+        /* Stat tiles */
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .stat-tile {
+            background: var(--bg-card-alt);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 16px;
             text-align: center;
         }
-        
-        .summary-value {
-            font-size: 32px;
-            font-weight: bold;
-            color: #667eea;
+        .stat-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 36px;
+            font-weight: 500;
+            color: var(--cyan);
+            line-height: 1;
         }
-        
-        .summary-label {
-            color: #666;
+        .stat-label {
+            font-family: 'IBM Plex Sans', sans-serif;
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-top: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        /* Download grid */
+        .download-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 12px;
+        }
+        .download-card {
+            display: block;
+            padding: 14px 18px;
+            background: var(--bg-card-alt);
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--accent);
+            border-radius: var(--radius);
+            text-decoration: none;
+            color: var(--text);
+            transition: border-color var(--transition);
+        }
+        .download-card:hover { border-color: var(--border-focus); }
+        .dl-label { font-weight: 600; font-size: 14px; }
+        .dl-format {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 4px;
+            text-transform: uppercase;
+        }
+
+        /* Report cards */
+        .report-card {
+            background: var(--bg-card-alt);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 6px;
+            transition: border-color var(--transition);
+        }
+        .report-card:hover { border-color: var(--border-focus); }
+        .report-card.disabled { opacity: 0.4; pointer-events: none; }
+        .report-name {
+            font-family: 'IBM Plex Sans', sans-serif;
+            font-weight: 600;
             font-size: 14px;
-            margin-top: 5px;
+            color: var(--text-bright);
         }
-        
-        .info-box {
-            background: #e3f2fd;
-            border-left: 4px solid #2196f3;
-            padding: 15px;
-            border-radius: 6px;
-            margin-top: 20px;
+        .report-desc {
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-top: 2px;
         }
-        
-        .info-box h3 {
-            color: #1976d2;
-            margin-bottom: 10px;
-            font-size: 16px;
+        .report-format {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            color: var(--text-dim);
+            text-transform: uppercase;
         }
-        
-        .info-box ul {
-            margin-left: 20px;
-            color: #555;
+
+        /* Category headers */
+        .category-header {
+            font-family: 'Barlow Semi Condensed', sans-serif;
+            font-weight: 600;
+            font-size: 13px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            margin-top: 24px;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid var(--border-subtle);
         }
-        
-        .info-box li {
-            margin-bottom: 5px;
+
+        /* Inventory management */
+        .inventory-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            margin-bottom: 6px;
+            background: var(--bg-card-alt);
         }
-        
+        .inv-actions { display: flex; gap: 6px; }
+        .btn-sm {
+            padding: 4px 10px;
+            font-size: 13px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--bg-card);
+            color: var(--text);
+            cursor: pointer;
+            text-decoration: none;
+            font-family: 'IBM Plex Sans', sans-serif;
+        }
+        .btn-sm.btn-danger { color: var(--danger); border-color: var(--danger); }
+        .btn-sm.btn-danger:hover { background: rgba(244, 63, 94, 0.1); }
+
         @media (max-width: 768px) {
-            .form-row {
-                grid-template-columns: 1fr;
-            }
+            .form-row, .form-row-3 { grid-template-columns: 1fr; }
+            .checkbox-grid { grid-template-columns: 1fr; }
+            .stat-grid { grid-template-columns: 1fr 1fr; }
+        }
+        @media (max-width: 480px) {
+            .stat-grid { grid-template-columns: 1fr; }
         }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🗺️ Network Neighbor Mapper</h1>
-            <p class="subtitle">Discover network topology using CDP and LLDP</p>
-            <p style="margin-top: 10px; font-size: 14px; color: #888;">v{{ version }}</p>
+            <h1>Wiremap</h1>
+            <p class="text-muted" style="margin-top: 4px;">Network discovery, assessment &amp; compliance reporting</p>
+            <p class="mono" style="margin-top: 8px; font-size: 13px; color: var(--text-dim);">v{{ version }}</p>
         </div>
-        
+
         {% if error %}
         <div class="alert alert-error">
-            ❌ {{ error }}
+            {{ error }}
         </div>
         {% endif %}
-        
+
         {% if success %}
         <div class="alert alert-success">
-            ✅ Discovery completed successfully!
+            Discovery completed successfully!
         </div>
         {% endif %}
-        
-        <div class="card">
-            <h2 style="margin-bottom: 20px; color: #333;">Discovery Configuration</h2>
-            <form method="POST" action="/discover">
-                <div class="form-group">
-                    <label for="seed_ip">Seed Device IP Address *</label>
-                    <input type="text" id="seed_ip" name="seed_ip" placeholder="192.168.1.1" required>
-                </div>
-                
-                <div class="form-group">
-                    <label for="device_type">Device Type *</label>
-                    <select id="device_type" name="device_type" required>
-                        <option value="">-- Select Device Type --</option>
-                        {% for value, label in device_types %}
-                        <option value="{{ value }}">{{ label }}</option>
-                        {% endfor %}
-                    </select>
-                </div>
-                
-                <div class="form-row">
+
+        <!-- Tab bar -->
+        <div class="tab-bar">
+            <button class="active" onclick="switchTab('discover', this)">New Discovery</button>
+            <button onclick="switchTab('load', this)">Import Previous Scan</button>
+        </div>
+        <div class="tab-body">
+
+            <!-- New Discovery Tab -->
+            <div id="tab-discover" class="tab-content active">
+                <form method="POST" action="/discover">
                     <div class="form-group">
-                        <label for="username">SSH Username *</label>
-                        <input type="text" id="username" name="username" placeholder="admin" required>
+                        <label for="seed_ip">Seed Device IP Address *</label>
+                        <input type="text" id="seed_ip" name="seed_ip" class="mono" placeholder="192.168.1.1" required>
                     </div>
-                    
+
+                    <div class="form-row-3">
+                        <div class="form-group">
+                            <label for="device_type">Seed Device Platform *</label>
+                            <select id="device_type" name="device_type" required>
+                                <option value="">-- Select --</option>
+                                {% for value, label in device_types %}
+                                <option value="{{ value }}">{{ label }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="protocol">Connection Protocol</label>
+                            <select id="protocol" name="protocol">
+                                <option value="ssh">SSH</option>
+                                <option value="telnet">Telnet</option>
+                                <option value="auto" selected>Auto (SSH, fallback Telnet)</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="max_depth">Crawl Depth</label>
+                            <select id="max_depth" name="max_depth">
+                                <option value="1">1 hop</option>
+                                <option value="2">2 hops</option>
+                                <option value="3" selected>3 hops</option>
+                                <option value="4">4 hops</option>
+                                <option value="5">5 hops</option>
+                                <option value="6">6 hops</option>
+                                <option value="7">7 hops</option>
+                                <option value="8">8 hops</option>
+                                <option value="9">9 hops</option>
+                                <option value="10">10 hops</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="username">Username *</label>
+                            <input type="text" id="username" name="username" placeholder="admin" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="password">Password *</label>
+                            <input type="password" id="password" name="password" placeholder="********" required>
+                        </div>
+                    </div>
+
                     <div class="form-group">
-                        <label for="password">SSH Password *</label>
-                        <input type="password" id="password" name="password" placeholder="••••••••" required>
+                        <label style="margin-bottom: 10px;">Discovery Scope</label>
+                        <p class="helper-text">Controls which neighbor types the crawler follows. Data is collected from all reachable devices.</p>
+                        <div style="margin-bottom: 8px;">
+                            <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer; color: var(--text-muted);">
+                                <input type="checkbox" id="select_all_types" style="width: auto; margin-right: 8px; accent-color: var(--accent);">
+                                <em>Select / deselect all</em>
+                            </label>
+                        </div>
+                        <div id="device_type_checkboxes" class="checkbox-grid">
+                            <label><input type="checkbox" name="include_routers" value="true" checked> Routers</label>
+                            <label><input type="checkbox" name="include_switches" value="true" checked> Switches</label>
+                            <label><input type="checkbox" name="include_phones" value="true"> IP Phones</label>
+                            <label><input type="checkbox" name="include_servers" value="true"> Servers</label>
+                            <label><input type="checkbox" name="include_aps" value="true"> Access Points</label>
+                            <label><input type="checkbox" name="include_other" value="true"> Other Devices</label>
+                        </div>
                     </div>
+
+                    <button type="submit" class="btn-primary">Run Discovery</button>
+                </form>
+            </div>
+
+            <!-- Import Previous Scan Tab -->
+            <div id="tab-load" class="tab-content">
+                <form method="POST" action="/load-inventory" enctype="multipart/form-data">
+                    <div class="form-group">
+                        <label>Upload Inventory JSON File</label>
+                        <input type="file" name="file" accept=".json" style="padding: 10px;">
+                    </div>
+                    <p style="text-align: center; color: var(--text-dim); margin: 15px 0;">-- or select from saved inventories --</p>
+                    <div class="form-group">
+                        <label for="inv_filename">Saved Inventories</label>
+                        <select id="inv_filename" name="filename">
+                            <option value="">-- Select --</option>
+                        </select>
+                    </div>
+
+                    <button type="submit" class="btn-primary">Import Scan Data</button>
+                </form>
+
+                <div class="inventory-list" id="inventory-list">
+                    <div class="category-header">SAVED INVENTORIES</div>
                 </div>
-                
-                <div class="form-group">
-                    <label for="max_depth">Maximum Discovery Depth</label>
-                    <select id="max_depth" name="max_depth">
-                        <option value="1">1 hop (immediate neighbors only)</option>
-                        <option value="2">2 hops</option>
-                        <option value="3" selected>3 hops (recommended)</option>
-                        <option value="4">4 hops</option>
-                        <option value="5">5 hops</option>
-                    </select>
-                </div>
-                
-                <div class="form-group">
-                    <label style="margin-bottom: 10px;">Device Types to Discover</label>
-                    <div style="margin-bottom: 8px;">
-                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer; color: #555;">
-                            <input type="checkbox" id="select_all_types" style="width: auto; margin-right: 8px;">
-                            <em>Select / deselect all</em>
-                        </label>
-                    </div>
-                    <div id="device_type_checkboxes" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; background: #f8f9fa; padding: 15px; border-radius: 6px;">
-                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
-                            <input type="checkbox" name="include_routers" value="true" checked style="width: auto; margin-right: 8px;">
-                            Routers
-                        </label>
-                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
-                            <input type="checkbox" name="include_switches" value="true" checked style="width: auto; margin-right: 8px;">
-                            Switches
-                        </label>
-                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
-                            <input type="checkbox" name="include_phones" value="true" style="width: auto; margin-right: 8px;">
-                            IP Phones
-                        </label>
-                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
-                            <input type="checkbox" name="include_servers" value="true" style="width: auto; margin-right: 8px;">
-                            Servers
-                        </label>
-                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
-                            <input type="checkbox" name="include_aps" value="true" style="width: auto; margin-right: 8px;">
-                            Access Points
-                        </label>
-                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
-                            <input type="checkbox" name="include_other" value="true" style="width: auto; margin-right: 8px;">
-                            Other Devices
-                        </label>
-                    </div>
-                    <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #e0e0e0;">
-                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
-                            <input type="checkbox" name="include_l3" value="true" style="width: auto; margin-right: 8px;">
-                            <strong>L3 Routing Neighbors</strong>&nbsp;(OSPF, EIGRP, BGP, IS-IS)
-                        </label>
-                        <p style="margin-top: 6px; margin-left: 24px; color: #888; font-size: 12px;">
-                            Queries routing protocol tables on each discovered device. Adds L3-only neighbors (e.g. WAN peers) not visible via CDP/LLDP.
-                        </p>
-                    </div>
-                    <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #e0e0e0;">
-                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
-                            <input type="checkbox" name="include_arp" value="true" style="width: auto; margin-right: 8px;">
-                            <strong>ARP Neighbors</strong>&nbsp;(end hosts from ARP tables)
-                        </label>
-                        <p style="margin-top: 6px; margin-left: 24px; color: #888; font-size: 12px;">
-                            Collects ARP tables from each discovered device. Hosts are shown as a count badge on each node and in an expandable side panel — not added as graph nodes.
-                        </p>
-                    </div>
-                </div>
-                
-                <button type="submit" class="btn">🔍 Start Discovery</button>
-            </form>
-            
-            <div class="info-box">
-                <h3>ℹ️ How it works</h3>
-                <ul>
-                    <li>Connects to seed device via SSH</li>
-                    <li>Runs "show cdp neighbors detail" and "show lldp neighbors detail"</li>
-                    <li>Extracts neighbor information (hostname, IP, interfaces, platform)</li>
-                    <li>Automatically detects device types using YAML patterns</li>
-                    <li>Recursively discovers neighbors (routers and switches only)</li>
-                    <li>Displays topology tree with interface mappings and IPs</li>
-                </ul>
             </div>
         </div>
-        
+
         {% if summary %}
         <div class="card">
-            <h2 style="margin-bottom: 20px; color: #333;">Discovery Summary</h2>
-            <div class="summary">
-                <div class="summary-item">
-                    <div class="summary-value">{{ summary.devices }}</div>
-                    <div class="summary-label">Devices Discovered</div>
+            <h2>Discovery Summary</h2>
+            <div class="stat-grid">
+                <div class="stat-tile">
+                    <div class="stat-value">{{ summary.devices }}</div>
+                    <div class="stat-label">DEVICES</div>
                 </div>
-                <div class="summary-item">
-                    <div class="summary-value">{{ summary.links }}</div>
-                    <div class="summary-label">Links Found</div>
+                <div class="stat-tile">
+                    <div class="stat-value">{{ summary.links }}</div>
+                    <div class="stat-label">LINKS</div>
                 </div>
-                <div class="summary-item">
-                    <div class="summary-value">{{ summary.visited|length }}</div>
-                    <div class="summary-label">Devices Visited</div>
+                <div class="stat-tile">
+                    <div class="stat-value">{{ summary.visited|length }}</div>
+                    <div class="stat-label">VISITED</div>
                 </div>
                 {% if summary.failed_count > 0 %}
-                <div class="summary-item">
-                    <div class="summary-value" style="color: #c33;">{{ summary.failed_count }}</div>
-                    <div class="summary-label">Failed Connections</div>
+                <div class="stat-tile" style="border-color: var(--danger);">
+                    <div class="stat-value" style="color: var(--danger);">{{ summary.failed_count }}</div>
+                    <div class="stat-label">FAILED</div>
                 </div>
                 {% endif %}
             </div>
-            
+
             {% if summary.failed %}
-            <div style="margin-top: 20px; padding: 15px; background: #fee; border-left: 4px solid #c33; border-radius: 6px;">
-                <h3 style="color: #c33; margin-bottom: 10px; font-size: 16px;">⚠️ Failed to Connect</h3>
-                <ul style="margin-left: 20px; color: #555;">
+            <div style="margin-top: 20px; padding: 15px; background: rgba(244, 63, 94, 0.08); border-left: 3px solid var(--danger); border-radius: var(--radius);">
+                <h3 style="color: var(--danger); margin-bottom: 10px; font-size: 16px; font-family: 'Barlow Semi Condensed', sans-serif; text-transform: uppercase; letter-spacing: 0.02em;">Failed to Connect</h3>
+                <ul style="margin-left: 20px;">
                 {% for ip, reason in summary.failed.items() %}
-                    <li><strong>{{ ip }}</strong>: {{ reason }}</li>
+                    <li style="margin-bottom: 4px;"><span class="mono" style="color: var(--text-bright);">{{ ip }}</span>: <span class="text-muted">{{ reason }}</span></li>
                 {% endfor %}
                 </ul>
             </div>
             {% endif %}
-            
+
             {% if visualization %}
             <div style="margin-top: 20px; text-align: center;">
-                <a href="/visualization/{{ visualization }}" target="_blank"
-                   style="display: inline-block; padding: 15px 30px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; text-decoration: none; border-radius: 8px; font-weight: bold; box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4); transition: all 0.3s;">
-                    🌐 View Interactive Network Diagram
+                <a href="/visualization/{{ visualization }}" target="_blank" class="btn-primary" style="display: inline-block; width: auto; text-decoration: none;">
+                    View Interactive Network Diagram
                 </a>
-                <p style="margin-top: 10px; color: #666; font-size: 14px;">
-                    Click to open the interactive visualization in a new tab
-                </p>
             </div>
             {% endif %}
 
             {% if export_key %}
-            <div style="margin-top: 20px;">
-                <h3 style="color: #333; font-size: 16px; margin-bottom: 12px;">Export Results</h3>
-                <div style="display: flex; gap: 12px; flex-wrap: wrap;">
-                    <a href="/export/json/{{ export_key }}"
-                       style="display: inline-block; padding: 10px 20px; background: #28a745; color: white; text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 14px;">
-                        ⬇ Download JSON
+            <div style="margin-top: 24px;">
+                <div class="category-header">DATA EXPORTS</div>
+                <div class="download-grid">
+                    <a href="/export/inventory/{{ export_key }}" class="download-card">
+                        <div class="dl-label">Discovery Inventory</div>
+                        <div class="dl-format mono">.JSON</div>
                     </a>
-                    <a href="/export/csv/{{ export_key }}"
-                       style="display: inline-block; padding: 10px 20px; background: #17a2b8; color: white; text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 14px;">
-                        ⬇ Download CSV
-                    </a>
-                    <a href="/export/pdf/{{ export_key }}"
-                       style="display: inline-block; padding: 10px 20px; background: #dc3545; color: white; text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 14px;">
-                        ⬇ Download PDF
+                    <a href="/export/archive/{{ export_key }}" class="download-card">
+                        <div class="dl-label">Full Archive</div>
+                        <div class="dl-format mono">.ZIP</div>
                     </a>
                 </div>
             </div>
+
+            {% if available_reports %}
+            <div style="margin-top: 24px;" id="report-panel">
+                {% set ns = namespace(current_cat='') %}
+                {% for r in available_reports %}
+                    {% if r.category != ns.current_cat %}
+                        {% set ns.current_cat = r.category %}
+                        <div class="category-header">{{ r.category | upper }}</div>
+                    {% endif %}
+                    <div class="report-card {% if not r.can_generate %}disabled{% endif %}">
+                        <div>
+                            <div class="report-name">{{ r.label }}</div>
+                            <div class="report-desc">{{ r.description }}</div>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span class="report-format mono">.{{ r.format | upper }}</span>
+                            {% if r.can_generate %}
+                            <button class="btn-sm"
+                                    onclick="downloadReport('{{ export_key }}', '{{ r.name }}')">
+                                GENERATE
+                            </button>
+                            {% else %}
+                            <span class="text-muted" style="font-size: 12px;"
+                                  title="Missing collector data">unavailable</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                {% endfor %}
+            </div>
             {% endif %}
-        </div>
-        {% endif %}
-        
-        {% if topology %}
-        <div class="card">
-            <h2 style="margin-bottom: 20px; color: #333;">Network Topology Map</h2>
-            <div class="topology-output">{{ topology }}</div>
+            {% endif %}
         </div>
         {% endif %}
     </div>
 <script>
+    /* Tab switching */
+    function switchTab(name, btn) {
+        document.querySelectorAll('.tab-bar button').forEach(function(b) { b.classList.remove('active'); });
+        document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); });
+        document.getElementById('tab-' + name).classList.add('active');
+        btn.classList.add('active');
+    }
+
+    /* Download on-demand report */
+    function downloadReport(key, reportName) {
+        window.location.href = '/export/report/' + encodeURIComponent(key) + '/' + encodeURIComponent(reportName);
+    }
+
+    /* Select-all for device type checkboxes */
     (function () {
         var master = document.getElementById('select_all_types');
         var boxes  = document.querySelectorAll('#device_type_checkboxes input[type="checkbox"]');
 
-        // Sync master state to match current individual checkboxes on load
         function syncMaster() {
             var allChecked  = Array.from(boxes).every(function(b)  { return b.checked; });
             var someChecked = Array.from(boxes).some(function(b)   { return b.checked; });
@@ -413,13 +619,95 @@
             boxes.forEach(function(b) { b.checked = master.checked; });
             master.indeterminate = false;
         });
-
-        boxes.forEach(function(b) {
-            b.addEventListener('change', syncMaster);
-        });
-
+        boxes.forEach(function(b) { b.addEventListener('change', syncMaster); });
         syncMaster();
     })();
+
+    /* Load saved inventories into dropdown */
+    (function () {
+        fetch('/inventories')
+            .then(function(r) { return r.json(); })
+            .then(function(items) {
+                var sel = document.getElementById('inv_filename');
+                items.forEach(function(inv) {
+                    var opt = document.createElement('option');
+                    opt.value = inv.filename;
+                    opt.textContent = inv.seed_ip + ' - ' + inv.device_count + ' devices (' + inv.timestamp.split('T')[0] + ')';
+                    sel.appendChild(opt);
+                });
+            })
+            .catch(function() {});
+    })();
+
+    /* Inventory management list */
+    function loadInventoryList() {
+        fetch('/inventories')
+            .then(function(r) { return r.json(); })
+            .then(function(items) {
+                var list = document.getElementById('inventory-list');
+                while (list.children.length > 1) {
+                    list.removeChild(list.lastChild);
+                }
+                if (items.length === 0) {
+                    var empty = document.createElement('p');
+                    empty.className = 'text-muted';
+                    empty.textContent = 'No saved inventories.';
+                    list.appendChild(empty);
+                    return;
+                }
+                items.forEach(function(inv) {
+                    var key = inv.filename.replace('.json', '');
+                    var row = document.createElement('div');
+                    row.className = 'inventory-row';
+                    var info = document.createElement('div');
+                    info.className = 'inv-info';
+                    var ip = document.createElement('span');
+                    ip.className = 'mono';
+                    ip.textContent = inv.seed_ip;
+                    info.appendChild(ip);
+                    var sep = document.createTextNode(' \u2014 ');
+                    info.appendChild(sep);
+                    var count = document.createElement('span');
+                    count.className = 'mono';
+                    count.textContent = inv.device_count + ' devices';
+                    info.appendChild(count);
+                    var ts = document.createElement('span');
+                    ts.className = 'text-muted';
+                    ts.style.marginLeft = '12px';
+                    ts.textContent = inv.timestamp.split('T')[0];
+                    info.appendChild(ts);
+                    row.appendChild(info);
+                    var actions = document.createElement('div');
+                    actions.className = 'inv-actions';
+                    var dlLink = document.createElement('a');
+                    dlLink.href = '/export/inventory/' + encodeURIComponent(key);
+                    dlLink.className = 'btn-sm';
+                    dlLink.title = 'Download';
+                    dlLink.textContent = '\u2193';
+                    actions.appendChild(dlLink);
+                    var delBtn = document.createElement('button');
+                    delBtn.className = 'btn-sm btn-danger';
+                    delBtn.title = 'Delete';
+                    delBtn.textContent = '\u2715';
+                    delBtn.addEventListener('click', function() {
+                        deleteInventory(inv.filename);
+                    });
+                    actions.appendChild(delBtn);
+                    row.appendChild(actions);
+                    list.appendChild(row);
+                });
+            });
+    }
+
+    function deleteInventory(filename) {
+        if (!confirm('Delete inventory ' + filename + '?')) return;
+        fetch('/inventories/' + encodeURIComponent(filename), { method: 'DELETE' })
+            .then(function(r) {
+                if (r.ok) loadInventoryList();
+            });
+    }
+
+    loadInventoryList();
 </script>
 </body>
 </html>

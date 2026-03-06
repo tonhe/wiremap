@@ -1,6 +1,7 @@
 """
-Network Topology Discovery Engine
-Recursively discovers network topology using CDP/LLDP and L3 routing protocols
+Network Topology Discovery Engine (DEPRECATED)
+Replaced by discovery_engine.py + collector-based architecture.
+Kept for reference until all functionality is confirmed migrated.
 """
 
 import logging
@@ -194,7 +195,7 @@ class TopologyDiscoverer:
             'include_servers': False,
             'include_aps': False,
             'include_other': False,
-            'include_l3': False,
+            'include_l3': True,
         }
         self.topology = Topology()
         self.visited: Set[str] = set()

@@ -1,14 +1,16 @@
 services:
-  neighbor-mapper:
+  wiremap:
     build: .
-    container_name: neighbor-mapper
+    container_name: wiremap
     ports:
-      - "8000:8000"
+      - "8888:8000"
     volumes:
       # Mount logs directory for persistence
       - ./logs:/app/logs
       # Mount config for easy updates without rebuild
       - ./config:/app/config
+      # Mount inventories for persistence across rebuilds
+      - ./inventories:/app/inventories
     restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1

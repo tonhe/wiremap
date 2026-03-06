@@ -1,5 +1,5 @@
 """
-Neighbor Mapper Flask Application
+Wiremap Flask Application
 Web interface for network topology discovery
 """
 
@@ -7,11 +7,18 @@ import io
 import json
 import logging
 import os
+import zipfile
 from flask import Flask, render_template, request, jsonify, send_file
 from device_detector import DeviceTypeDetector
-from discovery import TopologyDiscoverer, render_topology_tree, DiscoveryError
+from discovery_engine import DiscoveryEngine, DiscoveryError
+from inventory import DiscoveryInventory
 from visualizer import NetworkVisualizer
-import exporter
+try:
+    from app.collectors import get_registry as get_collector_registry
+    from app.reports import get_registry as get_report_registry, get_report
+except ImportError:
+    from collectors import get_registry as get_collector_registry
+    from reports import get_registry as get_report_registry, get_report
 
 # Read version
 VERSION = "0.2"
@@ -37,6 +44,8 @@ app = Flask(__name__)
 
 # Initialize device type detector
 detector = DeviceTypeDetector()
+
+INVENTORY_DIR = "/app/inventories"
 
 # Common device types for dropdown
 DEVICE_TYPES = [
@@ -64,20 +73,20 @@ DEVICE_TYPES = [
 @app.route('/')
 def index():
     """Main page with discovery form"""
-    return render_template('index.html', device_types=DEVICE_TYPES, version=VERSION)
+    return render_template('index.html', device_types=DEVICE_TYPES, version=VERSION,
+                         report_registry=_get_report_info())
 
 
 @app.route('/discover', methods=['POST'])
 def discover():
-    """Handle discovery request"""
-    # Get form data
+    """Handle discovery request using the new collector-based engine."""
     seed_ip = request.form.get('seed_ip', '').strip()
     device_type = request.form.get('device_type', '').strip()
     username = request.form.get('username', '').strip()
     password = request.form.get('password', '')
     max_depth = int(request.form.get('max_depth', 3))
-    
-    # Get filter settings
+    max_workers = int(request.form.get('max_workers', 5))
+    protocol = request.form.get('protocol', 'ssh').strip()
     filters = {
         'include_routers': request.form.get('include_routers') == 'true',
         'include_switches': request.form.get('include_switches') == 'true',
@@ -85,133 +94,210 @@ def discover():
         'include_servers': request.form.get('include_servers') == 'true',
         'include_aps': request.form.get('include_aps') == 'true',
         'include_other': request.form.get('include_other') == 'true',
-        'include_l3': request.form.get('include_l3') == 'true',
-        'include_arp': request.form.get('include_arp') == 'true',
+        'include_l3': True,
     }
-    
-    # Validate inputs
+
     if not all([seed_ip, device_type, username, password]):
-        return render_template('index.html', 
-                             device_types=DEVICE_TYPES,
-                             version=VERSION,
-                             error="All fields are required")
-    
-    logger.info(f"Discovery request: seed={seed_ip}, type={device_type}, user={username}, depth={max_depth}")
-    logger.info(f"Filters: {filters}")
-    
-    try:
-        # Create discoverer
-        discoverer = TopologyDiscoverer(detector, max_depth=max_depth, filters=filters)
-        
-        # Run discovery
-        topology = discoverer.discover(seed_ip, device_type, username, password)
-        
-        # Render topology as text tree
-        tree_output = render_topology_tree(topology)
-        
-        # Prepare summary
-        total_devices = len(topology.devices)
-        
-        # Count unique links (each edge only once, not both directions)
-        unique_links = set()
-        for device in topology.devices.values():
-            for link in device.links:
-                # Create a sorted tuple so (A,B) and (B,A) are the same
-                link_pair = tuple(sorted([link.local_device, link.remote_device]))
-                unique_links.add(link_pair)
-        total_links = len(unique_links)
-        
-        summary = {
-            'devices': total_devices,
-            'links': total_links,
-            'visited': list(discoverer.visited),
-            'failed': discoverer.failed,
-            'failed_count': len(discoverer.failed)
-        }
-        
-        logger.info(f"Discovery complete: {total_devices} devices, {total_links} links")
-
-        # Store topology data for export
-        export_key = seed_ip.replace('.', '_')
-        try:
-            topo_data = exporter.topology_to_dict(
-                topology,
-                seed_ip=seed_ip,
-                params={'max_depth': max_depth, 'filters': filters, 'failed_count': len(discoverer.failed)},
-            )
-            topo_path = os.path.join('/tmp', f"topology_{export_key}.json")
-            with open(topo_path, 'w') as f:
-                f.write(exporter.generate_json(topo_data))
-            logger.info(f"Saved topology data for export: {topo_path}")
-        except Exception as e:
-            logger.warning(f"Failed to save topology export data: {e}")
-            export_key = None
-
-        # Generate network visualization
-        viz_file = None
-        try:
-            # Convert topology to dict format for visualizer
-            topology_dict = {}
-            for device_name, device in topology.devices.items():
-                neighbors = []
-                for link in device.links:
-                    neighbors.append({
-                        'neighbor_device': link.remote_device,
-                        'local_interface': link.local_intf,
-                        'remote_interface': link.remote_intf,
-                        'protocols': link.protocols or [],
-                    })
-                
-                # Use device_category for visualization, fallback to 'unknown'
-                device_category = device.device_category if device.device_category else 'unknown'
-
-                topology_dict[device_name] = {
-                    'device_type': device_category,  # Visualizer expects category here
-                    'has_routing': device.has_routing,  # For L3 switch labeling
-                    'neighbors': neighbors,
-                    'arp_entries': device.arp_entries,
-                    'arp_count': len(device.arp_entries),
-                }
-            
-            # Generate visualization with seed device
-            # Find the hostname that corresponds to the seed IP
-            seed_hostname = None
-            for device_name, device in topology.devices.items():
-                if device.mgmt_ip == seed_ip:
-                    seed_hostname = device_name
-                    break
-            
-            visualizer = NetworkVisualizer(topology_dict, seed_device=seed_hostname)
-            viz_filename = f"topology_{seed_ip.replace('.', '_')}.html"
-            viz_path = os.path.join('/tmp', viz_filename)
-            visualizer.generate_html(viz_path)
-            viz_file = viz_filename
-            logger.info(f"Generated visualization: {viz_path} (seed: {seed_hostname})")
-        except Exception as e:
-            logger.warning(f"Failed to generate visualization: {e}")
-        
         return render_template('index.html',
                              device_types=DEVICE_TYPES,
                              version=VERSION,
-                             topology=tree_output,
+                             report_registry=_get_report_info(),
+                             error="All fields are required")
+
+    logger.info(f"Discovery request: seed={seed_ip}, type={device_type}, user={username}, depth={max_depth}")
+
+    try:
+        engine = DiscoveryEngine(
+            seed_ip=seed_ip,
+            seed_device_type=device_type,
+            username=username,
+            password=password,
+            max_depth=max_depth,
+            protocol=protocol,
+            filters=filters,
+            inventory_dir=INVENTORY_DIR,
+            device_detector=detector,
+            max_workers=max_workers,
+        )
+
+        inventory = engine.discover()
+        inventory_data = inventory.to_dict()
+
+        total_devices = len(inventory.devices)
+        summary = {
+            'devices': total_devices,
+            'links': 0,
+            'visited': list(engine.visited),
+            'failed': engine.failed,
+            'failed_count': len(engine.failed),
+        }
+
+        # Count links from cdp_lldp collector data
+        unique_links = set()
+        for device in inventory.devices.values():
+            cdp_data = device.get("collector_data", {}).get("cdp_lldp", {})
+            neighbors = cdp_data.get("parsed", {}).get("neighbors", [])
+            hostname = device["hostname"]
+            for n in neighbors:
+                remote = n.get("remote_device", "Unknown")
+                link_pair = tuple(sorted([hostname, remote]))
+                unique_links.add(link_pair)
+        summary['links'] = len(unique_links)
+
+        logger.info(f"Discovery complete: {total_devices} devices, {summary['links']} links")
+
+        # Generate visualization from inventory data
+        viz_file = None
+        try:
+            viz_file = _generate_visualization(inventory_data, seed_ip)
+        except Exception as e:
+            logger.warning(f"Failed to generate visualization: {e}")
+
+        # Determine which reports can be generated
+        available_reports = _get_available_reports(inventory_data)
+
+        return render_template('index.html',
+                             device_types=DEVICE_TYPES,
+                             version=VERSION,
                              summary=summary,
                              visualization=viz_file,
-                             export_key=export_key,
+                             export_key=inventory.discovery_id,
+                             available_reports=available_reports,
+                             report_registry=_get_report_info(),
                              success=True)
-    
+
     except DiscoveryError as e:
         logger.error(f"Discovery error: {e.message}")
         return render_template('index.html',
                              device_types=DEVICE_TYPES,
                              version=VERSION,
+                             report_registry=_get_report_info(),
                              error=f"Discovery failed: {e.message}")
-    
+
     except Exception as e:
         logger.exception("Unexpected error during discovery")
         return render_template('index.html',
                              device_types=DEVICE_TYPES,
                              version=VERSION,
+                             report_registry=_get_report_info(),
                              error=f"Unexpected error: {str(e)}")
+
+
+@app.route('/inventories')
+def list_inventories():
+    """List saved discovery inventories."""
+    try:
+        inventories = DiscoveryInventory.list_inventories(INVENTORY_DIR)
+    except FileNotFoundError:
+        inventories = []
+    return jsonify(inventories)
+
+
+@app.route('/inventories/<filename>', methods=['DELETE'])
+def delete_inventory(filename):
+    """Delete a saved inventory file."""
+    if '..' in filename or '/' in filename:
+        return jsonify({"error": "Invalid filename"}), 400
+    filepath = os.path.join(INVENTORY_DIR, filename)
+    if not os.path.exists(filepath):
+        return jsonify({"error": "Inventory not found"}), 404
+    os.remove(filepath)
+    return jsonify({"status": "deleted"})
+
+
+@app.route('/load-inventory', methods=['POST'])
+def load_inventory():
+    """Load an inventory file for report generation."""
+    if 'file' in request.files and request.files['file'].filename:
+        f = request.files['file']
+        data = json.load(f)
+        inventory = DiscoveryInventory(data)
+    elif 'filename' in request.form:
+        filepath = os.path.join(INVENTORY_DIR, request.form['filename'])
+        if not os.path.exists(filepath):
+            return jsonify({"error": "Inventory file not found"}), 404
+        inventory = DiscoveryInventory.load(filepath)
+    else:
+        return jsonify({"error": "No file or filename provided"}), 400
+
+    inventory_data = inventory.to_dict()
+    total_devices = len(inventory.devices)
+
+    # Count links
+    unique_links = set()
+    for device in inventory.devices.values():
+        cdp_data = device.get("collector_data", {}).get("cdp_lldp", {})
+        neighbors = cdp_data.get("parsed", {}).get("neighbors", [])
+        hostname = device["hostname"]
+        for n in neighbors:
+            remote = n.get("remote_device", "Unknown")
+            link_pair = tuple(sorted([hostname, remote]))
+            unique_links.add(link_pair)
+
+    summary = {
+        'devices': total_devices,
+        'links': len(unique_links),
+        'visited': [],
+        'failed': {},
+        'failed_count': 0,
+    }
+
+    viz_file = None
+    try:
+        viz_file = _generate_visualization(inventory_data, inventory.seed_ip)
+    except Exception as e:
+        logger.warning(f"Failed to generate visualization: {e}")
+
+    available_reports = _get_available_reports(inventory_data)
+
+    return render_template('index.html',
+                         device_types=DEVICE_TYPES,
+                         version=VERSION,
+                         summary=summary,
+                         visualization=viz_file,
+                         export_key=inventory.discovery_id,
+                         available_reports=available_reports,
+                         report_registry=_get_report_info(),
+                         success=True)
+
+
+@app.route('/export/inventory/<key>')
+def export_inventory(key):
+    """Download discovery inventory JSON."""
+    filepath = os.path.join(INVENTORY_DIR, f"{key}.json")
+    if not os.path.exists(filepath):
+        return "Inventory not found", 404
+    return send_file(filepath,
+                     mimetype='application/json',
+                     as_attachment=True,
+                     download_name=f"{key}.json")
+
+
+@app.route('/export/archive/<key>')
+def export_archive(key):
+    """Download full ZIP archive (inventory + configs)."""
+    filepath = os.path.join(INVENTORY_DIR, f"{key}.json")
+    if not os.path.exists(filepath):
+        return "Inventory not found", 404
+
+    inventory = DiscoveryInventory.load(filepath)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        # Include inventory JSON
+        zf.write(filepath, "inventory.json")
+
+        # Include device configs if available
+        for hostname, device in inventory.devices.items():
+            config_data = device.get("collector_data", {}).get("config", {})
+            config_text = config_data.get("parsed", {}).get("config", "")
+            if config_text:
+                zf.writestr(f"configs/{hostname}.txt", config_text)
+
+    buf.seek(0)
+    return send_file(buf,
+                     mimetype='application/zip',
+                     as_attachment=True,
+                     download_name=f"discovery_{key}.zip")
 
 
 @app.route('/health')
@@ -234,60 +320,121 @@ def serve_visualization(filename):
         return "Error loading visualization", 500
 
 
-def _load_export_data(key):
-    """Load stored topology JSON for a given export key, or return None."""
-    topo_path = os.path.join('/tmp', f"topology_{key}.json")
-    if not os.path.exists(topo_path):
-        return None
-    with open(topo_path, 'r') as f:
-        return json.load(f)
+@app.route('/export/report/<key>/<report_name>')
+def export_report(key, report_name):
+    """Generate and download a report for a given inventory."""
+    filepath = os.path.join(INVENTORY_DIR, f"{key}.json")
+    if not os.path.exists(filepath):
+        return "Inventory not found", 404
 
+    report = get_report(report_name)
+    if report is None:
+        return "Unknown report type", 404
 
-@app.route('/export/json/<key>')
-def export_json(key):
-    """Download topology as JSON"""
-    data = _load_export_data(key)
-    if data is None:
-        return "Export data not found. Run a discovery first.", 404
-    json_bytes = exporter.generate_json(data).encode('utf-8')
+    inventory = DiscoveryInventory.load(filepath)
+    inventory_data = inventory.to_dict()
+
+    if not report.can_generate(inventory_data):
+        return "Insufficient data for this report", 400
+
+    fmt = report.supported_formats[0]
+    content = report.generate(inventory_data, fmt)
+
+    mime_types = {
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "html": "text/html",
+        "zip": "application/zip",
+        "pdf": "application/pdf",
+    }
+    extensions = {
+        "xlsx": "xlsx",
+        "html": "html",
+        "zip": "zip",
+        "pdf": "pdf",
+    }
+
     return send_file(
-        io.BytesIO(json_bytes),
-        mimetype='application/json',
+        io.BytesIO(content),
+        mimetype=mime_types.get(fmt, "application/octet-stream"),
         as_attachment=True,
-        download_name=f"topology_{key}.json",
+        download_name=f"{report_name}_{key}.{extensions.get(fmt, 'bin')}",
     )
 
 
-@app.route('/export/csv/<key>')
-def export_csv(key):
-    """Download topology as CSV"""
-    data = _load_export_data(key)
-    if data is None:
-        return "Export data not found. Run a discovery first.", 404
-    csv_bytes = exporter.generate_csv(data).encode('utf-8')
-    return send_file(
-        io.BytesIO(csv_bytes),
-        mimetype='text/csv',
-        as_attachment=True,
-        download_name=f"topology_{key}.csv",
-    )
+# --- Helpers ---
+
+def _get_report_info():
+    """Return list of report dicts for the UI, grouped by category."""
+    registry = get_report_registry()
+    return [
+        {
+            "name": r.name,
+            "label": r.label,
+            "description": r.description,
+            "format": r.supported_formats[0],
+            "category": r.category,
+            "ui_options": r.get_ui_options(),
+        }
+        for r in sorted(registry.values(), key=lambda r: (r.category, r.label))
+    ]
 
 
-@app.route('/export/pdf/<key>')
-def export_pdf(key):
-    """Download topology as PDF"""
-    data = _load_export_data(key)
-    if data is None:
-        return "Export data not found. Run a discovery first.", 404
-    pdf_bytes = exporter.generate_pdf(data)
-    return send_file(
-        io.BytesIO(pdf_bytes),
-        mimetype='application/pdf',
-        as_attachment=True,
-        download_name=f"topology_{key}.pdf",
-    )
+def _get_available_reports(inventory_data):
+    """Return list of reports that can be generated from this inventory."""
+    registry = get_report_registry()
+    available = []
+    for r in sorted(registry.values(), key=lambda r: (r.category, r.label)):
+        available.append({
+            "name": r.name,
+            "label": r.label,
+            "description": r.description,
+            "format": r.supported_formats[0],
+            "category": r.category,
+            "ui_options": r.get_ui_options(),
+            "can_generate": r.can_generate(inventory_data),
+        })
+    return available
+
+
+def _generate_visualization(inventory_data: dict, seed_ip: str):
+    """Generate D3 topology visualization from inventory data. Returns filename or None."""
+    topology_dict = {}
+    for hostname, device in inventory_data.get("devices", {}).items():
+        cdp_data = device.get("collector_data", {}).get("cdp_lldp", {})
+        neighbors_parsed = cdp_data.get("parsed", {}).get("neighbors", [])
+
+        neighbors = []
+        for n in neighbors_parsed:
+            neighbors.append({
+                'neighbor_device': n.get('remote_device', 'Unknown'),
+                'local_interface': n.get('local_intf', '?'),
+                'remote_interface': n.get('remote_intf', '?'),
+                'protocols': n.get('protocols', []),
+            })
+
+        device_category = device.get("device_category") or "unknown"
+        topology_dict[hostname] = {
+            'device_type': device_category,
+            'has_routing': False,
+            'neighbors': neighbors,
+            'arp_entries': [],
+            'arp_count': 0,
+        }
+
+    seed_hostname = None
+    for hostname, device in inventory_data.get("devices", {}).items():
+        if device.get("mgmt_ip") == seed_ip:
+            seed_hostname = hostname
+            break
+
+    visualizer = NetworkVisualizer(topology_dict, seed_device=seed_hostname)
+    viz_filename = f"topology_{seed_ip.replace('.', '_')}.html"
+    viz_path = os.path.join('/tmp', viz_filename)
+    visualizer.generate_html(viz_path)
+    logger.info(f"Generated visualization: {viz_path} (seed: {seed_hostname})")
+    return viz_filename
 
 
 if __name__ == '__main__':
-    logger.info("Starting Neighbor Mapper application")
+    logger.info("Starting Wiremap application")
     app.run(host='0.0.0.0', port=8000, debug=False)

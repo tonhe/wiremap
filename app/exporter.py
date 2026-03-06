@@ -1,6 +1,7 @@
 """
-Export and reporting module for Network Neighbor Mapper
-Generates JSON, CSV, and PDF exports of discovered topology data
+Export and reporting module for Wiremap (DEPRECATED)
+Replaced by individual report modules in app/reports/.
+No longer imported by app.py. Safe to delete.
 """
 
 import csv
