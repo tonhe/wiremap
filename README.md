@@ -33,7 +33,7 @@ All collectors run automatically on every device -- no pre-selection needed.
 | STP/VLAN | Root bridges, blocked ports, VLAN list, VTP status |
 | STP Detail | Port roles, costs, topology change counts, inconsistent ports |
 | L3 Routing | OSPF/EIGRP/BGP/ISIS neighbors and route tables |
-| Routing Detail | Protocol summaries, route counts by protocol |
+| Routing Detail | Protocol summaries, route counts, EIGRP topology, BGP full table |
 | VRF | VRF definitions and interface assignments |
 | Switchport | Port-security, BPDU guard, storm-control, trunk config |
 | HSRP | HSRP/VRRP state, virtual IPs, active/standby roles |
@@ -43,25 +43,25 @@ All collectors run automatically on every device -- no pre-selection needed.
 Parsing uses [NTC Templates](https://github.com/networktocode/ntc-templates) (TextFSM) with regex fallbacks for vendor-aware structured output.
 
 ### Reports (On-Demand)
-Generate reports from the results page after discovery or from a saved inventory. Reports are grouped by category.
+Generate reports from the results page after discovery or from the Saved Scans tab. Reports are grouped by category and each supports a format selector.
 
-| Report | Format | Description |
-|--------|--------|-------------|
+| Report | Formats | Description |
+|--------|---------|-------------|
 | Topology Map | HTML | Interactive D3.js network diagram with color-coded device types |
-| Device Inventory | XLSX | Device summary, stack members, modules and line cards |
-| Link Inventory | XLSX | All discovered neighbor links (CDP/LLDP + L3) |
-| Interface Summary | XLSX | Port status, descriptions, IP assignments |
-| ARP Summary | XLSX | ARP entries by device with summary and detail tabs |
-| MAC Table | XLSX | MAC-to-port mappings per device |
-| L2 Discovery | XLSX | VLAN documentation, routed interfaces, anomaly findings |
-| Routing Summary | XLSX | Protocol neighbors, route tables, routed interfaces |
+| Device Inventory | XLSX, JSON, CSV, XML | Device summary, stack members, modules and line cards |
+| Link Inventory | XLSX, JSON, CSV, XML | All discovered neighbor links (CDP/LLDP + L3) |
+| Interface Summary | XLSX, JSON, CSV, XML | Port status, descriptions, IP assignments |
+| ARP Summary | XLSX, JSON, CSV, XML | ARP entries by device with summary and detail tabs |
+| MAC Table | XLSX, JSON, CSV, XML | MAC-to-port mappings per device |
+| L2 Discovery | XLSX, JSON, CSV, XML | VLANs, STP topology, routed interfaces, anomaly findings |
+| L3 Routing & IP | XLSX, JSON, CSV, XML | Protocol neighbors, route tables, OSPF topology, IP audit, ARP/MAC map, VRF summary |
 | Config Archive | ZIP | Running configs as individual text files |
 
-### Inventory Management
-- Every discovery saves a JSON inventory file (raw command output + parsed data)
-- List, download, and delete saved inventories from the UI
-- Load any saved inventory to generate reports without re-scanning
-- Export full ZIP archives (inventory JSON + device configs)
+### Saved Scans
+- Every discovery saves a JSON scan data file (raw command output + parsed data)
+- Browse, load, and delete saved scans from the **Saved Scans** tab
+- Upload a scan data JSON to generate reports without re-scanning
+- Export full ZIP archives (scan data + device configs)
 
 ### Demo Mode
 Built-in mock device simulator with a multi-vendor topology for testing without real hardware. Use seed IP `192.168.1.1` with any credentials.
@@ -102,9 +102,9 @@ cd app && python app.py
 7. Click **Start Discovery**
 8. Generate reports on-demand from the results page
 
-### Load Previous Inventory
+### Load Previous Scan
 
-Upload a saved inventory JSON or select from the inventory list to generate reports without re-scanning.
+Switch to the **Saved Scans** tab to browse previous discoveries or upload a scan data JSON to generate reports without re-scanning.
 
 ## Configuration
 
@@ -159,7 +159,7 @@ wiremap/
 ├── config/
 │   └── device_type_patterns.yaml
 ├── templates/                # Jinja2 web UI templates
-├── inventories/              # Saved discovery inventories
+├── inventories/              # Saved scan data
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt
