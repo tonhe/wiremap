@@ -4,6 +4,7 @@ Three sheets: Devices, Stack Members, Modules / Line Cards.
 """
 import io
 import re
+from collections import OrderedDict
 from openpyxl import Workbook
 
 from .base import BaseReport
@@ -170,19 +171,177 @@ class DeviceInventoryReport(BaseReport):
     description = "Device details: hostname, IP, platform, software version, serial numbers"
     category = "Discovery & Topology"
     required_collectors = ["device_inventory"]
-    supported_formats = ["xlsx"]
+    supported_formats = ["xlsx", "json", "csv", "xml"]
 
     def generate(self, inventory_data: dict, fmt: str = "xlsx") -> bytes:
-        wb = Workbook()
-        wb.remove(wb.active)
+        if fmt == "xlsx":
+            wb = Workbook()
+            wb.remove(wb.active)
 
-        self._build_devices_sheet(wb, inventory_data)
-        self._build_stack_sheet(wb, inventory_data)
-        self._build_modules_sheet(wb, inventory_data)
+            self._build_devices_sheet(wb, inventory_data)
+            self._build_stack_sheet(wb, inventory_data)
+            self._build_modules_sheet(wb, inventory_data)
 
-        buf = io.BytesIO()
-        wb.save(buf)
-        return buf.getvalue()
+            buf = io.BytesIO()
+            wb.save(buf)
+            return buf.getvalue()
+
+        return self._generate_for_format(inventory_data, fmt)
+
+    def generate_tabular_data(self, inventory_data):
+        result = OrderedDict()
+        result["Devices"] = self._extract_devices_data(inventory_data)
+        result["Stack Members"] = self._extract_stack_data(inventory_data)
+        result["Modules"] = self._extract_modules_data(inventory_data)
+        return result
+
+    def _extract_devices_data(self, inventory_data):
+        headers = [
+            "Hostname", "Mgmt IP", "Device Type", "Category",
+            "Platform", "Platform Description", "Software Version",
+            "Serial Number",
+        ]
+        rows = []
+        for hostname, device in sorted(
+            inventory_data.get("devices", {}).items()
+        ):
+            inv_data = (device.get("collector_data", {})
+                        .get("device_inventory", {}))
+            parsed = inv_data.get("parsed", {})
+
+            version_list = parsed.get("version", [])
+            sw_version = ""
+            serial = ""
+            platform = device.get("platform", "")
+
+            if (version_list and isinstance(version_list, list)
+                    and len(version_list) > 0):
+                v = _normalize_keys(version_list[0])
+                sw_version = (v.get("version") or v.get("os_version")
+                              or v.get("os") or "")
+                serial = (v.get("serial") or v.get("serial_number")
+                          or v.get("serialnum") or "")
+                if not platform:
+                    platform = (v.get("hardware")
+                                or v.get("platform") or "")
+
+            if not serial:
+                inv_list = parsed.get("inventory", [])
+                if (inv_list and isinstance(inv_list, list)
+                        and len(inv_list) > 0):
+                    vi = _normalize_keys(inv_list[0])
+                    serial = (vi.get("sn")
+                              or vi.get("serial_number") or "")
+
+            if isinstance(platform, list):
+                platform = ", ".join(str(x) for x in platform)
+            if isinstance(sw_version, list):
+                sw_version = ", ".join(str(x) for x in sw_version)
+            if isinstance(serial, list):
+                serial = ", ".join(str(x) for x in serial)
+
+            rows.append([
+                hostname,
+                device.get("mgmt_ip", ""),
+                device.get("device_type", ""),
+                device.get("device_category", ""),
+                platform,
+                _get_platform_description(platform),
+                sw_version,
+                serial,
+            ])
+
+        return (headers, rows)
+
+    def _extract_stack_data(self, inventory_data):
+        headers = [
+            "Hostname", "Mgmt IP", "Member #", "Role",
+            "Model", "Serial", "MAC", "Priority", "State",
+        ]
+        rows = []
+        for hostname, device in sorted(
+            inventory_data.get("devices", {}).items()
+        ):
+            inv_data = (device.get("collector_data", {})
+                        .get("device_inventory", {}))
+            parsed = inv_data.get("parsed", {})
+            stack = parsed.get("stack_members", [])
+            if not stack:
+                continue
+
+            mgmt_ip = device.get("mgmt_ip", "")
+            for member in stack:
+                m = _normalize_keys(member)
+                rows.append([
+                    hostname,
+                    mgmt_ip,
+                    m.get("switch") or m.get("member") or "",
+                    m.get("role") or "",
+                    m.get("model") or m.get("hw_ver") or "",
+                    m.get("serial") or m.get("serialnum") or "",
+                    m.get("mac_address") or m.get("mac") or "",
+                    m.get("priority") or "",
+                    m.get("state") or m.get("status") or "",
+                ])
+
+        return (headers, rows)
+
+    def _extract_modules_data(self, inventory_data):
+        headers = [
+            "Hostname", "Mgmt IP", "Slot", "Type",
+            "Model", "Serial", "Status", "Ports",
+        ]
+        rows = []
+        for hostname, device in sorted(
+            inventory_data.get("devices", {}).items()
+        ):
+            inv_data = (device.get("collector_data", {})
+                        .get("device_inventory", {}))
+            parsed = inv_data.get("parsed", {})
+            modules = parsed.get("modules", [])
+            mgmt_ip = device.get("mgmt_ip", "")
+
+            if modules:
+                for mod in modules:
+                    m = _normalize_keys(mod)
+                    model = m.get("model") or ""
+                    mod_type = m.get("type") or m.get("module_type") or ""
+                    if not _is_real_module(model, mod_type):
+                        continue
+                    rows.append([
+                        hostname,
+                        mgmt_ip,
+                        m.get("module") or m.get("slot") or "",
+                        mod_type,
+                        model,
+                        m.get("serial") or m.get("serialnum") or "",
+                        m.get("status") or "",
+                        m.get("ports") or "",
+                    ])
+            else:
+                inv_list = parsed.get("inventory", [])
+                for item in inv_list:
+                    it = _normalize_keys(item)
+                    descr = (it.get("descr")
+                             or it.get("description") or "").lower()
+                    name = (it.get("name") or "").lower()
+                    if any(skip in descr or skip in name
+                           for skip in _SKIP_INVENTORY_TYPES):
+                        continue
+                    if "chassis" in name:
+                        continue
+                    rows.append([
+                        hostname,
+                        mgmt_ip,
+                        it.get("name") or "",
+                        it.get("descr") or it.get("description") or "",
+                        it.get("pid") or "",
+                        it.get("sn") or it.get("serial_number") or "",
+                        "",
+                        "",
+                    ])
+
+        return (headers, rows)
 
     def _build_devices_sheet(self, wb, inventory_data):
         headers = [

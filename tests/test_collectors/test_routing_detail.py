@@ -21,7 +21,8 @@ def test_get_commands_ios(collector):
     assert "show ip bgp summary" in cmds
     assert "show ip eigrp topology" in cmds
     assert "show ip eigrp neighbors detail" in cmds
-    assert len(cmds) == 6
+    assert "show ip bgp" in cmds
+    assert len(cmds) == 7
 
 
 def test_parse_empty(collector):
@@ -32,6 +33,7 @@ def test_parse_empty(collector):
     assert result["bgp_summary"] == []
     assert result["eigrp_topology"] == []
     assert result["eigrp_neighbors"] == []
+    assert result["bgp_table"] == []
 
 
 def test_parse_route_summary(collector):

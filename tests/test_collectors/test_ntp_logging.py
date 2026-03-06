@@ -22,6 +22,8 @@ def test_get_commands_ios(collector):
         "show ntp associations",
         "show logging",
         "show snmp",
+        "show aaa sessions",
+        "show running-config | section aaa",
     ]
 
 

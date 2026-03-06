@@ -14,27 +14,41 @@ def test_attrs(collector):
 
 
 def test_get_commands(collector):
+    expected = [
+        "show access-lists",
+        "show ip interface",
+        "show ip nat translations",
+        "show ip nat statistics",
+    ]
+
     cmds = collector.get_commands("cisco_ios")
-    assert cmds == ["show access-lists", "show ip interface"]
+    assert cmds == expected
 
     cmds_xe = collector.get_commands("cisco_xe")
-    assert cmds_xe == ["show access-lists", "show ip interface"]
+    assert cmds_xe == expected
 
     cmds_nxos = collector.get_commands("cisco_nxos")
-    assert cmds_nxos == ["show access-lists", "show ip interface"]
+    assert cmds_nxos == expected
 
     cmds_unknown = collector.get_commands("some_unknown")
-    assert cmds_unknown == ["show access-lists", "show ip interface"]
+    assert cmds_unknown == expected
 
 
 def test_parse_empty(collector):
+    empty_expected = {
+        "access_lists": [],
+        "ip_interfaces": [],
+        "nat_translations": [],
+        "nat_statistics": {},
+    }
+
     result = collector.parse({}, "cisco_ios")
-    assert result == {"access_lists": [], "ip_interfaces": []}
+    assert result == empty_expected
 
     result2 = collector.parse(
         {"show access-lists": "", "show ip interface": ""}, "cisco_ios"
     )
-    assert result2 == {"access_lists": [], "ip_interfaces": []}
+    assert result2 == empty_expected
 
 
 def test_parse_acl_extended(collector):

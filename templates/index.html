@@ -317,6 +317,30 @@
             color: var(--text-dim);
             text-transform: uppercase;
         }
+        .format-group {
+            display: flex;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+        }
+        .fmt-btn {
+            background: var(--bg-input);
+            border: none;
+            border-right: 1px solid var(--border);
+            color: var(--text-muted);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            padding: 4px 8px;
+            cursor: pointer;
+            transition: background var(--transition), color var(--transition);
+            text-transform: uppercase;
+        }
+        .fmt-btn:last-child { border-right: none; }
+        .fmt-btn:hover { color: var(--text); }
+        .fmt-btn.active {
+            background: var(--accent-muted);
+            color: var(--accent);
+        }
 
         /* Category headers */
         .category-header {
@@ -337,13 +361,23 @@
             display: flex;
             align-items: center;
             justify-content: space-between;
-            padding: 10px 12px;
+            padding: 12px 14px;
             border: 1px solid var(--border);
             border-radius: var(--radius);
             margin-bottom: 6px;
             background: var(--bg-card-alt);
+            cursor: pointer;
+            transition: border-color var(--transition), background var(--transition);
         }
+        .inventory-row:hover { border-color: var(--border-focus); background: var(--bg-hover); }
         .inv-actions { display: flex; gap: 6px; }
+        .inv-empty {
+            text-align: center;
+            padding: 32px 16px;
+            color: var(--text-muted);
+            font-size: 14px;
+        }
+        .upload-link:hover { color: var(--text); }
         .btn-sm {
             padding: 4px 10px;
             font-size: 13px;
@@ -391,7 +425,7 @@
         <!-- Tab bar -->
         <div class="tab-bar">
             <button class="active" onclick="switchTab('discover', this)">New Discovery</button>
-            <button onclick="switchTab('load', this)">Import Previous Scan</button>
+            <button onclick="switchTab('load', this)">Saved Scans</button>
         </div>
         <div class="tab-body">
 
@@ -474,26 +508,15 @@
                 </form>
             </div>
 
-            <!-- Import Previous Scan Tab -->
+            <!-- Saved Scans Tab -->
             <div id="tab-load" class="tab-content">
-                <form method="POST" action="/load-inventory" enctype="multipart/form-data">
-                    <div class="form-group">
-                        <label>Upload Inventory JSON File</label>
-                        <input type="file" name="file" accept=".json" style="padding: 10px;">
-                    </div>
-                    <p style="text-align: center; color: var(--text-dim); margin: 15px 0;">-- or select from saved inventories --</p>
-                    <div class="form-group">
-                        <label for="inv_filename">Saved Inventories</label>
-                        <select id="inv_filename" name="filename">
-                            <option value="">-- Select --</option>
-                        </select>
-                    </div>
-
-                    <button type="submit" class="btn-primary">Import Scan Data</button>
-                </form>
-
                 <div class="inventory-list" id="inventory-list">
-                    <div class="category-header">SAVED INVENTORIES</div>
+                </div>
+                <div style="margin-top: 16px; text-align: center;">
+                    <label class="upload-link" style="display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-muted); cursor: pointer; margin-bottom: 0;">
+                        <span style="font-size: 15px;">&#8593;</span> Upload scan data JSON
+                        <input type="file" id="upload-inventory-file" accept=".json" style="display: none;">
+                    </label>
                 </div>
             </div>
         </div>
@@ -533,24 +556,16 @@
             </div>
             {% endif %}
 
-            {% if visualization %}
-            <div style="margin-top: 20px; text-align: center;">
-                <a href="/visualization/{{ visualization }}" target="_blank" class="btn-primary" style="display: inline-block; width: auto; text-decoration: none;">
-                    View Interactive Network Diagram
-                </a>
-            </div>
-            {% endif %}
-
             {% if export_key %}
             <div style="margin-top: 24px;">
                 <div class="category-header">DATA EXPORTS</div>
                 <div class="download-grid">
                     <a href="/export/inventory/{{ export_key }}" class="download-card">
-                        <div class="dl-label">Discovery Inventory</div>
+                        <div class="dl-label">Scan Data</div>
                         <div class="dl-format mono">.JSON</div>
                     </a>
                     <a href="/export/archive/{{ export_key }}" class="download-card">
-                        <div class="dl-label">Full Archive</div>
+                        <div class="dl-label">Scan Data + Configs</div>
                         <div class="dl-format mono">.ZIP</div>
                     </a>
                 </div>
@@ -564,16 +579,24 @@
                         {% set ns.current_cat = r.category %}
                         <div class="category-header">{{ r.category | upper }}</div>
                     {% endif %}
-                    <div class="report-card {% if not r.can_generate %}disabled{% endif %}">
+                    <div class="report-card {% if not r.can_generate %}disabled{% endif %}" data-report="{{ r.name }}">
                         <div>
                             <div class="report-name">{{ r.label }}</div>
                             <div class="report-desc">{{ r.description }}</div>
                         </div>
                         <div style="display: flex; align-items: center; gap: 8px;">
-                            <span class="report-format mono">.{{ r.format | upper }}</span>
+                            {% if r.supported_formats | length > 1 %}
+                            <div class="format-group">
+                                {% for f in r.supported_formats %}
+                                <button class="fmt-btn{% if loop.first %} active{% endif %}" data-fmt="{{ f }}">.{{ f | upper }}</button>
+                                {% endfor %}
+                            </div>
+                            {% else %}
+                            <span class="report-format mono">.{{ r.supported_formats[0] | upper }}</span>
+                            {% endif %}
                             {% if r.can_generate %}
                             <button class="btn-sm"
-                                    onclick="downloadReport('{{ export_key }}', '{{ r.name }}')">
+                                    onclick="downloadReport('{{ export_key }}', '{{ r.name }}', this)">
                                 GENERATE
                             </button>
                             {% else %}
@@ -599,9 +622,25 @@
     }
 
     /* Download on-demand report */
-    function downloadReport(key, reportName) {
-        window.location.href = '/export/report/' + encodeURIComponent(key) + '/' + encodeURIComponent(reportName);
+    function downloadReport(key, reportName, btn) {
+        var card = btn.closest('.report-card');
+        var activeBtn = card.querySelector('.fmt-btn.active');
+        var fmt = activeBtn ? activeBtn.dataset.fmt : '';
+        var url = '/export/report/' + encodeURIComponent(key) + '/' + encodeURIComponent(reportName);
+        if (fmt) url += '?format=' + encodeURIComponent(fmt);
+        if (fmt === 'html' || (!fmt && reportName === 'topology_map')) {
+            window.open(url + (url.indexOf('?') === -1 ? '?inline=1' : '&inline=1'), '_blank');
+        } else {
+            window.location.href = url;
+        }
     }
+
+    document.addEventListener('click', function(e) {
+        if (!e.target.classList.contains('fmt-btn')) return;
+        var group = e.target.closest('.format-group');
+        group.querySelectorAll('.fmt-btn').forEach(function(b) { b.classList.remove('active'); });
+        e.target.classList.add('active');
+    });
 
     /* Select-all for device type checkboxes */
     (function () {
@@ -623,35 +662,19 @@
         syncMaster();
     })();
 
-    /* Load saved inventories into dropdown */
-    (function () {
-        fetch('/inventories')
-            .then(function(r) { return r.json(); })
-            .then(function(items) {
-                var sel = document.getElementById('inv_filename');
-                items.forEach(function(inv) {
-                    var opt = document.createElement('option');
-                    opt.value = inv.filename;
-                    opt.textContent = inv.seed_ip + ' - ' + inv.device_count + ' devices (' + inv.timestamp.split('T')[0] + ')';
-                    sel.appendChild(opt);
-                });
-            })
-            .catch(function() {});
-    })();
-
-    /* Inventory management list */
+    /* Saved scans list */
     function loadInventoryList() {
         fetch('/inventories')
             .then(function(r) { return r.json(); })
             .then(function(items) {
                 var list = document.getElementById('inventory-list');
-                while (list.children.length > 1) {
-                    list.removeChild(list.lastChild);
+                while (list.firstChild) {
+                    list.removeChild(list.firstChild);
                 }
                 if (items.length === 0) {
-                    var empty = document.createElement('p');
-                    empty.className = 'text-muted';
-                    empty.textContent = 'No saved inventories.';
+                    var empty = document.createElement('div');
+                    empty.className = 'inv-empty';
+                    empty.textContent = 'No saved scans. Run a discovery to get started.';
                     list.appendChild(empty);
                     return;
                 }
@@ -659,10 +682,14 @@
                     var key = inv.filename.replace('.json', '');
                     var row = document.createElement('div');
                     row.className = 'inventory-row';
+                    row.addEventListener('click', function() {
+                        loadScan(inv.filename);
+                    });
                     var info = document.createElement('div');
                     info.className = 'inv-info';
                     var ip = document.createElement('span');
                     ip.className = 'mono';
+                    ip.style.color = 'var(--text-bright)';
                     ip.textContent = inv.seed_ip;
                     info.appendChild(ip);
                     var sep = document.createTextNode(' \u2014 ');
@@ -684,12 +711,14 @@
                     dlLink.className = 'btn-sm';
                     dlLink.title = 'Download';
                     dlLink.textContent = '\u2193';
+                    dlLink.addEventListener('click', function(e) { e.stopPropagation(); });
                     actions.appendChild(dlLink);
                     var delBtn = document.createElement('button');
                     delBtn.className = 'btn-sm btn-danger';
                     delBtn.title = 'Delete';
                     delBtn.textContent = '\u2715';
-                    delBtn.addEventListener('click', function() {
+                    delBtn.addEventListener('click', function(e) {
+                        e.stopPropagation();
                         deleteInventory(inv.filename);
                     });
                     actions.appendChild(delBtn);
@@ -699,13 +728,41 @@
             });
     }
 
+    function loadScan(filename) {
+        var form = document.createElement('form');
+        form.method = 'POST';
+        form.action = '/load-inventory';
+        var input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'filename';
+        input.value = filename;
+        form.appendChild(input);
+        document.body.appendChild(form);
+        form.submit();
+    }
+
     function deleteInventory(filename) {
-        if (!confirm('Delete inventory ' + filename + '?')) return;
+        if (!confirm('Delete scan ' + filename + '?')) return;
         fetch('/inventories/' + encodeURIComponent(filename), { method: 'DELETE' })
             .then(function(r) {
                 if (r.ok) loadInventoryList();
             });
     }
+
+    /* Upload inventory file */
+    document.getElementById('upload-inventory-file').addEventListener('change', function() {
+        if (!this.files.length) return;
+        var form = document.createElement('form');
+        form.method = 'POST';
+        form.action = '/load-inventory';
+        form.enctype = 'multipart/form-data';
+        var fileInput = this.cloneNode(true);
+        fileInput.name = 'file';
+        fileInput.style.display = 'none';
+        form.appendChild(fileInput);
+        document.body.appendChild(form);
+        form.submit();
+    });
 
     loadInventoryList();
 </script>

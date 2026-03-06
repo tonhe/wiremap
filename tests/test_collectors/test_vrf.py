@@ -27,7 +27,7 @@ def test_get_commands_nxos(collector):
 
 def test_parse_empty(collector):
     result = collector.parse({}, "cisco_ios")
-    assert result == {"vrfs": [], "vrf_interfaces": []}
+    assert result == {"vrfs": [], "vrf_interfaces": [], "vrf_routes": {}, "vrf_arp": {}}
 
 
 def test_parse_vrfs_basic(collector):

@@ -15,7 +15,7 @@ Tabs:
 """
 import io
 import re
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from ipaddress import IPv4Network, AddressValueError
 
 from openpyxl import Workbook
@@ -743,9 +743,12 @@ class RoutingSummaryReport(BaseReport):
     description = "Protocol neighbors, route tables, OSPF topology, IP audit, ARP/MAC map, VRF summary, and findings"
     category = "Layer 3 & Routing"
     required_collectors = ["l3_routing"]
-    supported_formats = ["xlsx"]
+    supported_formats = ["xlsx", "json", "csv", "xml"]
 
     def generate(self, inventory_data: dict, fmt: str = "xlsx") -> bytes:
+        if fmt != "xlsx":
+            return self._generate_for_format(inventory_data, fmt)
+
         analysis = _analyze_l3(inventory_data)
 
         wb = Workbook()
@@ -789,3 +792,315 @@ class RoutingSummaryReport(BaseReport):
         buf = io.BytesIO()
         wb.save(buf)
         return buf.getvalue()
+
+    def generate_tabular_data(self, inventory_data):
+        analysis = _analyze_l3(inventory_data)
+        devices = inventory_data.get("devices", {})
+        sheets = OrderedDict()
+
+        # --- Summary (flat key-value table) ---
+        routed_count = 0
+        total_routes = 0
+        for device in devices.values():
+            cd = device.get("collector_data", {})
+            l3 = cd.get("l3_routing", {}).get("parsed", {})
+            rd = cd.get("routing_detail", {}).get("parsed", {})
+            if l3.get("neighbors") or l3.get("routes") or rd.get("route_summary"):
+                routed_count += 1
+            total_routes += len(l3.get("routes", []))
+
+        critical = sum(1 for f in analysis["findings"] if f.get("severity") == "Critical")
+        warning = sum(1 for f in analysis["findings"] if f.get("severity") == "Warning")
+        info = sum(1 for f in analysis["findings"] if f.get("severity") == "Info")
+
+        sheets["Summary"] = (
+            ["Metric", "Value"],
+            [
+                ["Total Devices", len(devices)],
+                ["Routed Devices", routed_count],
+                ["Total Routes", total_routes],
+                ["Critical Findings", critical],
+                ["Warning Findings", warning],
+                ["Info Findings", info],
+            ],
+        )
+
+        # --- Protocol Neighbors ---
+        neighbor_headers = ["Device", "Site/Location", "Protocol", "Neighbor IP",
+                            "Neighbor Device", "State"]
+        neighbor_rows = []
+        for hostname, device in sorted(devices.items()):
+            parsed = device.get("collector_data", {}).get("l3_routing", {}).get("parsed", {})
+            site = _derive_site(hostname)
+            for n in parsed.get("neighbors", []):
+                neighbor_rows.append([
+                    hostname,
+                    site,
+                    ", ".join(n.get("protocols", [])),
+                    n.get("remote_ip", ""),
+                    n.get("remote_device", ""),
+                    n.get("state", ""),
+                ])
+        sheets["Protocol Neighbors"] = (neighbor_headers, neighbor_rows)
+
+        # --- Routes ---
+        route_headers = ["Device", "Site/Location", "Network", "Mask",
+                         "Next Hop", "Interface", "Protocol", "Metric"]
+        route_rows = []
+        for hostname, device in sorted(devices.items()):
+            parsed = device.get("collector_data", {}).get("l3_routing", {}).get("parsed", {})
+            site = _derive_site(hostname)
+            for r in parsed.get("routes", []):
+                route_rows.append([
+                    hostname,
+                    site,
+                    r.get("network", r.get("destination", "")),
+                    r.get("mask", r.get("prefix_length", "")),
+                    r.get("nexthop_ip", r.get("next_hop", "")),
+                    r.get("nexthop_if", r.get("interface", "")),
+                    r.get("protocol", ""),
+                    r.get("metric", ""),
+                ])
+        sheets["Routes"] = (route_headers, route_rows)
+
+        # --- Routed Interfaces ---
+        ri_headers = ["Device", "Site/Location", "Interface", "IP / CIDR",
+                      "Description / Neighbor", "Notes"]
+        ri_rows = []
+        for hostname, device in sorted(devices.items()):
+            interfaces = _extract_ip_interfaces(device)
+            site = _derive_site(hostname)
+            for intf in sorted(interfaces, key=lambda x: x["interface"]):
+                iface_name = intf["interface"]
+                if re.match(r"^[Vv]lan\d+$", iface_name):
+                    continue
+                for ip_info in intf["ips"]:
+                    cidr = (f"{ip_info['ip']}/{ip_info['prefix']}"
+                            if ip_info["prefix"] else ip_info["ip"])
+                    desc = _get_interface_description(device, iface_name)
+                    if not desc:
+                        desc = _get_cdp_neighbor(device, iface_name)
+                    iface_lower = iface_name.lower()
+                    if "loopback" in iface_lower:
+                        note = "Loopback"
+                    elif "mgmt" in iface_lower or "management" in iface_lower:
+                        note = "OOB management"
+                    elif "port-channel" in iface_lower or iface_lower[:2] == "po":
+                        note = "Routed port-channel"
+                    elif "tunnel" in iface_lower:
+                        note = "Tunnel"
+                    else:
+                        note = "Routed interface"
+                    if ip_info["secondary"]:
+                        note += " (secondary)"
+                    ri_rows.append([hostname, site, iface_name, cidr, desc, note])
+        sheets["Routed Interfaces"] = (ri_headers, ri_rows)
+
+        # --- Route Summary (conditional) ---
+        if _has_collector_data(inventory_data, "routing_detail"):
+            rs_headers = ["Device", "Site/Location", "Connected", "Static",
+                          "OSPF", "EIGRP", "BGP", "Other", "Total"]
+            rs_rows = []
+            for hostname, device in sorted(devices.items()):
+                rd_parsed = device.get("collector_data", {}).get("routing_detail", {}).get("parsed", {})
+                route_summary = rd_parsed.get("route_summary", [])
+                if not route_summary:
+                    continue
+                site = _derive_site(hostname)
+                counts = {"connected": 0, "static": 0, "ospf": 0,
+                          "eigrp": 0, "bgp": 0, "other": 0}
+                total = 0
+                for rs in route_summary:
+                    source = str(rs.get("source", "")).lower()
+                    count = rs.get("count", 0)
+                    if not isinstance(count, int):
+                        try:
+                            count = int(count)
+                        except (ValueError, TypeError):
+                            count = 0
+                    if "connected" in source:
+                        counts["connected"] += count
+                    elif "static" in source:
+                        counts["static"] += count
+                    elif "ospf" in source:
+                        counts["ospf"] += count
+                    elif "eigrp" in source:
+                        counts["eigrp"] += count
+                    elif "bgp" in source:
+                        counts["bgp"] += count
+                    else:
+                        counts["other"] += count
+                    total += count
+                rs_rows.append([
+                    hostname, site,
+                    counts["connected"], counts["static"], counts["ospf"],
+                    counts["eigrp"], counts["bgp"], counts["other"], total,
+                ])
+            sheets["Route Summary"] = (rs_headers, rs_rows)
+
+        # --- OSPF Topology (conditional) ---
+        if _has_collector_data(inventory_data, "routing_detail"):
+            ospf_headers = ["Device", "Site/Location", "Process ID", "Router ID",
+                            "Area", "Interface", "Cost", "State", "Neighbors"]
+            ospf_rows = []
+            for hostname, device in sorted(devices.items()):
+                rd_parsed = device.get("collector_data", {}).get("routing_detail", {}).get("parsed", {})
+                ospf_procs = rd_parsed.get("ospf_processes", [])
+                ospf_intfs = rd_parsed.get("ospf_interfaces", [])
+                site = _derive_site(hostname)
+                if not ospf_procs and not ospf_intfs:
+                    continue
+                proc_id = ""
+                router_id = ""
+                proc_areas = []
+                if ospf_procs:
+                    p = ospf_procs[0]
+                    proc_id = p.get("process_id", "")
+                    router_id = p.get("router_id", "")
+                    proc_areas = p.get("areas", [])
+                if ospf_intfs:
+                    for oi in ospf_intfs:
+                        ospf_rows.append([
+                            hostname, site, proc_id, router_id,
+                            oi.get("area", ""),
+                            oi.get("interface", ""),
+                            oi.get("cost", ""),
+                            oi.get("state", ""),
+                            oi.get("neighbors", oi.get("nbrs_full", "")),
+                        ])
+                elif ospf_procs:
+                    for area in proc_areas:
+                        ospf_rows.append([
+                            hostname, site, proc_id, router_id,
+                            area, "", "", "", "",
+                        ])
+            sheets["OSPF Topology"] = (ospf_headers, ospf_rows)
+
+        # --- IP Address Audit (conditional) ---
+        if _has_collector_data(inventory_data, "interfaces"):
+            ip_headers = ["Device", "Site/Location", "Interface", "IP / CIDR",
+                          "Subnet", "VLAN", "Overlap"]
+            all_entries = []
+            for hostname, device in sorted(devices.items()):
+                ip_interfaces = _extract_ip_interfaces(device)
+                site = _derive_site(hostname)
+                for intf in ip_interfaces:
+                    iface_name = intf["interface"]
+                    vlan = ""
+                    m = re.match(r"^[Vv]lan(\d+)$", iface_name)
+                    if m:
+                        vlan = m.group(1)
+                    for ip_info in intf["ips"]:
+                        ip = ip_info["ip"]
+                        prefix = ip_info["prefix"]
+                        cidr = f"{ip}/{prefix}" if prefix else ip
+                        subnet = ""
+                        net_obj = None
+                        if ip and prefix:
+                            try:
+                                net_obj = IPv4Network(f"{ip}/{prefix}", strict=False)
+                                subnet = str(net_obj)
+                            except (AddressValueError, ValueError):
+                                pass
+                        all_entries.append({
+                            "hostname": hostname,
+                            "site": site,
+                            "interface": iface_name,
+                            "cidr": cidr,
+                            "subnet": subnet,
+                            "vlan": vlan,
+                            "net_obj": net_obj,
+                        })
+            # Detect overlaps
+            overlap_map = {}
+            for i, a in enumerate(all_entries):
+                if not a["net_obj"]:
+                    continue
+                for j, b in enumerate(all_entries):
+                    if j <= i or not b["net_obj"]:
+                        continue
+                    if a["hostname"] == b["hostname"]:
+                        continue
+                    if a["net_obj"] == b["net_obj"]:
+                        continue
+                    if a["net_obj"].overlaps(b["net_obj"]):
+                        desc = f"Overlaps {b['hostname']} {b['interface']}"
+                        overlap_map.setdefault(i, []).append(desc)
+                        desc_b = f"Overlaps {a['hostname']} {a['interface']}"
+                        overlap_map.setdefault(j, []).append(desc_b)
+            ip_rows = []
+            for idx, entry in enumerate(all_entries):
+                overlap = "; ".join(overlap_map.get(idx, []))
+                ip_rows.append([
+                    entry["hostname"], entry["site"], entry["interface"],
+                    entry["cidr"], entry["subnet"], entry["vlan"],
+                    overlap or "",
+                ])
+            sheets["IP Address Audit"] = (ip_headers, ip_rows)
+
+        # --- ARP/MAC Map (conditional) ---
+        if _has_collector_data(inventory_data, "arp"):
+            arp_headers = ["Device", "Site/Location", "IP Address", "MAC Address",
+                           "Interface", "VLAN", "Vendor OUI"]
+            arp_rows = []
+            for hostname, device in sorted(devices.items()):
+                cd = device.get("collector_data", {})
+                arp_parsed = cd.get("arp", {}).get("parsed", {})
+                mac_parsed = cd.get("mac_table", {}).get("parsed", {})
+                site = _derive_site(hostname)
+                mac_vlan = {}
+                for me in mac_parsed.get("entries", []):
+                    mac = me.get("mac", me.get("destination_address", "")).lower()
+                    vlan = me.get("vlan", me.get("vlan_id", ""))
+                    if mac:
+                        mac_vlan[mac] = str(vlan)
+                for entry in arp_parsed.get("entries", []):
+                    ip = entry.get("ip", entry.get("address", ""))
+                    mac = entry.get("mac", entry.get("hardware", ""))
+                    intf = entry.get("interface", entry.get("port", ""))
+                    vlan = mac_vlan.get(mac.lower(), "") if mac else ""
+                    oui = ""
+                    if mac:
+                        clean_mac = mac.replace(":", "").replace(".", "").replace("-", "")
+                        if len(clean_mac) >= 6:
+                            oui = clean_mac[:6].upper()
+                    arp_rows.append([hostname, site, ip, mac, intf, vlan, oui])
+            sheets["ARP MAC Map"] = (arp_headers, arp_rows)
+
+        # --- VRF Summary (conditional) ---
+        if _has_collector_data(inventory_data, "vrf"):
+            vrf_headers = ["Device", "Site/Location", "VRF Name", "RD",
+                           "Interfaces", "Interface Count"]
+            vrf_rows = []
+            for hostname, device in sorted(devices.items()):
+                vrf_parsed = device.get("collector_data", {}).get("vrf", {}).get("parsed", {})
+                vrfs = vrf_parsed.get("vrfs", [])
+                if not vrfs:
+                    continue
+                site = _derive_site(hostname)
+                for v in vrfs:
+                    intfs = v.get("interfaces", [])
+                    vrf_rows.append([
+                        hostname, site,
+                        v.get("name", ""),
+                        v.get("rd", ""),
+                        ", ".join(intfs),
+                        len(intfs),
+                    ])
+            sheets["VRF Summary"] = (vrf_headers, vrf_rows)
+
+        # --- Findings ---
+        findings_headers = ["Device", "Site/Location", "Severity", "Finding", "Details"]
+        findings_rows = []
+        for finding in analysis["findings"]:
+            hostname = finding.get("hostname", "")
+            findings_rows.append([
+                hostname,
+                _derive_site(hostname),
+                finding.get("severity", "Info"),
+                finding["title"],
+                finding["description"],
+            ])
+        sheets["Findings"] = (findings_headers, findings_rows)
+
+        return sheets

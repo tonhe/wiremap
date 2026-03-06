@@ -341,7 +341,10 @@ def export_report(key, report_name):
     if not report.can_generate(inventory_data):
         return "Insufficient data for this report", 400
 
-    fmt = report.supported_formats[0]
+    fmt = request.args.get('format', report.supported_formats[0])
+    if fmt not in report.supported_formats:
+        return "Unsupported format", 400
+
     content = report.generate(inventory_data, fmt)
 
     mime_types = {
@@ -349,18 +352,25 @@ def export_report(key, report_name):
         "html": "text/html",
         "zip": "application/zip",
         "pdf": "application/pdf",
+        "json": "application/json",
+        "csv": "text/csv",
+        "xml": "application/xml",
     }
     extensions = {
         "xlsx": "xlsx",
         "html": "html",
         "zip": "zip",
         "pdf": "pdf",
+        "json": "json",
+        "csv": "csv",
+        "xml": "xml",
     }
 
+    inline = request.args.get('inline')
     return send_file(
         io.BytesIO(content),
         mimetype=mime_types.get(fmt, "application/octet-stream"),
-        as_attachment=True,
+        as_attachment=not inline,
         download_name=f"{report_name}_{key}.{extensions.get(fmt, 'bin')}",
     )
 
@@ -376,6 +386,7 @@ def _get_report_info():
             "label": r.label,
             "description": r.description,
             "format": r.supported_formats[0],
+            "supported_formats": r.supported_formats,
             "category": r.category,
             "ui_options": r.get_ui_options(),
         }
@@ -393,6 +404,7 @@ def _get_available_reports(inventory_data):
             "label": r.label,
             "description": r.description,
             "format": r.supported_formats[0],
+            "supported_formats": r.supported_formats,
             "category": r.category,
             "ui_options": r.get_ui_options(),
             "can_generate": r.can_generate(inventory_data),
