@@ -85,12 +85,12 @@ def test_generate_xlsx_modules_sheet(sample_inventory):
     assert ws.cell(row=1, column=1).value == "Hostname"
     assert ws.cell(row=1, column=3).value == "Slot"
     assert ws.cell(row=1, column=4).value == "Type"
-    # SW1 has 2 modules
+    # Chassis PIDs (WS-C3750X-48) should be filtered out;
+    # only real NM modules should appear
     assert ws.cell(row=2, column=1).value == "SW1"
-    assert ws.cell(row=2, column=3).value == "1"
-    assert ws.cell(row=2, column=4).value == "Supervisor Module"
-    assert ws.cell(row=3, column=3).value == "2"
-    assert ws.cell(row=3, column=4).value == "Line Card"
+    assert ws.cell(row=2, column=3).value == "3"
+    assert ws.cell(row=2, column=4).value == "FRULink 1G Module"
+    assert ws.cell(row=2, column=5).value == "C3KX-NM-1G"
 
 
 def test_modules_sheet_uses_inventory_fallback(sample_inventory):

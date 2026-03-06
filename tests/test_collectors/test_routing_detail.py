@@ -19,7 +19,9 @@ def test_get_commands_ios(collector):
     assert "show ip ospf" in cmds
     assert "show ip ospf interface brief" in cmds
     assert "show ip bgp summary" in cmds
-    assert len(cmds) == 4
+    assert "show ip eigrp topology" in cmds
+    assert "show ip eigrp neighbors detail" in cmds
+    assert len(cmds) == 6
 
 
 def test_parse_empty(collector):
@@ -28,6 +30,8 @@ def test_parse_empty(collector):
     assert result["ospf_processes"] == []
     assert result["ospf_interfaces"] == []
     assert result["bgp_summary"] == []
+    assert result["eigrp_topology"] == []
+    assert result["eigrp_neighbors"] == []
 
 
 def test_parse_route_summary(collector):

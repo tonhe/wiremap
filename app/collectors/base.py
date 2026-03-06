@@ -29,3 +29,24 @@ class BaseCollector(ABC):
         Returns:
             Parsed structured data dict.
         """
+
+    # Override this in collectors that need dynamic commands (e.g. per-VRF)
+    # or post-collection processing (e.g. SNMP redaction).
+    needs_custom_collect = False
+
+    def collect(self, connection, device_type: str) -> dict:
+        """Run commands and return raw + parsed data.
+
+        Override in subclasses that need dynamic commands or raw output
+        manipulation. The discovery engine calls this instead of the
+        batch path when needs_custom_collect is True.
+        """
+        cmds = self.get_commands(device_type)
+        raw_outputs = {}
+        for cmd in cmds:
+            try:
+                raw_outputs[cmd] = connection.send_command(cmd)
+            except Exception:
+                raw_outputs[cmd] = ""
+        parsed = self.parse(raw_outputs, device_type)
+        return {"raw": raw_outputs, "parsed": parsed}

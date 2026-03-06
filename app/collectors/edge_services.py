@@ -8,11 +8,31 @@ import re
 from .base import BaseCollector
 
 _COMMANDS = {
-    "cisco_ios": ["show access-lists", "show ip interface"],
-    "cisco_xe": ["show access-lists", "show ip interface"],
-    "cisco_nxos": ["show access-lists", "show ip interface"],
+    "cisco_ios": [
+        "show access-lists",
+        "show ip interface",
+        "show ip nat translations",
+        "show ip nat statistics",
+    ],
+    "cisco_xe": [
+        "show access-lists",
+        "show ip interface",
+        "show ip nat translations",
+        "show ip nat statistics",
+    ],
+    "cisco_nxos": [
+        "show access-lists",
+        "show ip interface",
+        "show ip nat translations",
+        "show ip nat statistics",
+    ],
 }
-_DEFAULT_COMMANDS = ["show access-lists", "show ip interface"]
+_DEFAULT_COMMANDS = [
+    "show access-lists",
+    "show ip interface",
+    "show ip nat translations",
+    "show ip nat statistics",
+]
 
 
 def _parse_access_lists(output: str) -> list[dict]:
@@ -179,6 +199,101 @@ def _parse_ip_interfaces(output: str) -> list[dict]:
     return interfaces
 
 
+def _parse_nat_translations(output: str) -> list[dict]:
+    """Parse 'show ip nat translations' output."""
+    entries = []
+    if not output or not output.strip():
+        return entries
+    for line in output.splitlines():
+        # "tcp 10.0.0.1:80      192.168.1.1:1024  10.0.0.1:80      192.168.1.1:1024"
+        # "--- 10.0.0.2         192.168.1.2       ---              ---"
+        # Pro  Inside global     Inside local      Outside local    Outside global
+        m = re.match(
+            r"^\s*(\S+)\s+"       # protocol
+            r"(\S+)\s+"           # inside global
+            r"(\S+)\s+"           # inside local
+            r"(\S+)\s+"           # outside local
+            r"(\S+)\s*$",         # outside global
+            line,
+        )
+        if m:
+            proto = m.group(1)
+            # Skip header line
+            if proto.lower() in ("pro", "prot", "protocol"):
+                continue
+            entries.append({
+                "protocol": proto,
+                "inside_global": m.group(2),
+                "inside_local": m.group(3),
+                "outside_local": m.group(4),
+                "outside_global": m.group(5),
+            })
+    return entries
+
+
+def _parse_nat_statistics(output: str) -> dict:
+    """Parse 'show ip nat statistics' output."""
+    stats = {
+        "active_translations": 0,
+        "peak_translations": 0,
+        "outside_interfaces": [],
+        "inside_interfaces": [],
+        "hits": 0,
+        "misses": 0,
+        "pools": [],
+    }
+    if not output or not output.strip():
+        return stats
+
+    for line in output.splitlines():
+        stripped = line.strip()
+
+        active_m = re.match(r"Total active translations:\s+(\d+)", stripped)
+        if active_m:
+            stats["active_translations"] = int(active_m.group(1))
+            continue
+
+        peak_m = re.match(r"Peak translations:\s+(\d+)", stripped)
+        if peak_m:
+            stats["peak_translations"] = int(peak_m.group(1))
+            continue
+
+        hits_m = re.match(r"Hits:\s+(\d+)\s+Misses:\s+(\d+)", stripped)
+        if hits_m:
+            stats["hits"] = int(hits_m.group(1))
+            stats["misses"] = int(hits_m.group(2))
+            continue
+
+        outside_m = re.match(r"Outside interfaces?:\s*(.+)", stripped, re.IGNORECASE)
+        if outside_m:
+            stats["outside_interfaces"] = [
+                i.strip() for i in outside_m.group(1).split(",") if i.strip()
+            ]
+            continue
+
+        inside_m = re.match(r"Inside interfaces?:\s*(.+)", stripped, re.IGNORECASE)
+        if inside_m:
+            stats["inside_interfaces"] = [
+                i.strip() for i in inside_m.group(1).split(",") if i.strip()
+            ]
+            continue
+
+        # Pool lines: "pool NATPOOL: ... total addresses 10, allocated 5 (50%), misses 0"
+        pool_m = re.match(
+            r"pool\s+(\S+):.+total addresses\s+(\d+).*allocated\s+(\d+)\s+\((\d+)%\)",
+            stripped, re.IGNORECASE,
+        )
+        if pool_m:
+            stats["pools"].append({
+                "name": pool_m.group(1),
+                "total_addresses": int(pool_m.group(2)),
+                "allocated": int(pool_m.group(3)),
+                "utilization_pct": int(pool_m.group(4)),
+            })
+
+    return stats
+
+
 class EdgeServicesCollector(BaseCollector):
     name = "edge_services"
     label = "Edge Services"
@@ -191,14 +306,22 @@ class EdgeServicesCollector(BaseCollector):
     def parse(self, raw_outputs: dict[str, str], device_type: str) -> dict:
         acl_cmd = "show access-lists"
         iface_cmd = "show ip interface"
+        nat_trans_cmd = "show ip nat translations"
+        nat_stats_cmd = "show ip nat statistics"
 
         acl_output = raw_outputs.get(acl_cmd, "")
         iface_output = raw_outputs.get(iface_cmd, "")
+        nat_trans_output = raw_outputs.get(nat_trans_cmd, "")
+        nat_stats_output = raw_outputs.get(nat_stats_cmd, "")
 
         access_lists = _parse_access_lists(acl_output) if acl_output else []
         ip_interfaces = _parse_ip_interfaces(iface_output) if iface_output else []
+        nat_translations = _parse_nat_translations(nat_trans_output) if nat_trans_output else []
+        nat_statistics = _parse_nat_statistics(nat_stats_output) if nat_stats_output else {}
 
         return {
             "access_lists": access_lists,
             "ip_interfaces": ip_interfaces,
+            "nat_translations": nat_translations,
+            "nat_statistics": nat_statistics,
         }

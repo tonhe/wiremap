@@ -3,6 +3,7 @@ Device Inventory report -- hostname, IP, platform, version, serial.
 Three sheets: Devices, Stack Members, Modules / Line Cards.
 """
 import io
+import re
 from openpyxl import Workbook
 
 from .base import BaseReport
@@ -112,6 +113,38 @@ _SKIP_INVENTORY_TYPES = {
     "fan", "power supply", "psu", "sfp", "transceiver",
     "sensor", "clk", "usb",
 }
+
+# Patterns for models that are chassis/switch PIDs, not real modules.
+_CHASSIS_MODEL_RE = re.compile(
+    r"^("
+    r"WS-C\d|"            # Catalyst 2960/3560/3750/3850/4500
+    r"C9[2-6]\d{2}[LX]?-\d|"  # Catalyst 9200/9300/9400/9500/9600
+    r"CISCO\d|"           # CISCO871, CISCO881, etc.
+    r"ISR\d.*/K9|"        # ISR4331/K9, ISR4451-X/K9
+    r"VG[23]\d{2}"        # VG224, VG310, VG320 chassis
+    r")", re.IGNORECASE
+)
+
+# Patterns for module types/models to exclude.
+_SKIP_MODULE_RE = re.compile(
+    r"("
+    r"stack|"             # stacking modules
+    r"PVDM|"             # DSP modules
+    r"GBIC|"             # GBICs
+    r"built-in|"         # ISR built-in controllers/processors
+    r"onboard.*voice|"   # onboard FXS voice interfaces
+    r"ISR\d{4}\S*-\d+x\d+GE"  # ISR4331-3x1GE, ISR4451-X-4x1GE built-in ports
+    r")", re.IGNORECASE
+)
+
+
+def _is_real_module(model, mod_type):
+    """Return True if this module entry is a real line card / network module."""
+    if _CHASSIS_MODEL_RE.match(model):
+        return False
+    if _SKIP_MODULE_RE.search(model) or _SKIP_MODULE_RE.search(mod_type):
+        return False
+    return True
 
 
 def _get_platform_description(pid: str) -> str:
@@ -260,12 +293,16 @@ class DeviceInventoryReport(BaseReport):
             if modules:
                 for mod in modules:
                     m = _normalize_keys(mod)
+                    model = m.get("model") or ""
+                    mod_type = m.get("type") or m.get("module_type") or ""
+                    if not _is_real_module(model, mod_type):
+                        continue
                     rows.append([
                         hostname,
                         mgmt_ip,
                         m.get("module") or m.get("slot") or "",
-                        m.get("type") or m.get("module_type") or "",
-                        m.get("model") or "",
+                        mod_type,
+                        model,
                         m.get("serial") or m.get("serialnum") or "",
                         m.get("status") or "",
                         m.get("ports") or "",

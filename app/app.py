@@ -212,6 +212,10 @@ def load_inventory():
         f = request.files['file']
         data = json.load(f)
         inventory = DiscoveryInventory(data)
+        # Save uploaded inventory so export routes can find it
+        check_path = os.path.join(INVENTORY_DIR, f"{inventory.discovery_id}.json")
+        if not os.path.exists(check_path):
+            inventory.save(INVENTORY_DIR)
     elif 'filename' in request.form:
         filepath = os.path.join(INVENTORY_DIR, request.form['filename'])
         if not os.path.exists(filepath):

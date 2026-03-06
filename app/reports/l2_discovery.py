@@ -1009,8 +1009,17 @@ def _build_port_security_sheet(wb, inventory_data):
             ws.cell(row=row, column=8, value=ps_str)
             ws.cell(row=row, column=9, value=voice_vlan)
 
-            # Highlight "No" cells with light red
-            for col in (5, 6, 7, 8):  # BPDU, Root Guard, Storm, Port Security
+            # Highlight missing security features based on port mode:
+            #   ACCESS: BPDU Guard (5), Storm Control (7)
+            #   TRUNK:  Root Guard (6), Storm Control (7)
+            is_trunk = "trunk" in mode.lower()
+            is_access = "access" in mode.lower() or "static access" in mode.lower()
+            highlight_cols = []
+            if is_access:
+                highlight_cols = [5, 7]   # BPDU Guard, Storm Control
+            elif is_trunk:
+                highlight_cols = [6, 7]   # Root Guard, Storm Control
+            for col in highlight_cols:
                 if ws.cell(row=row, column=col).value == "No":
                     ws.cell(row=row, column=col).fill = _ROOT_BAD_FILL
 

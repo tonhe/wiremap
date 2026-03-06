@@ -213,10 +213,19 @@ class DiscoveryEngine:
                 hostname, mgmt_ip=ip, device_type=device_type,
             )
 
-            # Gather all collector commands
+            # Split collectors into batch (standard) and custom (need connection)
+            batch_collectors = {}
+            custom_collectors = {}
+            for cname, collector in self._collectors.items():
+                if collector.needs_custom_collect:
+                    custom_collectors[cname] = collector
+                else:
+                    batch_collectors[cname] = collector
+
+            # Gather commands for batch collectors
             all_commands = []
             collector_commands = {}
-            for cname, collector in self._collectors.items():
+            for cname, collector in batch_collectors.items():
                 cmds = collector.get_commands(device_type)
                 collector_commands[cname] = cmds
                 all_commands.extend(cmds)
@@ -229,13 +238,13 @@ class DiscoveryEngine:
                     seen_cmds.add(cmd)
                     unique_commands.append(cmd)
 
-            # Run all commands in single session
+            # Run all batch commands in single session
             raw_outputs = ConnectionManager.run_commands(
                 conn, unique_commands,
             )
 
-            # Parse per collector and store
-            for cname, collector in self._collectors.items():
+            # Parse batch collectors
+            for cname, collector in batch_collectors.items():
                 cmds = collector_commands[cname]
                 collector_raw = {cmd: raw_outputs.get(cmd, "") for cmd in cmds}
                 try:
@@ -245,6 +254,18 @@ class DiscoveryEngine:
                     parsed = {}
                 inventory.set_collector_data(hostname, cname,
                                              raw=collector_raw, parsed=parsed)
+
+            # Run custom collectors (dynamic commands, post-processing)
+            for cname, collector in custom_collectors.items():
+                try:
+                    result = collector.collect(conn, device_type)
+                    inventory.set_collector_data(
+                        hostname, cname,
+                        raw=result["raw"], parsed=result["parsed"],
+                    )
+                except Exception as e:
+                    logger.warning(f"Collector {cname} collect failed on {hostname}: {e}")
+                    inventory.set_collector_data(hostname, cname, raw={}, parsed={})
 
             conn.disconnect()
 

@@ -16,21 +16,33 @@ _COMMANDS = {
         "show ip ospf",
         "show ip ospf interface brief",
         "show ip bgp summary",
+        "show ip eigrp topology",
+        "show ip eigrp neighbors detail",
+        "show ip bgp",
     ],
     "cisco_xe": [
         "show ip route summary",
         "show ip ospf",
         "show ip ospf interface brief",
         "show ip bgp summary",
+        "show ip eigrp topology",
+        "show ip eigrp neighbors detail",
+        "show ip bgp",
     ],
     "cisco_nxos": [
         "show ip route summary",
         "show ip ospf",
         "show ip ospf interface brief",
         "show ip bgp summary",
+        "show ip eigrp topology",
+        "show ip eigrp neighbors detail",
+        "show ip bgp",
     ],
 }
 _DEFAULT_COMMANDS = _COMMANDS["cisco_ios"]
+
+
+_NTC_PLATFORM_MAP = {"cisco_xe": "cisco_ios", "cisco_xr": "cisco_ios"}
 
 
 def _parse_ntc(raw: str, device_type: str, command: str) -> list[dict]:
@@ -39,7 +51,8 @@ def _parse_ntc(raw: str, device_type: str, command: str) -> list[dict]:
         return []
     try:
         from ntc_templates.parse import parse_output
-        return parse_output(platform=device_type, command=command, data=raw)
+        platform = _NTC_PLATFORM_MAP.get(device_type, device_type)
+        return parse_output(platform=platform, command=command, data=raw)
     except Exception:
         logger.debug(f"ntc-templates parse failed for {command} on {device_type}")
         return []
@@ -146,6 +159,91 @@ def _parse_bgp_summary_regex(raw: str) -> list[dict]:
     return results
 
 
+def _parse_eigrp_topology_regex(raw: str) -> list[dict]:
+    """Regex fallback for 'show ip eigrp topology'."""
+    results = []
+    for line in raw.splitlines():
+        # "P 10.0.0.0/24, 1 successors, FD is 28160"
+        m = re.match(
+            r"^([APUS])\s+(\d+\.\d+\.\d+\.\d+(/\d+)?),\s+(\d+)\s+successors?,\s+FD\s+is\s+(\d+)",
+            line,
+        )
+        if m:
+            results.append({
+                "code": m.group(1),
+                "network": m.group(2),
+                "successors": int(m.group(4)),
+                "feasible_distance": m.group(5),
+            })
+    return results
+
+
+def _parse_eigrp_neighbors_detail_regex(raw: str) -> list[dict]:
+    """Regex fallback for 'show ip eigrp neighbors detail'."""
+    results = []
+    current = None
+    for line in raw.splitlines():
+        # "H   Address     Interface    Hold Uptime   SRTT   RTO  Q  Seq"
+        # "0   10.0.0.2    Gi0/1          12 01:02:03  1   100  0  45"
+        m = re.match(
+            r"^\s*\d+\s+(\d+\.\d+\.\d+\.\d+)\s+(\S+)\s+\d+\s+(\S+)",
+            line,
+        )
+        if m:
+            current = {
+                "neighbor": m.group(1),
+                "interface": m.group(2),
+                "uptime": m.group(3),
+                "stub": False,
+                "stub_flags": "",
+            }
+            results.append(current)
+            continue
+        # "  Stub Peer Advertising (CONNECTED SUMMARY ) Routes"
+        if current and "stub peer" in line.lower():
+            current["stub"] = True
+            sm = re.search(r"\(([^)]+)\)", line)
+            if sm:
+                current["stub_flags"] = sm.group(1).strip()
+    return results
+
+
+def _parse_bgp_table_regex(raw: str) -> list[dict]:
+    """Regex fallback for 'show ip bgp' full table.
+
+    Extracts prefix entries with status, next-hop, metric, and path.
+    """
+    results = []
+    if not raw:
+        return results
+    for line in raw.splitlines():
+        # BGP table lines look like:
+        # "*> 10.0.0.0/24      10.1.1.1       0   100  0 65001 i"
+        # "*>i10.2.0.0/16      10.1.1.2       0   200  0 65002 65003 i"
+        # "* i                 10.1.1.3       0   150  0 65002 65003 i"  (continuation)
+        m = re.match(
+            r"^\s*([*>sdhibSr ]{0,4})"       # status codes
+            r"\s*(\d+\.\d+\.\d+\.\d+(?:/\d+)?)"  # network/prefix
+            r"\s+(\d+\.\d+\.\d+\.\d+)"       # next-hop
+            r"\s+(\d+)"                        # metric
+            r"\s+(\d+)"                        # local pref
+            r"\s+\d+"                          # weight
+            r"\s+(.+?)\s*$",                   # path + origin
+            line,
+        )
+        if m:
+            status = m.group(1).strip()
+            results.append({
+                "status": status,
+                "network": m.group(2),
+                "next_hop": m.group(3),
+                "metric": m.group(4),
+                "local_pref": m.group(5),
+                "path": m.group(6).strip(),
+            })
+    return results
+
+
 def _normalize_bgp_ntc(entries: list[dict]) -> list[dict]:
     """Normalize ntc-templates BGP summary output to our schema."""
     results = []
@@ -207,9 +305,33 @@ class RoutingDetailCollector(BaseCollector):
         else:
             bgp_summary = _parse_bgp_summary_regex(bgp_raw)
 
+        # --- eigrp topology ---
+        eigrp_topo_cmd = "show ip eigrp topology"
+        eigrp_topo_raw = raw_outputs.get(eigrp_topo_cmd, "")
+        eigrp_topology = _parse_ntc(eigrp_topo_raw, device_type, eigrp_topo_cmd)
+        if not eigrp_topology:
+            eigrp_topology = _parse_eigrp_topology_regex(eigrp_topo_raw)
+
+        # --- eigrp neighbors detail ---
+        eigrp_nbr_cmd = "show ip eigrp neighbors detail"
+        eigrp_nbr_raw = raw_outputs.get(eigrp_nbr_cmd, "")
+        eigrp_neighbors = _parse_ntc(eigrp_nbr_raw, device_type, eigrp_nbr_cmd)
+        if not eigrp_neighbors:
+            eigrp_neighbors = _parse_eigrp_neighbors_detail_regex(eigrp_nbr_raw)
+
+        # --- bgp table ---
+        bgp_table_cmd = "show ip bgp"
+        bgp_table_raw = raw_outputs.get(bgp_table_cmd, "")
+        bgp_table = _parse_ntc(bgp_table_raw, device_type, bgp_table_cmd)
+        if not bgp_table:
+            bgp_table = _parse_bgp_table_regex(bgp_table_raw)
+
         return {
             "route_summary": route_summary,
             "ospf_processes": ospf_processes,
             "ospf_interfaces": ospf_interfaces,
             "bgp_summary": bgp_summary,
+            "bgp_table": bgp_table,
+            "eigrp_topology": eigrp_topology,
+            "eigrp_neighbors": eigrp_neighbors,
         }

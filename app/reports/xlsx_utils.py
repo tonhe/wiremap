@@ -3,9 +3,16 @@ Shared XLSX styling utilities for all report modules.
 Provides consistent header styling, auto-width columns, frozen panes,
 and color fills using openpyxl.
 """
+import re
+
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
+# Regex to strip characters illegal in XML 1.0 (which openpyxl/XLSX requires)
+_ILLEGAL_XML_RE = re.compile(
+    r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]'
+)
 
 
 # Color palette
@@ -47,6 +54,8 @@ def write_data_rows(ws, rows: list[list], start_row: int = 2):
     """Write data rows with alternating row colors and borders."""
     for row_idx, row_data in enumerate(rows, start_row):
         for col_idx, value in enumerate(row_data, 1):
+            if isinstance(value, str):
+                value = _ILLEGAL_XML_RE.sub('', value)
             cell = ws.cell(row=row_idx, column=col_idx, value=value)
             cell.font = DATA_FONT
             cell.alignment = DATA_ALIGN

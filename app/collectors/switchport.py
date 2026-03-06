@@ -123,6 +123,7 @@ def _try_ntc_parse(command, output, device_type):
     platform_map = {
         "cisco_ios": "cisco_ios",
         "cisco_xe": "cisco_ios",
+        "cisco_xr": "cisco_ios",
         "cisco_nxos": "cisco_nxos",
     }
     platform = platform_map.get(device_type)

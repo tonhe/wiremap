@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 # ntc-templates doesn't have cisco_xe templates; use cisco_ios instead
 _NTC_PLATFORM_MAP = {
     "cisco_xe": "cisco_ios",
+    "cisco_xr": "cisco_ios",
 }
 
 _COMMANDS = {

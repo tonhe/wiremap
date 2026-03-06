@@ -13,18 +13,24 @@ _COMMANDS = {
         "show ntp associations",
         "show logging",
         "show snmp",
+        "show aaa sessions",
+        "show running-config | section aaa",
     ],
     "cisco_xe": [
         "show ntp status",
         "show ntp associations",
         "show logging",
         "show snmp",
+        "show aaa sessions",
+        "show running-config | section aaa",
     ],
     "cisco_nxos": [
         "show ntp status",
         "show ntp peer-status",
         "show logging",
         "show snmp",
+        "show aaa sessions",
+        "show running-config | section aaa",
     ],
 }
 _DEFAULT_COMMANDS = [
@@ -32,6 +38,8 @@ _DEFAULT_COMMANDS = [
     "show ntp associations",
     "show logging",
     "show snmp",
+    "show aaa sessions",
+    "show running-config | section aaa",
 ]
 
 
@@ -169,11 +177,75 @@ def _parse_snmp(output: str) -> dict:
     }
 
 
+def _parse_aaa(sessions_output: str, config_output: str) -> dict:
+    """Parse AAA session and config data.
+
+    SECURITY: Secrets/keys from AAA config are NOT stored.
+    Only boolean flags and structural metadata are kept.
+    """
+    result = {
+        "aaa_configured": False,
+        "authentication_methods": [],
+        "authorization_configured": False,
+        "accounting_configured": False,
+        "tacacs_configured": False,
+        "radius_configured": False,
+        "active_sessions": 0,
+    }
+
+    # Parse session count
+    if sessions_output and sessions_output.strip():
+        session_count = 0
+        for line in sessions_output.splitlines():
+            # Count data lines (skip headers/blanks)
+            stripped = line.strip()
+            if stripped and not stripped.startswith("Total") and not stripped.startswith("---"):
+                # Check if line looks like a session entry (starts with a number or has session data)
+                if re.match(r"^\s*\d+", stripped) or re.match(r"^\S+\s+\S+\s+\S+", stripped):
+                    session_count += 1
+        # Also check for "Total sessions: N" line
+        total_m = re.search(r"Total\s+sessions:\s*(\d+)", sessions_output, re.IGNORECASE)
+        if total_m:
+            session_count = int(total_m.group(1))
+        result["active_sessions"] = session_count
+
+    # Parse AAA config section
+    if config_output and config_output.strip():
+        result["aaa_configured"] = True
+
+        for line in config_output.splitlines():
+            stripped = line.strip()
+
+            # "aaa authentication login default group tacacs+ local"
+            auth_m = re.match(r"aaa authentication\s+(\S+)\s+(\S+)\s+(.+)", stripped)
+            if auth_m:
+                methods = auth_m.group(3).strip()
+                # Redact any key/secret values
+                methods = re.sub(r"key\s+\S+", "key <REDACTED>", methods)
+                result["authentication_methods"].append({
+                    "type": auth_m.group(1),
+                    "list_name": auth_m.group(2),
+                    "methods": methods,
+                })
+
+            if stripped.startswith("aaa authorization"):
+                result["authorization_configured"] = True
+            if stripped.startswith("aaa accounting"):
+                result["accounting_configured"] = True
+            if "tacacs" in stripped.lower():
+                result["tacacs_configured"] = True
+            if "radius" in stripped.lower():
+                result["radius_configured"] = True
+
+    return result
+
+
 class NtpLoggingCollector(BaseCollector):
     name = "ntp_logging"
     label = "NTP, Logging & SNMP"
-    description = "Collect NTP sync status, logging config, and SNMP settings"
+    description = "Collect NTP sync status, logging config, SNMP settings, and AAA config"
     enabled_by_default = True
+    needs_custom_collect = True
 
     def get_commands(self, device_type: str) -> list[str]:
         return list(_COMMANDS.get(device_type, _DEFAULT_COMMANDS))
@@ -184,6 +256,8 @@ class NtpLoggingCollector(BaseCollector):
         ntp_peers_cmd = cmds[1]
         logging_cmd = cmds[2]
         snmp_cmd = cmds[3]
+        aaa_sessions_cmd = cmds[4]
+        aaa_config_cmd = cmds[5]
 
         return {
             "ntp_status": _parse_ntp_status(
@@ -198,10 +272,14 @@ class NtpLoggingCollector(BaseCollector):
             "snmp": _parse_snmp(
                 raw_outputs.get(snmp_cmd, "")
             ),
+            "aaa": _parse_aaa(
+                raw_outputs.get(aaa_sessions_cmd, ""),
+                raw_outputs.get(aaa_config_cmd, ""),
+            ),
         }
 
     def collect(self, connection, device_type: str) -> dict:
-        """Override collect to redact SNMP raw output."""
+        """Override collect to redact SNMP and AAA config raw output."""
         cmds = self.get_commands(device_type)
         raw_outputs = {}
         for cmd in cmds:
@@ -210,10 +288,11 @@ class NtpLoggingCollector(BaseCollector):
             except Exception:
                 raw_outputs[cmd] = ""
 
-        # SECURITY: Always redact raw SNMP output
-        snmp_cmd = cmds[3]
         parsed = self.parse(raw_outputs, device_type)
-        raw_outputs[snmp_cmd] = "<REDACTED>"
+
+        # SECURITY: Redact raw outputs that may contain secrets
+        raw_outputs[cmds[3]] = "<REDACTED>"  # show snmp
+        raw_outputs[cmds[5]] = "<REDACTED>"  # show running-config | section aaa
 
         return {
             "raw": raw_outputs,

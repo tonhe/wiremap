@@ -58,6 +58,11 @@ def sample_inventory():
                                  "model": "WS-C3750X-48",
                                  "status": "ok",
                                  "serial": "FOC5678EFGH"},
+                                {"module": "3", "ports": "4",
+                                 "type": "FRULink 1G Module",
+                                 "model": "C3KX-NM-1G",
+                                 "status": "ok",
+                                 "serial": "FOC9999XYZZ"},
                             ],
                             "stack_members": [
                                 {"switch": "1", "role": "Active",

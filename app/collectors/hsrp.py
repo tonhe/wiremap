@@ -32,12 +32,16 @@ _DEFAULT_COMMANDS = [
 ]
 
 
+_NTC_PLATFORM_MAP = {"cisco_xe": "cisco_ios", "cisco_xr": "cisco_ios"}
+
+
 def _ntc_parse(raw: str, device_type: str, command: str) -> list[dict]:
     if not raw:
         return []
     try:
         from ntc_templates.parse import parse_output
-        return parse_output(platform=device_type, command=command, data=raw)
+        platform = _NTC_PLATFORM_MAP.get(device_type, device_type)
+        return parse_output(platform=platform, command=command, data=raw)
     except Exception:
         logger.debug(f"ntc-templates parse failed for {command} on {device_type}")
         return []
