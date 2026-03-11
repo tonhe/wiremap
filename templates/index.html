@@ -392,6 +392,123 @@
         .btn-sm.btn-danger { color: var(--danger); border-color: var(--danger); }
         .btn-sm.btn-danger:hover { background: rgba(244, 63, 94, 0.1); }
 
+        /* Toggle switch */
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 40px;
+            height: 22px;
+            flex-shrink: 0;
+        }
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+            position: absolute;
+        }
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: var(--border);
+            border-radius: 22px;
+            transition: background var(--transition);
+        }
+        .toggle-slider::before {
+            content: "";
+            position: absolute;
+            height: 16px;
+            width: 16px;
+            left: 3px;
+            bottom: 3px;
+            background: var(--text-muted);
+            border-radius: 50%;
+            transition: transform var(--transition), background var(--transition);
+        }
+        .toggle-switch input:checked + .toggle-slider {
+            background: var(--accent);
+        }
+        .toggle-switch input:checked + .toggle-slider::before {
+            transform: translateX(18px);
+            background: #fff;
+        }
+
+        /* Plugin card */
+        .plugin-card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+        }
+        .plugin-title {
+            font-family: 'Barlow Semi Condensed', sans-serif;
+            font-weight: 600;
+            font-size: 16px;
+            color: var(--text-bright);
+        }
+        .plugin-desc {
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-bottom: 16px;
+            line-height: 1.5;
+        }
+        .plugin-desc a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+        .plugin-desc a:hover {
+            text-decoration: underline;
+        }
+        .input-with-toggle {
+            position: relative;
+        }
+        .input-with-toggle input {
+            padding-right: 40px;
+        }
+        .input-with-toggle .toggle-vis {
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 13px;
+            font-family: 'IBM Plex Sans', sans-serif;
+            padding: 2px 4px;
+        }
+        .input-with-toggle .toggle-vis:hover {
+            color: var(--text);
+        }
+        .plugin-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        .plugin-actions .btn-primary {
+            width: auto;
+        }
+        .plugin-status {
+            margin-top: 12px;
+            font-size: 13px;
+            padding: 8px 12px;
+            border-radius: var(--radius);
+            display: none;
+        }
+        .plugin-status.status-success {
+            display: block;
+            background: rgba(6, 214, 160, 0.08);
+            border-left: 3px solid var(--success);
+            color: var(--success);
+        }
+        .plugin-status.status-error {
+            display: block;
+            background: rgba(244, 63, 94, 0.08);
+            border-left: 3px solid var(--danger);
+            color: var(--danger);
+        }
+
         @media (max-width: 768px) {
             .form-row, .form-row-3 { grid-template-columns: 1fr; }
             .checkbox-grid { grid-template-columns: 1fr; }
@@ -424,14 +541,45 @@
 
         <!-- Tab bar -->
         <div class="tab-bar">
-            <button class="active" onclick="switchTab('discover', this)">New Discovery</button>
-            <button onclick="switchTab('load', this)">Saved Scans</button>
+            <button class="{% if not active_tab or active_tab == 'discover' %}active{% endif %}" onclick="switchTab('discover', this)">New Discovery</button>
+            <button class="{% if active_tab == 'targeted' %}active{% endif %}" onclick="switchTab('targeted', this)">Targeted Scan</button>
+            <button class="{% if active_tab == 'load' %}active{% endif %}" onclick="switchTab('load', this)">Saved Scans</button>
+            <button id="reports-tab-btn" onclick="switchTab('reports', this)">Reports</button>
+            <button class="{% if active_tab == 'settings' %}active{% endif %}" onclick="switchTab('settings', this)">Settings</button>
         </div>
         <div class="tab-body">
 
+            <!-- Progress Panel (hidden by default, shown during scans) -->
+            <div id="scan-progress" style="display: none;" class="card">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                    <h2 id="progress-title" style="margin: 0;">SCAN IN PROGRESS</h2>
+                    <button id="cancel-btn" class="btn-primary" style="background: var(--danger); border-color: var(--danger);" onclick="cancelScan()">Cancel</button>
+                </div>
+                <div style="display: flex; gap: 24px; margin-bottom: 16px; flex-wrap: wrap;">
+                    <div class="stat-tile" style="min-width: 100px;">
+                        <div class="stat-value" id="prog-discovered">0</div>
+                        <div class="stat-label">DISCOVERED</div>
+                    </div>
+                    <div class="stat-tile" style="min-width: 100px;">
+                        <div class="stat-value" id="prog-failed" style="color: var(--danger);">0</div>
+                        <div class="stat-label">FAILED</div>
+                    </div>
+                    <div class="stat-tile" style="min-width: 100px;">
+                        <div class="stat-value" id="prog-depth">--</div>
+                        <div class="stat-label">DEPTH</div>
+                    </div>
+                    <div class="stat-tile" style="min-width: 100px;">
+                        <div class="stat-value" id="prog-elapsed">00:00</div>
+                        <div class="stat-label">ELAPSED</div>
+                    </div>
+                </div>
+                <div id="event-log" style="height: 320px; overflow-y: auto; background: var(--bg-body); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.6;">
+                </div>
+            </div>
+
             <!-- New Discovery Tab -->
-            <div id="tab-discover" class="tab-content active">
-                <form method="POST" action="/discover">
+            <div id="tab-discover" class="tab-content {% if not active_tab or active_tab == 'discover' %}active{% endif %}">
+                <form method="POST" action="/discover" onsubmit="event.preventDefault(); startScan(this, 'discovery');">
                     <div class="form-group">
                         <label for="seed_ip">Seed Device IP Address *</label>
                         <input type="text" id="seed_ip" name="seed_ip" class="mono" placeholder="192.168.1.1" required>
@@ -460,6 +608,7 @@
                         <div class="form-group">
                             <label for="max_depth">Crawl Depth</label>
                             <select id="max_depth" name="max_depth">
+                                <option value="0">0 hops (seed only)</option>
                                 <option value="1">1 hop</option>
                                 <option value="2">2 hops</option>
                                 <option value="3" selected>3 hops</option>
@@ -508,6 +657,51 @@
                 </form>
             </div>
 
+            <!-- Targeted Scan Tab -->
+            <div id="tab-targeted" class="tab-content {% if active_tab == 'targeted' %}active{% endif %}">
+                <form method="POST" action="/targeted-scan" onsubmit="event.preventDefault(); startScan(this, 'targeted');">
+                    <div class="form-group">
+                        <label for="host_list">Host List</label>
+                        <textarea name="host_list" id="host_list" rows="10"
+                                  style="width: 100%; font-family: 'JetBrains Mono', monospace; font-size: 13px; background: var(--bg-input); color: var(--text-bright); border: 1px solid var(--border); padding: 10px; resize: vertical;"
+                                  placeholder="# One device per line: IP [device_type]
+10.1.1.1
+10.1.1.2 cisco_ios
+10.1.1.3 paloalto_panos
+10.1.1.4 paloalto_panos"></textarea>
+                        <details style="margin-top: 6px; font-size: 12px; color: var(--text-muted);">
+                            <summary style="cursor: pointer;">Supported device types</summary>
+                            <div class="mono" style="margin-top: 6px; line-height: 1.8;">
+                                {% for dt_val, dt_label in device_types %}
+                                <span style="display: inline-block; margin-right: 16px;">{{ dt_val }} <span class="text-muted">({{ dt_label }})</span></span>
+                                {% endfor %}
+                            </div>
+                        </details>
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                        <div class="form-group">
+                            <label for="ts_username">Username *</label>
+                            <input type="text" name="username" id="ts_username" required placeholder="admin">
+                        </div>
+                        <div class="form-group">
+                            <label for="ts_password">Password *</label>
+                            <input type="password" name="password" id="ts_password" required>
+                        </div>
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr; gap: 12px;">
+                        <div class="form-group">
+                            <label for="ts_protocol">Connection Protocol</label>
+                            <select name="protocol" id="ts_protocol">
+                                <option value="ssh">SSH</option>
+                                <option value="telnet">Telnet</option>
+                                <option value="auto" selected>Auto</option>
+                            </select>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn-primary">Start Scan</button>
+                </form>
+            </div>
+
             <!-- Saved Scans Tab -->
             <div id="tab-load" class="tab-content">
                 <div class="inventory-list" id="inventory-list">
@@ -519,106 +713,410 @@
                     </label>
                 </div>
             </div>
-        </div>
 
-        {% if summary %}
-        <div class="card">
-            <h2>Discovery Summary</h2>
-            <div class="stat-grid">
-                <div class="stat-tile">
-                    <div class="stat-value">{{ summary.devices }}</div>
-                    <div class="stat-label">DEVICES</div>
+            <!-- Reports Tab -->
+            <div id="tab-reports" class="tab-content">
+                <div id="reports-empty" style="text-align: center; padding: 60px 20px; color: var(--text-muted);">
+                    <p style="font-size: 16px;">No scan data loaded.</p>
+                    <p style="font-size: 13px; margin-top: 8px;">Run a discovery, targeted scan, or load a saved scan.</p>
                 </div>
-                <div class="stat-tile">
-                    <div class="stat-value">{{ summary.links }}</div>
-                    <div class="stat-label">LINKS</div>
-                </div>
-                <div class="stat-tile">
-                    <div class="stat-value">{{ summary.visited|length }}</div>
-                    <div class="stat-label">VISITED</div>
-                </div>
-                {% if summary.failed_count > 0 %}
-                <div class="stat-tile" style="border-color: var(--danger);">
-                    <div class="stat-value" style="color: var(--danger);">{{ summary.failed_count }}</div>
-                    <div class="stat-label">FAILED</div>
-                </div>
-                {% endif %}
-            </div>
-
-            {% if summary.failed %}
-            <div style="margin-top: 20px; padding: 15px; background: rgba(244, 63, 94, 0.08); border-left: 3px solid var(--danger); border-radius: var(--radius);">
-                <h3 style="color: var(--danger); margin-bottom: 10px; font-size: 16px; font-family: 'Barlow Semi Condensed', sans-serif; text-transform: uppercase; letter-spacing: 0.02em;">Failed to Connect</h3>
-                <ul style="margin-left: 20px;">
-                {% for ip, reason in summary.failed.items() %}
-                    <li style="margin-bottom: 4px;"><span class="mono" style="color: var(--text-bright);">{{ ip }}</span>: <span class="text-muted">{{ reason }}</span></li>
-                {% endfor %}
-                </ul>
-            </div>
-            {% endif %}
-
-            {% if export_key %}
-            <div style="margin-top: 24px;">
-                <div class="category-header">DATA EXPORTS</div>
-                <div class="download-grid">
-                    <a href="/export/inventory/{{ export_key }}" class="download-card">
-                        <div class="dl-label">Scan Data</div>
-                        <div class="dl-format mono">.JSON</div>
-                    </a>
-                    <a href="/export/archive/{{ export_key }}" class="download-card">
-                        <div class="dl-label">Scan Data + Configs</div>
-                        <div class="dl-format mono">.ZIP</div>
-                    </a>
+                <div id="reports-content" style="display: none;">
                 </div>
             </div>
 
-            {% if available_reports %}
-            <div style="margin-top: 24px;" id="report-panel">
-                {% set ns = namespace(current_cat='') %}
-                {% for r in available_reports %}
-                    {% if r.category != ns.current_cat %}
-                        {% set ns.current_cat = r.category %}
-                        <div class="category-header">{{ r.category | upper }}</div>
-                    {% endif %}
-                    <div class="report-card {% if not r.can_generate %}disabled{% endif %}" data-report="{{ r.name }}">
-                        <div>
-                            <div class="report-name">{{ r.label }}</div>
-                            <div class="report-desc">{{ r.description }}</div>
-                        </div>
-                        <div style="display: flex; align-items: center; gap: 8px;">
-                            {% if r.supported_formats | length > 1 %}
-                            <div class="format-group">
-                                {% for f in r.supported_formats %}
-                                <button class="fmt-btn{% if loop.first %} active{% endif %}" data-fmt="{{ f }}">.{{ f | upper }}</button>
-                                {% endfor %}
-                            </div>
-                            {% else %}
-                            <span class="report-format mono">.{{ r.supported_formats[0] | upper }}</span>
-                            {% endif %}
-                            {% if r.can_generate %}
-                            <button class="btn-sm"
-                                    onclick="downloadReport('{{ export_key }}', '{{ r.name }}', this)">
-                                GENERATE
-                            </button>
-                            {% else %}
-                            <span class="text-muted" style="font-size: 12px;"
-                                  title="Missing collector data">unavailable</span>
-                            {% endif %}
+            <!-- Settings Tab -->
+            <div id="tab-settings" class="tab-content">
+                <div class="category-header">INTEGRATIONS</div>
+                <div class="card" style="margin-top: 8px;">
+                    <div class="plugin-card-header">
+                        <span class="plugin-title">Cisco EOX API</span>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="cisco-eox-enabled">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <p class="plugin-desc">
+                        Query Cisco End-of-Life data for hardware and software in your inventory.
+                        Requires API credentials from the
+                        <a href="https://apiconsole.cisco.com" target="_blank" rel="noopener">Cisco API Console</a>.
+                    </p>
+                    <div class="form-group">
+                        <label for="cisco-eox-client-id">Client ID</label>
+                        <div class="input-with-toggle">
+                            <input type="password" id="cisco-eox-client-id" class="mono" placeholder="Not configured" autocomplete="off">
+                            <button type="button" class="toggle-vis" onclick="togglePasswordVisibility('cisco-eox-client-id')">show</button>
                         </div>
                     </div>
-                {% endfor %}
+                    <div class="form-group">
+                        <label for="cisco-eox-client-secret">Client Secret</label>
+                        <div class="input-with-toggle">
+                            <input type="password" id="cisco-eox-client-secret" class="mono" placeholder="Not configured" autocomplete="off">
+                            <button type="button" class="toggle-vis" onclick="togglePasswordVisibility('cisco-eox-client-secret')">show</button>
+                        </div>
+                    </div>
+                    <div class="plugin-actions">
+                        <button type="button" class="btn-sm" onclick="testPluginConnection()">Test Connection</button>
+                        <button type="button" class="btn-primary" onclick="savePluginConfig()">Save</button>
+                    </div>
+                    <div class="plugin-status" id="plugin-status"></div>
+                </div>
+                <div class="category-header" style="margin-top: 32px;">DISCOVERY</div>
+                <div class="card" style="margin-top: 8px;">
+                    <div class="plugin-card-header">
+                        <span class="plugin-title">Discovery Settings</span>
+                    </div>
+                    <div class="form-group">
+                        <label for="settings-max-workers">Max Concurrent Workers</label>
+                        <p class="helper-text">Number of devices to discover simultaneously (1-20).</p>
+                        <select id="settings-max-workers">
+                            <option value="">Loading...</option>
+                        </select>
+                    </div>
+                    <div class="plugin-actions">
+                        <button type="button" class="btn-primary" onclick="saveDiscoverySettings()">Save</button>
+                    </div>
+                    <div class="plugin-status" id="discovery-settings-status"></div>
+                </div>
             </div>
-            {% endif %}
-            {% endif %}
         </div>
-        {% endif %}
+
     </div>
 <script>
+    var REPORT_REGISTRY = {{ report_registry | tojson }};
+
     /* Tab switching */
     function switchTab(name, btn) {
         document.querySelectorAll('.tab-bar button').forEach(function(b) { b.classList.remove('active'); });
         document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); });
+        if (!_scanId || !_eventSource) {
+            document.getElementById('scan-progress').style.display = 'none';
+        }
         document.getElementById('tab-' + name).classList.add('active');
-        btn.classList.add('active');
+        if (btn) btn.classList.add('active');
+    }
+
+    /* -- Async Scan Progress -- */
+    var _scanId = null;
+    var _eventSource = null;
+    var _elapsedInterval = null;
+    var _scanStartTime = null;
+    var _discoveredCount = 0;
+    var _failedCount = 0;
+
+    function startScan(formEl, scanType) {
+        var formData = new FormData(formEl);
+        formData.append('scan_type', scanType);
+
+        fetch('/scan/start', { method: 'POST', body: formData })
+            .then(function(r) {
+                if (r.status === 409) {
+                    alert('A scan is already running.');
+                    return null;
+                }
+                if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'Unknown error'); });
+                return r.json();
+            })
+            .then(function(data) {
+                if (!data) return;
+                _scanId = data.scan_id;
+                clearReportsTab();
+                showProgressPanel(scanType === 'targeted' ? 'TARGETED SCAN IN PROGRESS' : 'DISCOVERY IN PROGRESS');
+                openEventStream(data.scan_id);
+            })
+            .catch(function(err) {
+                alert('Error: ' + err.message);
+            });
+    }
+
+    function showProgressPanel(title) {
+        document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); });
+        var panel = document.getElementById('scan-progress');
+        panel.style.display = 'block';
+        document.getElementById('progress-title').textContent = title;
+        document.getElementById('event-log').textContent = '';
+        document.getElementById('prog-discovered').textContent = '0';
+        document.getElementById('prog-failed').textContent = '0';
+        document.getElementById('prog-depth').textContent = '--';
+        document.getElementById('cancel-btn').style.display = '';
+        document.getElementById('cancel-btn').textContent = 'Cancel';
+        document.getElementById('cancel-btn').disabled = false;
+        _discoveredCount = 0;
+        _failedCount = 0;
+        _scanStartTime = Date.now();
+        _elapsedInterval = setInterval(updateElapsed, 1000);
+    }
+
+    function updateElapsed() {
+        if (!_scanStartTime) return;
+        var secs = Math.floor((Date.now() - _scanStartTime) / 1000);
+        var m = String(Math.floor(secs / 60)).padStart(2, '0');
+        var s = String(secs % 60).padStart(2, '0');
+        document.getElementById('prog-elapsed').textContent = m + ':' + s;
+    }
+
+    function openEventStream(scanId) {
+        _eventSource = new EventSource('/scan/' + scanId + '/stream');
+
+        _eventSource.addEventListener('scan_started', function(e) {
+            logEvent('Scan started', 'muted');
+        });
+        _eventSource.addEventListener('device_connecting', function(e) {
+            var d = JSON.parse(e.data);
+            logEvent('Connecting to ' + d.ip + '...', 'muted');
+        });
+        _eventSource.addEventListener('device_authenticated', function(e) {
+            var d = JSON.parse(e.data);
+            logEvent('Authenticated to ' + d.ip + ' (' + d.protocol + ')', 'ok');
+        });
+        _eventSource.addEventListener('connection_fallback', function(e) {
+            var d = JSON.parse(e.data);
+            logEvent('SSH failed for ' + d.ip + ', trying Telnet...', 'muted');
+        });
+        _eventSource.addEventListener('collecting_data', function(e) {
+            var d = JSON.parse(e.data);
+            logEvent('Running discovery commands on ' + d.hostname, 'muted');
+        });
+        _eventSource.addEventListener('neighbors_found', function(e) {
+            var d = JSON.parse(e.data);
+            logEvent(d.hostname + ': ' + d.total + ' neighbors found, ' + d.new + ' new', 'muted');
+        });
+        _eventSource.addEventListener('device_complete', function(e) {
+            var d = JSON.parse(e.data);
+            if (d.skipped) {
+                logEvent(d.ip + ' skipped \u2014 already discovered as ' + d.hostname, 'muted');
+            } else {
+                _discoveredCount++;
+                document.getElementById('prog-discovered').textContent = _discoveredCount;
+                logEvent('Discovered ' + d.hostname + ' (' + d.device_type + ')', 'ok');
+            }
+        });
+        _eventSource.addEventListener('device_failed', function(e) {
+            var d = JSON.parse(e.data);
+            _failedCount++;
+            document.getElementById('prog-failed').textContent = _failedCount;
+            logEvent(d.ip + ' \u2717 ' + d.error, 'fail');
+        });
+        _eventSource.addEventListener('layer_complete', function(e) {
+            var d = JSON.parse(e.data);
+            document.getElementById('prog-depth').textContent = d.depth;
+            logEvent('Layer ' + d.depth + ' complete (' + d.devices_in_layer + ' devices, ' + d.total_discovered + ' total)', 'muted');
+        });
+        _eventSource.addEventListener('scan_complete', function(e) {
+            var d = JSON.parse(e.data);
+            onScanFinished('SCAN COMPLETE', d);
+        });
+        _eventSource.addEventListener('scan_cancelled', function(e) {
+            var d = JSON.parse(e.data);
+            onScanFinished('SCAN CANCELLED', d);
+        });
+        _eventSource.addEventListener('scan_error', function(e) {
+            var d = JSON.parse(e.data);
+            logEvent('Error: ' + d.error, 'fail');
+            onScanFinished('SCAN FAILED', d);
+        });
+        _eventSource.onerror = function() {
+            _eventSource.close();
+        };
+    }
+
+    function logEvent(message, type) {
+        var log = document.getElementById('event-log');
+        var now = new Date();
+        var ts = String(now.getHours()).padStart(2, '0') + ':' +
+                 String(now.getMinutes()).padStart(2, '0') + ':' +
+                 String(now.getSeconds()).padStart(2, '0');
+        var color = 'var(--text-muted)';
+        if (type === 'ok') color = 'var(--status-ok, #22c55e)';
+        if (type === 'fail') color = 'var(--danger, #f43f5e)';
+        var line = document.createElement('div');
+        line.style.color = color;
+        line.textContent = ts + '  ' + message;
+        log.appendChild(line);
+        log.scrollTop = log.scrollHeight;
+    }
+
+    function onScanFinished(title, data) {
+        if (_eventSource) _eventSource.close();
+        _eventSource = null;
+        if (_elapsedInterval) clearInterval(_elapsedInterval);
+        document.getElementById('progress-title').textContent = title;
+        document.getElementById('cancel-btn').style.display = 'none';
+        logEvent(title + ' \u2014 ' + (data.total_devices || 0) + ' devices, ' + (data.failed_count || 0) + ' failed', 'muted');
+
+        if (data.inventory_key) {
+            fetch('/api/reports/available/' + encodeURIComponent(data.inventory_key))
+                .then(function(r) { return r.json(); })
+                .then(function(reportData) {
+                    setTimeout(function() {
+                        document.getElementById('scan-progress').style.display = 'none';
+                        _scanId = null;
+                        showReportsTab(data.inventory_key, reportData.available_reports, reportData.summary);
+                    }, 2000);
+                })
+                .catch(function() {
+                    logEvent('Failed to load reports', 'fail');
+                });
+        }
+    }
+
+    function cancelScan() {
+        if (!_scanId) return;
+        var btn = document.getElementById('cancel-btn');
+        btn.textContent = 'Cancelling...';
+        btn.disabled = true;
+        fetch('/scan/' + _scanId + '/cancel', { method: 'POST' });
+    }
+
+    var _currentInventoryKey = null;
+
+    function showReportsTab(inventoryKey, availableReports, summary) {
+        _currentInventoryKey = inventoryKey;
+        renderReports(availableReports, summary);
+        switchTab('reports', document.getElementById('reports-tab-btn'));
+    }
+
+    function renderReports(availableReports, summary) {
+        var emptyEl = document.getElementById('reports-empty');
+        var contentEl = document.getElementById('reports-content');
+
+        if (!availableReports || availableReports.length === 0) {
+            emptyEl.style.display = '';
+            contentEl.style.display = 'none';
+            return;
+        }
+
+        emptyEl.style.display = 'none';
+        contentEl.style.display = '';
+
+        while (contentEl.firstChild) contentEl.removeChild(contentEl.firstChild);
+
+        /* Summary stat bar */
+        var statsRow = document.createElement('div');
+        statsRow.id = 'reports-stat-bar';
+        statsRow.style.cssText = 'display: flex; gap: 24px; margin-bottom: 20px; flex-wrap: wrap;';
+
+        var s = summary || {};
+
+        function addTile(label, value, color) {
+            var tile = document.createElement('div');
+            tile.className = 'stat-tile';
+            tile.style.minWidth = '100px';
+            var valEl = document.createElement('div');
+            valEl.className = 'stat-value';
+            valEl.textContent = value;
+            if (color) valEl.style.color = color;
+            tile.appendChild(valEl);
+            var lblEl = document.createElement('div');
+            lblEl.className = 'stat-label';
+            lblEl.textContent = label;
+            tile.appendChild(lblEl);
+            statsRow.appendChild(tile);
+        }
+
+        addTile('DEVICES', s.device_count != null ? s.device_count : '--', 'var(--cyan)');
+        addTile('FAILED', s.failed_count != null ? s.failed_count : '--', 'var(--danger)');
+
+        var elapsedStr = '--';
+        if (s.elapsed != null) {
+            var mins = Math.floor(s.elapsed / 60);
+            var secs = Math.round(s.elapsed % 60);
+            elapsedStr = String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
+        }
+        addTile('ELAPSED', elapsedStr, 'var(--cyan)');
+
+        var dateStr = '--';
+        if (s.timestamp) {
+            try {
+                var d = new Date(s.timestamp);
+                dateStr = d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+            } catch(e) { dateStr = s.timestamp; }
+        }
+        addTile('SCAN DATE', dateStr, 'var(--text)');
+
+        contentEl.appendChild(statsRow);
+
+        var availableSet = {};
+        availableReports.forEach(function(name) { availableSet[name] = true; });
+
+        var categories = {};
+        REPORT_REGISTRY.forEach(function(r) {
+            if (!categories[r.category]) categories[r.category] = [];
+            categories[r.category].push(r);
+        });
+
+        Object.keys(categories).sort().forEach(function(cat) {
+            var header = document.createElement('div');
+            header.className = 'category-header';
+            header.textContent = cat.toUpperCase();
+            contentEl.appendChild(header);
+
+            categories[cat].forEach(function(r) {
+                var canGen = !!availableSet[r.name];
+                var card = document.createElement('div');
+                card.className = 'report-card' + (canGen ? '' : ' disabled');
+                card.setAttribute('data-report', r.name);
+
+                var infoDiv = document.createElement('div');
+                var nameEl = document.createElement('div');
+                nameEl.className = 'report-name';
+                nameEl.textContent = r.label;
+                infoDiv.appendChild(nameEl);
+                var descEl = document.createElement('div');
+                descEl.className = 'report-desc';
+                descEl.textContent = r.description;
+                infoDiv.appendChild(descEl);
+                card.appendChild(infoDiv);
+
+                var actionsDiv = document.createElement('div');
+                actionsDiv.style.cssText = 'display: flex; align-items: center; gap: 8px;';
+
+                if (r.supported_formats.length > 1) {
+                    var fmtGroup = document.createElement('div');
+                    fmtGroup.className = 'format-group';
+                    r.supported_formats.forEach(function(f, i) {
+                        var btn = document.createElement('button');
+                        btn.className = 'fmt-btn' + (i === 0 ? ' active' : '');
+                        btn.setAttribute('data-fmt', f);
+                        btn.textContent = '.' + f.toUpperCase();
+                        fmtGroup.appendChild(btn);
+                    });
+                    actionsDiv.appendChild(fmtGroup);
+                } else {
+                    var fmtSpan = document.createElement('span');
+                    fmtSpan.className = 'report-format mono';
+                    fmtSpan.textContent = '.' + r.supported_formats[0].toUpperCase();
+                    actionsDiv.appendChild(fmtSpan);
+                }
+
+                if (canGen) {
+                    var genBtn = document.createElement('button');
+                    genBtn.className = 'btn-sm';
+                    genBtn.textContent = 'GENERATE';
+                    genBtn.addEventListener('click', function() {
+                        downloadReport(_currentInventoryKey, r.name, genBtn);
+                    });
+                    actionsDiv.appendChild(genBtn);
+                } else {
+                    var unavail = document.createElement('span');
+                    unavail.className = 'text-muted';
+                    unavail.style.fontSize = '12px';
+                    unavail.title = 'Missing collector data';
+                    unavail.textContent = 'unavailable';
+                    actionsDiv.appendChild(unavail);
+                }
+
+                card.appendChild(actionsDiv);
+                contentEl.appendChild(card);
+            });
+        });
+    }
+
+    function clearReportsTab() {
+        _currentInventoryKey = null;
+        document.getElementById('reports-empty').style.display = '';
+        var contentEl = document.getElementById('reports-content');
+        contentEl.style.display = 'none';
+        while (contentEl.firstChild) contentEl.removeChild(contentEl.firstChild);
     }
 
     /* Download on-demand report */
@@ -729,16 +1227,18 @@
     }
 
     function loadScan(filename) {
-        var form = document.createElement('form');
-        form.method = 'POST';
-        form.action = '/load-inventory';
-        var input = document.createElement('input');
-        input.type = 'hidden';
-        input.name = 'filename';
-        input.value = filename;
-        form.appendChild(input);
-        document.body.appendChild(form);
-        form.submit();
+        var formData = new FormData();
+        formData.append('filename', filename);
+        fetch('/load-inventory', { method: 'POST', body: formData })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.error) {
+                    alert(data.error);
+                    return;
+                }
+                showReportsTab(data.inventory_key, data.available_reports, data.summary);
+            })
+            .catch(function(err) { alert('Failed to load scan: ' + err.message); });
     }
 
     function deleteInventory(filename) {
@@ -752,19 +1252,154 @@
     /* Upload inventory file */
     document.getElementById('upload-inventory-file').addEventListener('change', function() {
         if (!this.files.length) return;
-        var form = document.createElement('form');
-        form.method = 'POST';
-        form.action = '/load-inventory';
-        form.enctype = 'multipart/form-data';
-        var fileInput = this.cloneNode(true);
-        fileInput.name = 'file';
-        fileInput.style.display = 'none';
-        form.appendChild(fileInput);
-        document.body.appendChild(form);
-        form.submit();
+        var formData = new FormData();
+        formData.append('file', this.files[0]);
+        fetch('/load-inventory', { method: 'POST', body: formData })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.error) {
+                    alert(data.error);
+                    return;
+                }
+                showReportsTab(data.inventory_key, data.available_reports, data.summary);
+            })
+            .catch(function(err) { alert('Failed to upload scan: ' + err.message); });
+        this.value = '';
     });
 
     loadInventoryList();
+
+    /* Plugin management */
+    function togglePasswordVisibility(inputId) {
+        var input = document.getElementById(inputId);
+        var btn = input.parentElement.querySelector('.toggle-vis');
+        if (input.type === 'password') {
+            input.type = 'text';
+            btn.textContent = 'hide';
+        } else {
+            input.type = 'password';
+            btn.textContent = 'show';
+        }
+    }
+
+    function showPluginStatus(msg, isError) {
+        var el = document.getElementById('plugin-status');
+        el.textContent = msg;
+        el.className = 'plugin-status ' + (isError ? 'status-error' : 'status-success');
+    }
+
+    function loadPluginStatus() {
+        fetch('/api/plugins')
+            .then(function(r) { return r.json(); })
+            .then(function(plugins) {
+                plugins.forEach(function(p) {
+                    if (p.name === 'cisco_eox') {
+                        document.getElementById('cisco-eox-enabled').checked = p.enabled;
+                        var idInput = document.getElementById('cisco-eox-client-id');
+                        var secretInput = document.getElementById('cisco-eox-client-secret');
+                        if (p.configured) {
+                            idInput.placeholder = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' + (p.client_id_mask || '');
+                            secretInput.placeholder = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
+                        }
+                    }
+                });
+            })
+            .catch(function() {});
+    }
+
+    function savePluginConfig() {
+        var payload = {
+            enabled: document.getElementById('cisco-eox-enabled').checked
+        };
+        var clientId = document.getElementById('cisco-eox-client-id').value;
+        var clientSecret = document.getElementById('cisco-eox-client-secret').value;
+        if (clientId) payload.client_id = clientId;
+        if (clientSecret) payload.client_secret = clientSecret;
+
+        fetch('/api/plugins/cisco_eox', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(status) {
+            showPluginStatus('Configuration saved.', false);
+            document.getElementById('cisco-eox-client-id').value = '';
+            document.getElementById('cisco-eox-client-secret').value = '';
+            loadPluginStatus();
+        })
+        .catch(function() {
+            showPluginStatus('Failed to save configuration.', true);
+        });
+    }
+
+    function testPluginConnection() {
+        showPluginStatus('Testing connection...', false);
+        fetch('/api/plugins/cisco_eox/test', { method: 'POST' })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    showPluginStatus('Connection successful. OAuth token received.', false);
+                } else {
+                    var msg = 'Connection failed: ' + (data.error || 'Unknown error');
+                    if (data.detail) {
+                        var d = data.detail;
+                        var extra = typeof d === 'object' ? (d.error_description || d.error || JSON.stringify(d)) : d;
+                        msg += ' — ' + extra;
+                    }
+                    showPluginStatus(msg, true);
+                }
+            })
+            .catch(function() {
+                showPluginStatus('Connection test failed.', true);
+            });
+    }
+
+    function loadDiscoverySettings() {
+        fetch('/api/settings/discovery')
+            .then(function(r) { return r.json(); })
+            .then(function(settings) {
+                var select = document.getElementById('settings-max-workers');
+                while (select.firstChild) select.removeChild(select.firstChild);
+                for (var i = 1; i <= 20; i++) {
+                    var opt = document.createElement('option');
+                    opt.value = i;
+                    opt.textContent = i;
+                    if (i === settings.max_workers) opt.selected = true;
+                    select.appendChild(opt);
+                }
+            })
+            .catch(function() {});
+    }
+
+    function saveDiscoverySettings() {
+        var maxWorkers = parseInt(document.getElementById('settings-max-workers').value);
+        fetch('/api/settings/discovery', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({max_workers: maxWorkers})
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.error) {
+                showDiscoveryStatus(data.error, true);
+            } else {
+                showDiscoveryStatus('Settings saved.', false);
+            }
+        })
+        .catch(function() {
+            showDiscoveryStatus('Failed to save settings.', true);
+        });
+    }
+
+    function showDiscoveryStatus(msg, isError) {
+        var el = document.getElementById('discovery-settings-status');
+        el.textContent = msg;
+        el.className = 'plugin-status ' + (isError ? 'status-error' : 'status-success');
+    }
+
+    loadPluginStatus();
+    loadDiscoverySettings();
 </script>
 </body>
 </html>

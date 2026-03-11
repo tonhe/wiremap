@@ -1,8 +1,9 @@
+.DS_Store
 .venv/
 logs/*
 __pycache__/
 *.pyc
 *.pyo
-example.xlsx
-.worktrees/
 inventories/
+config/plugins.json
+config/plugins.key

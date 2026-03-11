@@ -5,6 +5,7 @@ Supports parallel device discovery via ThreadPoolExecutor.
 """
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
@@ -52,12 +53,16 @@ class DiscoveryEngine:
                  filters: dict = None,
                  inventory_dir: str = None,
                  device_detector=None,
-                 max_workers: int = 10):
+                 max_workers: int = 10,
+                 target_hosts: list = None,
+                 progress_callback=None,
+                 cancelled=None):
         self.seed_ip = seed_ip
         self.seed_device_type = seed_device_type
         self.username = username
         self.password = password
-        self.max_depth = max_depth
+        self.target_hosts = target_hosts
+        self.max_depth = 0 if target_hosts else max_depth
         self.protocol = protocol
         self.filters = filters or {
             "include_routers": True,
@@ -71,9 +76,13 @@ class DiscoveryEngine:
         self.inventory_dir = inventory_dir or DEFAULT_INVENTORY_DIR
         self.visited: set[str] = set()
         self._visited_lock = threading.Lock()
+        self._discovered_hostnames: set[str] = set()
+        self._hostname_lock = threading.Lock()
         self.failed: dict[str, str] = {}
         self._failed_lock = threading.Lock()
         self.max_workers = max(1, max_workers)
+        self._progress_cb = progress_callback or (lambda event: None)
+        self._cancelled = cancelled
 
         # Always use all collectors
         registry = get_registry()
@@ -119,10 +128,24 @@ class DiscoveryEngine:
 
         # Layer-based BFS: process all devices at a given depth in parallel,
         # then collect neighbors and advance to the next depth.
-        current_layer = [(self.seed_ip, self.seed_device_type)]
+        if self.target_hosts:
+            current_layer = list(self.target_hosts)
+        else:
+            current_layer = [(self.seed_ip, self.seed_device_type)]
+
+        start_time = time.time()
+        total_hosts = len(self.target_hosts) if self.target_hosts else None
+        self._progress_cb({
+            "event": "scan_started",
+            "scan_type": "targeted" if self.target_hosts else "discovery",
+            "total_hosts": total_hosts,
+        })
 
         for depth in range(self.max_depth + 1):
             if not current_layer:
+                break
+
+            if self._cancelled and self._cancelled.is_set():
                 break
 
             # Filter out already-visited IPs before submitting work
@@ -145,15 +168,17 @@ class DiscoveryEngine:
             # Discover all devices at this depth in parallel
             next_layer = []
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                futures = {
-                    executor.submit(
+                futures = {}
+                for ip, device_type in work_items:
+                    if self._cancelled and self._cancelled.is_set():
+                        break
+                    self._progress_cb({"event": "device_connecting", "ip": ip, "device_type": device_type or "auto"})
+                    futures[executor.submit(
                         self._discover_device, ip, device_type, depth, inventory
-                    ): ip
-                    for ip, device_type in work_items
-                }
+                    )] = (ip, device_type)
 
                 for future in as_completed(futures):
-                    ip = futures[future]
+                    ip, dtype = futures[future]
                     try:
                         neighbors = future.result()
                         next_layer.extend(neighbors)
@@ -161,20 +186,53 @@ class DiscoveryEngine:
                         logger.error(f"[{ip}] Unexpected error: {e}")
                         with self._failed_lock:
                             self.failed[ip] = str(e)
+                        self._progress_cb({"event": "device_failed", "ip": ip, "error": str(e)})
+
+            self._progress_cb({
+                "event": "layer_complete",
+                "depth": depth,
+                "devices_in_layer": len(work_items),
+                "total_discovered": len(self.visited),
+            })
 
             current_layer = next_layer
+
+        elapsed = time.time() - start_time
 
         logger.info(
             f"Discovery complete. {len(inventory.devices)} devices, "
             f"{len(self.failed)} failed"
         )
 
-        # Save inventory
+        # Persist scan summary metadata for the Reports tab stat bar
+        inventory.set_scan_summary(
+            elapsed=round(elapsed, 1),
+            failed=dict(self.failed),
+        )
+
+        # Save inventory before emitting scan_complete so the file
+        # exists when the frontend fetches /api/reports/available/<key>
         try:
             filepath = inventory.save(self.inventory_dir)
             logger.info(f"Saved inventory: {filepath}")
         except Exception as e:
             logger.warning(f"Failed to save inventory: {e}")
+
+        if self._cancelled and self._cancelled.is_set():
+            self._progress_cb({
+                "event": "scan_cancelled",
+                "total_devices": len(self.visited),
+                "failed_count": len(self.failed),
+                "elapsed": round(elapsed, 1),
+            })
+        else:
+            self._progress_cb({
+                "event": "scan_complete",
+                "total_devices": len(self.visited),
+                "failed_count": len(self.failed),
+                "elapsed": round(elapsed, 1),
+                "inventory_key": inventory.discovery_id,
+            })
 
         # Remove the device-context filter now that discovery is done
         for handler in logging.getLogger().handlers:
@@ -201,9 +259,40 @@ class DiscoveryEngine:
                 username=self.username, password=self.password,
                 protocol=proto,
             )
-            conn = conn_mgr.connect()
+            result = conn_mgr.connect()
+            conn = result.connection
+            if result.fallback_occurred:
+                self._progress_cb({
+                    "event": "connection_fallback",
+                    "ip": ip,
+                    "from_protocol": "ssh",
+                    "to_protocol": result.protocol_used,
+                })
+            self._progress_cb({
+                "event": "device_authenticated",
+                "ip": ip,
+                "protocol": result.protocol_used,
+            })
             hostname = ConnectionManager.get_hostname(conn)
             logger.info(f"Connected as {hostname}")
+
+            # Hostname-based dedup: a device may be reachable via multiple IPs
+            with self._hostname_lock:
+                if hostname in self._discovered_hostnames:
+                    logger.info(
+                        f"Skipping {ip}: already discovered as {hostname}"
+                    )
+                    self._progress_cb({
+                        "event": "device_complete",
+                        "ip": ip,
+                        "hostname": hostname,
+                        "device_type": device_type or "auto",
+                        "skipped": True,
+                        "reason": "duplicate hostname",
+                    })
+                    conn.disconnect()
+                    return []
+                self._discovered_hostnames.add(hostname)
 
             # Handle IP-placeholder rename
             self._rename_placeholder(inventory, ip, hostname)
@@ -212,6 +301,12 @@ class DiscoveryEngine:
             inventory.add_device(
                 hostname, mgmt_ip=ip, device_type=device_type,
             )
+
+            self._progress_cb({
+                "event": "collecting_data",
+                "ip": ip,
+                "hostname": hostname,
+            })
 
             # Split collectors into batch (standard) and custom (need connection)
             batch_collectors = {}
@@ -270,18 +365,47 @@ class DiscoveryEngine:
             conn.disconnect()
 
             # Extract neighbors for next BFS layer
-            return self._extract_neighbors(inventory, hostname, ip,
-                                           device_type, depth)
+            neighbors = self._extract_neighbors(inventory, hostname, ip,
+                                                device_type, depth)
+
+            device_data = inventory.devices.get(hostname, {})
+            cdp_data = device_data.get("collector_data", {}).get("cdp_lldp", {})
+            all_neighbor_ips = [
+                n.get("remote_ip") for n in cdp_data.get("parsed", {}).get("neighbors", [])
+                if n.get("remote_ip")
+            ]
+            total_cdp_neighbors = len(all_neighbor_ips)
+            with self._visited_lock:
+                new_count = sum(1 for nip in all_neighbor_ips if nip not in self.visited)
+
+            self._progress_cb({
+                "event": "neighbors_found",
+                "ip": ip,
+                "hostname": hostname,
+                "total": total_cdp_neighbors,
+                "new": new_count,
+            })
+
+            self._progress_cb({
+                "event": "device_complete",
+                "ip": ip,
+                "hostname": hostname,
+                "device_type": device_type or "auto",
+            })
+
+            return neighbors
 
         except ConnectionError as e:
             logger.error(f"Connection error: {e.message}")
             with self._failed_lock:
                 self.failed[ip] = e.message
+            self._progress_cb({"event": "device_failed", "ip": ip, "error": e.message})
             return []
         except Exception as e:
             logger.error(f"Unexpected error: {e}")
             with self._failed_lock:
                 self.failed[ip] = str(e)
+            self._progress_cb({"event": "device_failed", "ip": ip, "error": str(e)})
             return []
         finally:
             _log_context.device_ip = None

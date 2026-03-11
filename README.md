@@ -11,9 +11,12 @@
 ### Discovery
 - **SSH, Telnet, or Auto-detect** -- Tries SSH first, falls back to Telnet automatically
 - **Recursive BFS Crawling** -- Discovers neighbors hop-by-hop from a seed device with configurable depth (1-5)
-- **Multi-threaded** -- Parallel device collection with configurable worker threads (1-20)
+- **Multi-threaded** -- Parallel device collection with configurable concurrent workers (1-20, default 10), persisted in Settings
+- **Async with Live Progress** -- Scans run in the background with real-time Server-Sent Events (SSE) streaming authentication, fallback, data collection, neighbor discovery, and completion status to a live console panel
+- **Cancellable Scans** -- Cancel a running scan gracefully; in-progress devices finish and partial results are saved
 - **L3 Neighbor Discovery** -- Optionally discover OSPF, EIGRP, BGP, and ISIS neighbors alongside CDP/LLDP
 - **Device Type Auto-detection** -- YAML-based pattern matching against CDP platform strings and LLDP system descriptions
+- **Hostname Dedup** -- Prevents collecting the same device twice when it's reachable via multiple IPs (management, loopback, SVI)
 - **Loop Prevention** -- Tracks visited devices and enforces depth limits
 
 ### Multi-Vendor Support
@@ -42,8 +45,8 @@ All collectors run automatically on every device -- no pre-selection needed.
 
 Parsing uses [NTC Templates](https://github.com/networktocode/ntc-templates) (TextFSM) with regex fallbacks for vendor-aware structured output.
 
-### Reports (On-Demand)
-Generate reports from the results page after discovery or from the Saved Scans tab. Reports are grouped by category and each supports a format selector.
+### Reports Tab
+A dedicated **Reports** tab serves as the single destination for all report generation. After a discovery completes, a targeted scan finishes, or a saved scan is loaded, the UI automatically switches to the Reports tab showing a summary stat bar (devices, failed, elapsed time, scan date) and available report cards grouped by category with format selectors. Old inventories without summary metadata display gracefully with `--` placeholders.
 
 | Report | Formats | Description |
 |--------|---------|-------------|
@@ -54,8 +57,13 @@ Generate reports from the results page after discovery or from the Saved Scans t
 | ARP Summary | XLSX, JSON, CSV, XML | ARP entries by device with summary and detail tabs |
 | MAC Table | XLSX, JSON, CSV, XML | MAC-to-port mappings per device |
 | L2 Discovery | XLSX, JSON, CSV, XML | VLANs, STP topology, routed interfaces, anomaly findings |
-| L3 Routing & IP | XLSX, JSON, CSV, XML | Protocol neighbors, route tables, OSPF topology, IP audit, ARP/MAC map, VRF summary |
+| L3 Routing & IP | XLSX, JSON, CSV, XML | Protocol neighbors, route tables, OSPF topology, FHRP status, IP audit, ARP/MAC map, VRF summary |
+| Internet Edge | XLSX, JSON, CSV, XML | BGP peering, NAT overview, ACL audit, FHRP status, edge interface security |
+| EOX Lifecycle | XLSX | Hardware/software end-of-life dates, module EOX status (requires Cisco API credentials) |
 | Config Archive | ZIP | Running configs as individual text files |
+
+### Targeted Scan
+Connect to a specific list of devices without BFS crawling. Designed for edge assessments where you know exactly which devices to audit (firewalls, border routers). Enter one device per line in the format `IP [device_type]` — device type is optional (auto-detect if omitted).
 
 ### Saved Scans
 - Every discovery saves a JSON scan data file (raw command output + parsed data)
@@ -73,7 +81,7 @@ Built-in mock device simulator with a multi-vendor topology for testing without 
 ### Docker Compose (Recommended)
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/tonhe/wiremap.git
 cd wiremap
 docker-compose up -d
 ```
@@ -97,16 +105,25 @@ cd app && python app.py
 2. Enter a seed device IP and select the platform type
 3. Choose connection protocol (SSH / Telnet / Auto)
 4. Provide credentials
-5. Set crawl depth and worker threads (up to 20)
-6. Toggle device type filters (routers, switches, phones, servers, APs)
-7. Click **Start Discovery**
-8. Generate reports on-demand from the results page
+5. Set crawl depth and toggle device type filters (routers, switches, phones, servers, APs)
+6. Click **Start Discovery**
+7. Monitor real-time progress in the console (authentication, data collection, neighbor discovery)
+8. After completion, the **Reports** tab opens automatically with available reports
 
 ### Load Previous Scan
 
-Switch to the **Saved Scans** tab to browse previous discoveries or upload a scan data JSON to generate reports without re-scanning.
+Switch to the **Saved Scans** tab to browse previous discoveries or upload a scan data JSON. Loading a scan automatically opens the **Reports** tab.
 
 ## Configuration
+
+### Cisco EOX API (for EOX Lifecycle Report)
+
+The EOX Lifecycle report queries Cisco's Support APIs to look up end-of-life and end-of-support dates for hardware and software. To use it, you need API credentials from Cisco:
+
+1. Register an application at [Cisco API Console](https://apiconsole.cisco.com/) and request access to the **EOX API**
+2. In Wiremap, go to the **Settings** tab and enter your **Client ID** and **Client Secret** under the Cisco EOX API section
+3. Click **Test Connection** to verify the credentials work
+4. The EOX Lifecycle report will appear as available in the Reports tab once credentials are configured
 
 ### Device Type Detection
 
@@ -125,12 +142,7 @@ device_types:
 
 ### Discovery Settings
 
-```yaml
-discovery:
-  max_depth: 3
-  connection_timeout: 15
-  command_timeout: 30
-```
+Configure concurrent worker count from the **Settings** tab under **Discovery Settings**. The setting is persisted to `config/discovery.json` and used by all scan types.
 
 ### Capability Filtering
 
@@ -149,8 +161,10 @@ allowed_capabilities:
 wiremap/
 ├── app/
 │   ├── app.py                # Flask application
-│   ├── discovery.py          # BFS topology discovery engine
+│   ├── discovery_engine.py    # BFS topology discovery engine
+│   ├── scan_manager.py        # Async scan execution and SSE streaming
 │   ├── connection_manager.py # SSH/Telnet connection handling
+│   ├── settings.py           # Discovery settings (JSON config)
 │   ├── device_detector.py    # Device type detection
 │   ├── parsers.py            # CDP/LLDP parsers
 │   ├── mock_devices.py       # Demo mode simulator

@@ -60,3 +60,12 @@ def test_build_device_params_override_type():
     cm = ConnectionManager("192.168.1.1", "cisco_ios", "admin", "pass123")
     params = cm._build_device_params(device_type="cisco_nxos")
     assert params["device_type"] == "cisco_nxos"
+
+
+def test_connect_returns_connection_result():
+    """connect() should return a ConnectionResult namedtuple."""
+    from app.connection_manager import ConnectionResult
+    cr = ConnectionResult(connection=None, protocol_used="ssh", fallback_occurred=False)
+    assert cr.protocol_used == "ssh"
+    assert cr.fallback_occurred is False
+    assert cr.connection is None

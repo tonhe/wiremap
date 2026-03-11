@@ -4,6 +4,7 @@ Stores raw command output + parsed data from all collectors.
 """
 import json
 import os
+import tempfile
 import threading
 from datetime import datetime, timezone
 
@@ -74,6 +75,25 @@ class DiscoveryInventory:
     def devices(self):
         return self._data["devices"]
 
+    def set_scan_summary(self, elapsed: float, failed: dict):
+        """Persist scan summary metadata into the inventory data."""
+        self._data["scan_summary"] = {
+            "elapsed": elapsed,
+            "failed_count": len(failed),
+            "failed": failed,
+        }
+
+    def get_summary(self) -> dict:
+        """Return summary stats for the Reports tab. Safe for old inventories."""
+        stored = self._data.get("scan_summary", {})
+        return {
+            "device_count": len(self._data.get("devices", {})),
+            "seed_ip": self._data.get("seed_ip", ""),
+            "timestamp": self._data.get("timestamp", ""),
+            "elapsed": stored.get("elapsed"),
+            "failed_count": stored.get("failed_count"),
+        }
+
     def add_device(self, hostname: str, mgmt_ip: str = None,
                    device_type: str = None, device_category: str = None,
                    platform: str = None):
@@ -122,10 +142,16 @@ class DiscoveryInventory:
         return self._data
 
     def save(self, directory: str) -> str:
-        """Save inventory to a JSON file. Returns the filepath."""
+        """Save inventory to a JSON file atomically. Returns the filepath."""
         os.makedirs(directory, exist_ok=True)
         filename = f"{self._data['discovery_id']}.json"
         filepath = os.path.join(directory, filename)
-        with open(filepath, "w") as f:
-            json.dump(self._data, f, indent=2, default=str)
+        fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(self._data, f, indent=2, default=str)
+            os.replace(tmp_path, filepath)
+        except BaseException:
+            os.unlink(tmp_path)
+            raise
         return filepath

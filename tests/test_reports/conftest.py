@@ -147,10 +147,84 @@ def sample_inventory():
                     },
                     "switchport": {"raw": {}, "parsed": {"switchports": [], "port_security": [], "port_security_addresses": [], "errdisable_recovery": [], "storm_control": []}},
                     "stp_detail": {"raw": {}, "parsed": {"stp_detail": [], "inconsistent_ports": [], "stp_root_summary": []}},
-                    "routing_detail": {"raw": {}, "parsed": {"route_summary": [], "ip_protocols": {"raw": "", "protocols_detected": []}, "ospf_processes": [], "ospf_interfaces": [], "bgp_summary": []}},
+                    "routing_detail": {
+                        "raw": {},
+                        "parsed": {
+                            "route_summary": [],
+                            "ip_protocols": {"raw": "", "protocols_detected": []},
+                            "ospf_processes": [],
+                            "ospf_interfaces": [],
+                            "bgp_summary": [
+                                {
+                                    "neighbor": "10.0.0.2",
+                                    "asn": "65002",
+                                    "state": "Established",
+                                    "prefixes_received": 50,
+                                    "up_down": "01:02:03",
+                                },
+                            ],
+                            "eigrp_topology": [],
+                            "eigrp_neighbors": [],
+                            "bgp_table": [],
+                        },
+                    },
                     "ntp_logging": {"raw": {}, "parsed": {"ntp_status": {"synchronized": False, "stratum": "", "reference": "", "raw": ""}, "ntp_peers": [], "logging": {"logging_hosts": [], "buffer_size": "", "console_level": "", "raw": ""}, "snmp": {"raw": "", "communities_detected": False, "v3_configured": False, "contact": "", "location": ""}}},
                     "vrf": {"raw": {}, "parsed": {"vrfs": [], "vrf_interfaces": []}},
-                    "edge_services": {"raw": {}, "parsed": {"access_lists": [], "ip_interfaces": []}},
+                    "edge_services": {
+                        "raw": {},
+                        "parsed": {
+                            "access_lists": [
+                                {
+                                    "name": "OUTSIDE_IN",
+                                    "type": "Extended",
+                                    "entries": [
+                                        {"action": "permit", "protocol": "tcp", "source": "any",
+                                         "destination": "10.0.0.0/24", "hit_count": 150},
+                                        {"action": "deny", "protocol": "ip", "source": "any",
+                                         "destination": "any", "hit_count": 0},
+                                    ],
+                                },
+                            ],
+                            "ip_interfaces": [
+                                {
+                                    "interface": "GigabitEthernet0/0",
+                                    "ip_address": "203.0.113.1/30",
+                                    "acl_in": "OUTSIDE_IN",
+                                    "acl_out": "",
+                                    "proxy_arp": False,
+                                    "urpf": True,
+                                    "directed_broadcast": False,
+                                },
+                            ],
+                            "nat_translations": [],
+                            "nat_statistics": {
+                                "active_translations": 450,
+                                "peak_translations": 500,
+                                "outside_interfaces": ["GigabitEthernet0/0"],
+                                "inside_interfaces": ["GigabitEthernet0/1"],
+                                "hits": 150000,
+                                "misses": 12,
+                                "pools": [
+                                    {"name": "NATPOOL", "total_addresses": 10,
+                                     "allocated": 5, "utilization_pct": 50},
+                                ],
+                            },
+                        },
+                    },
+                    "hsrp": {
+                        "raw": {},
+                        "parsed": {
+                            "entries": [
+                                {
+                                    "interface": "Vlan1",
+                                    "group": "1",
+                                    "priority": "110",
+                                    "virtual_ip": "10.1.1.1",
+                                    "state": "Active",
+                                },
+                            ],
+                        },
+                    },
                 },
             },
             "SW2": {
@@ -215,6 +289,7 @@ def sample_inventory():
                     "ntp_logging": {"raw": {}, "parsed": {"ntp_status": {"synchronized": False, "stratum": "", "reference": "", "raw": ""}, "ntp_peers": [], "logging": {"logging_hosts": [], "buffer_size": "", "console_level": "", "raw": ""}, "snmp": {"raw": "", "communities_detected": False, "v3_configured": False, "contact": "", "location": ""}}},
                     "vrf": {"raw": {}, "parsed": {"vrfs": [], "vrf_interfaces": []}},
                     "edge_services": {"raw": {}, "parsed": {"access_lists": [], "ip_interfaces": []}},
+                    "hsrp": {"raw": {}, "parsed": {"entries": []}},
                 },
             },
         },

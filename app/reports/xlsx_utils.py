@@ -8,6 +8,7 @@ import re
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
 
 # Regex to strip characters illegal in XML 1.0 (which openpyxl/XLSX requires)
 _ILLEGAL_XML_RE = re.compile(
@@ -81,6 +82,24 @@ def freeze_header(ws, row: int = 2):
     ws.freeze_panes = f"A{row}"
 
 
+def add_table(ws, headers: list[str], num_rows: int) -> None:
+    """Wrap the data range in an Excel Table for sort/filter functionality."""
+    if num_rows == 0:
+        return
+    last_col = get_column_letter(len(headers))
+    last_row = num_rows + 1  # +1 for header row
+    safe_name = re.sub(r'[^A-Za-z0-9_]', '_', ws.title)[:64] or "Table1"
+    table = Table(displayName=safe_name, ref=f"A1:{last_col}{last_row}")
+    table.tableStyleInfo = TableStyleInfo(
+        name="TableStyleMedium2",
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=False,
+        showColumnStripes=False,
+    )
+    ws.add_table(table)
+
+
 def create_sheet(wb: Workbook, title: str, headers: list[str],
                  rows: list[list]) -> None:
     """Create a fully styled worksheet with headers, data, auto-width, and freeze."""
@@ -89,3 +108,4 @@ def create_sheet(wb: Workbook, title: str, headers: list[str],
     write_data_rows(ws, rows)
     auto_width(ws)
     freeze_header(ws)
+    add_table(ws, headers, len(rows))

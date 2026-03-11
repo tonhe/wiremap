@@ -3,10 +3,13 @@ Connection Manager -- SSH and Telnet connections to network devices.
 Dumb pipe: connects, runs commands, returns raw output. No parsing.
 """
 import logging
+from collections import namedtuple
 
 logger = logging.getLogger(__name__)
 
 _TELNET_SUFFIX = "_telnet"
+
+ConnectionResult = namedtuple("ConnectionResult", ["connection", "protocol_used", "fallback_occurred"])
 
 
 class ConnectionError(Exception):
@@ -82,14 +85,16 @@ class ConnectionManager:
 
         if is_mock_mode(self.host):
             logger.info(f"Using MOCK mode for {self.host}")
-            return get_mock_connection(self.host, self.device_type,
-                                       self.username, self.password)
+            mock_conn = get_mock_connection(self.host, self.device_type,
+                                            self.username, self.password)
+            return ConnectionResult(connection=mock_conn, protocol_used="mock", fallback_occurred=False)
 
         # Lazy import -- netmiko is only available inside Docker
         from netmiko import ConnectHandler, NetmikoTimeoutException, NetmikoAuthenticationException
 
         protocols_to_try = ["ssh", "telnet"] if self.protocol == "auto" else [self.protocol]
         last_error = None
+        fallback_occurred = False
 
         for proto in protocols_to_try:
             types_to_try = [self.device_type] + self._get_fallback_types(self.device_type)
@@ -115,10 +120,11 @@ class ConnectionManager:
                     logger.info(f"Connecting to {self.host} ({effective_dt} via {proto})")
                     conn = ConnectHandler(**params)
                     logger.info(f"Connected to {self.host} ({effective_dt} via {proto})")
-                    return conn
+                    return ConnectionResult(connection=conn, protocol_used=proto, fallback_occurred=fallback_occurred)
                 except NetmikoTimeoutException:
                     if proto == "ssh" and "telnet" in protocols_to_try:
                         logger.info(f"SSH timeout to {self.host}, will try telnet")
+                        fallback_occurred = True
                         break  # skip fallback types, try telnet
                     raise ConnectionError(f"Connection timeout to {self.host}", "timeout")
                 except NetmikoAuthenticationException:

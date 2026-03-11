@@ -234,6 +234,21 @@ def _analyze_l3(inventory_data):
                     ),
                 })
 
+        # --- FHRP state check ---
+        hsrp_parsed = cd.get("hsrp", {}).get("parsed", {})
+        for e in hsrp_parsed.get("entries", []):
+            state = e.get("state", "")
+            if state and state.lower() not in ("active", "standby", "listen", ""):
+                findings.append({
+                    "hostname": hostname,
+                    "severity": "Warning",
+                    "title": "FHRP group in unexpected state",
+                    "description": (
+                        f"Interface {e.get('interface', '?')} group {e.get('group', '?')} "
+                        f"VIP {e.get('virtual_ip', '?')} state: {state}"
+                    ),
+                })
+
         # --- Collect IP subnets for overlap detection ---
         ip_interfaces = _extract_ip_interfaces(device)
         for intf in ip_interfaces:
@@ -698,6 +713,34 @@ def _build_vrf_sheet(wb, inventory_data):
     _finalize(ws, "VRFSummary", len(headers), row - 1)
 
 
+def _build_fhrp_sheet(wb, inventory_data):
+    ws = wb.create_sheet(title="FHRP Status")
+    headers = ["Device", "Site/Location", "Interface", "Group",
+               "Priority", "State", "Virtual IP"]
+    _write_header_row(ws, headers)
+
+    row = 2
+    for hostname, device in sorted(inventory_data.get("devices", {}).items()):
+        hsrp_parsed = device.get("collector_data", {}).get("hsrp", {}).get("parsed", {})
+        entries = hsrp_parsed.get("entries", [])
+        if not entries:
+            continue
+
+        site = _derive_site(hostname)
+        for e in entries:
+            _write_row(ws, row, [
+                hostname, site,
+                e.get("interface", ""),
+                e.get("group", ""),
+                e.get("priority", ""),
+                e.get("state", ""),
+                e.get("virtual_ip", ""),
+            ])
+            row += 1
+
+    _finalize(ws, "FHRPStatus", len(headers), row - 1)
+
+
 def _build_findings_sheet(wb, analysis):
     ws = wb.create_sheet(title="Findings")
     headers = ["Device", "Site/Location", "Severity", "Finding", "Details"]
@@ -740,7 +783,7 @@ def _build_findings_sheet(wb, analysis):
 class RoutingSummaryReport(BaseReport):
     name = "routing_summary"
     label = "L3 Routing & IP Report"
-    description = "Protocol neighbors, route tables, OSPF topology, IP audit, ARP/MAC map, VRF summary, and findings"
+    description = "Protocol neighbors, route tables, OSPF topology, IP audit, ARP/MAC map, VRF summary, FHRP status, and findings"
     category = "Layer 3 & Routing"
     required_collectors = ["l3_routing"]
     supported_formats = ["xlsx", "json", "csv", "xml"]
@@ -786,7 +829,11 @@ class RoutingSummaryReport(BaseReport):
         if _has_collector_data(inventory_data, "vrf"):
             _build_vrf_sheet(wb, inventory_data)
 
-        # Tab 10: Findings
+        # Tab 10: FHRP Status (if hsrp data exists)
+        if _has_collector_data(inventory_data, "hsrp"):
+            _build_fhrp_sheet(wb, inventory_data)
+
+        # Tab 11: Findings
         _build_findings_sheet(wb, analysis)
 
         buf = io.BytesIO()
@@ -1088,6 +1135,28 @@ class RoutingSummaryReport(BaseReport):
                         len(intfs),
                     ])
             sheets["VRF Summary"] = (vrf_headers, vrf_rows)
+
+        # --- FHRP Status (conditional) ---
+        if _has_collector_data(inventory_data, "hsrp"):
+            fhrp_headers = ["Device", "Site/Location", "Interface", "Group",
+                            "Priority", "State", "Virtual IP"]
+            fhrp_rows = []
+            for hostname, device in sorted(devices.items()):
+                hsrp_parsed = device.get("collector_data", {}).get("hsrp", {}).get("parsed", {})
+                entries = hsrp_parsed.get("entries", [])
+                if not entries:
+                    continue
+                site = _derive_site(hostname)
+                for e in entries:
+                    fhrp_rows.append([
+                        hostname, site,
+                        e.get("interface", ""),
+                        e.get("group", ""),
+                        e.get("priority", ""),
+                        e.get("state", ""),
+                        e.get("virtual_ip", ""),
+                    ])
+            sheets["FHRP Status"] = (fhrp_headers, fhrp_rows)
 
         # --- Findings ---
         findings_headers = ["Device", "Site/Location", "Severity", "Finding", "Details"]

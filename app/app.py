@@ -9,10 +9,13 @@ import logging
 import os
 import zipfile
 from flask import Flask, render_template, request, jsonify, send_file
+import requests
 from device_detector import DeviceTypeDetector
 from discovery_engine import DiscoveryEngine, DiscoveryError
 from inventory import DiscoveryInventory
-from visualizer import NetworkVisualizer
+from scan_manager import ScanManager
+from plugins import get_plugin_config, save_plugin_config, get_plugin_status, list_plugins
+from settings import get_discovery_settings, save_discovery_settings
 try:
     from app.collectors import get_registry as get_collector_registry
     from app.reports import get_registry as get_report_registry, get_report
@@ -29,6 +32,7 @@ except:
     pass
 
 # Configure logging
+logging.getLogger("eox_client").setLevel(logging.DEBUG)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
@@ -41,6 +45,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+scan_manager = ScanManager()
 
 # Initialize device type detector
 detector = DeviceTypeDetector()
@@ -77,16 +83,41 @@ def index():
                          report_registry=_get_report_info())
 
 
-@app.route('/discover', methods=['POST'])
-def discover():
-    """Handle discovery request using the new collector-based engine."""
-    seed_ip = request.form.get('seed_ip', '').strip()
-    device_type = request.form.get('device_type', '').strip()
+@app.route('/scan/start', methods=['POST'])
+def scan_start():
+    """Start a scan in the background, return scan_id."""
+    if scan_manager.is_running():
+        return jsonify({"error": "A scan is already running"}), 409
+
+    scan_type = request.form.get('scan_type', 'discovery')
     username = request.form.get('username', '').strip()
     password = request.form.get('password', '')
+    protocol = request.form.get('protocol', 'ssh')
+    disc_settings = get_discovery_settings()
+    max_workers = disc_settings.get("max_workers", 10)
+
+    if not username or not password:
+        return jsonify({"error": "Username and password are required"}), 400
+
+    if scan_type == 'targeted':
+        host_list_raw = request.form.get('host_list', '').strip()
+        if not host_list_raw:
+            return jsonify({"error": "Host list is required"}), 400
+        valid_types = {dt[0] for dt in DEVICE_TYPES}
+        try:
+            target_hosts = _parse_host_list(host_list_raw, valid_types)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        seed_ip = target_hosts[0][0]
+        seed_type = target_hosts[0][1] or 'cisco_ios'
+    else:
+        seed_ip = request.form.get('seed_ip', '').strip()
+        seed_type = request.form.get('device_type', '').strip()
+        if not seed_ip or not seed_type:
+            return jsonify({"error": "Seed IP and device type are required"}), 400
+        target_hosts = None
+
     max_depth = int(request.form.get('max_depth', 3))
-    max_workers = int(request.form.get('max_workers', 10))
-    protocol = request.form.get('protocol', 'ssh').strip()
     filters = {
         'include_routers': request.form.get('include_routers') == 'true',
         'include_switches': request.form.get('include_switches') == 'true',
@@ -94,93 +125,65 @@ def discover():
         'include_servers': request.form.get('include_servers') == 'true',
         'include_aps': request.form.get('include_aps') == 'true',
         'include_other': request.form.get('include_other') == 'true',
-        'include_l3': True,
-    }
+    } if scan_type == 'discovery' else None
 
-    if not all([seed_ip, device_type, username, password]):
-        return render_template('index.html',
-                             device_types=DEVICE_TYPES,
-                             version=VERSION,
-                             report_registry=_get_report_info(),
-                             error="All fields are required")
-
-    logger.info(f"Discovery request: seed={seed_ip}, type={device_type}, user={username}, depth={max_depth}")
-
-    try:
+    def run_scan(progress_cb, cancelled):
+        det = DeviceTypeDetector()
         engine = DiscoveryEngine(
             seed_ip=seed_ip,
-            seed_device_type=device_type,
+            seed_device_type=seed_type,
             username=username,
             password=password,
             max_depth=max_depth,
             protocol=protocol,
             filters=filters,
             inventory_dir=INVENTORY_DIR,
-            device_detector=detector,
+            device_detector=det,
             max_workers=max_workers,
+            target_hosts=target_hosts,
+            progress_callback=progress_cb,
+            cancelled=cancelled,
         )
-
         inventory = engine.discover()
-        inventory_data = inventory.to_dict()
+        inventory.save(INVENTORY_DIR)
+        return inventory
 
-        total_devices = len(inventory.devices)
-        summary = {
-            'devices': total_devices,
-            'links': 0,
-            'visited': list(engine.visited),
-            'failed': engine.failed,
-            'failed_count': len(engine.failed),
-        }
+    scan_id = scan_manager.start_scan(scan_type, run_scan)
+    if scan_id is None:
+        return jsonify({"error": "A scan is already running"}), 409
 
-        # Count links from cdp_lldp collector data
-        unique_links = set()
-        for device in inventory.devices.values():
-            cdp_data = device.get("collector_data", {}).get("cdp_lldp", {})
-            neighbors = cdp_data.get("parsed", {}).get("neighbors", [])
-            hostname = device["hostname"]
-            for n in neighbors:
-                remote = n.get("remote_device", "Unknown")
-                link_pair = tuple(sorted([hostname, remote]))
-                unique_links.add(link_pair)
-        summary['links'] = len(unique_links)
+    return jsonify({"scan_id": scan_id})
 
-        logger.info(f"Discovery complete: {total_devices} devices, {summary['links']} links")
 
-        # Generate visualization from inventory data
-        viz_file = None
-        try:
-            viz_file = _generate_visualization(inventory_data, seed_ip)
-        except Exception as e:
-            logger.warning(f"Failed to generate visualization: {e}")
+@app.route('/scan/<scan_id>/stream')
+def scan_stream(scan_id):
+    """SSE endpoint -- streams scan events until completion."""
+    scan = scan_manager.get_scan(scan_id)
+    if not scan:
+        return jsonify({"error": "Scan not found"}), 404
 
-        # Determine which reports can be generated
-        available_reports = _get_available_reports(inventory_data)
+    def generate():
+        for chunk in scan_manager.event_stream(scan_id):
+            yield chunk
 
-        return render_template('index.html',
-                             device_types=DEVICE_TYPES,
-                             version=VERSION,
-                             summary=summary,
-                             visualization=viz_file,
-                             export_key=inventory.discovery_id,
-                             available_reports=available_reports,
-                             report_registry=_get_report_info(),
-                             success=True)
+    return app.response_class(
+        generate(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+        },
+    )
 
-    except DiscoveryError as e:
-        logger.error(f"Discovery error: {e.message}")
-        return render_template('index.html',
-                             device_types=DEVICE_TYPES,
-                             version=VERSION,
-                             report_registry=_get_report_info(),
-                             error=f"Discovery failed: {e.message}")
 
-    except Exception as e:
-        logger.exception("Unexpected error during discovery")
-        return render_template('index.html',
-                             device_types=DEVICE_TYPES,
-                             version=VERSION,
-                             report_registry=_get_report_info(),
-                             error=f"Unexpected error: {str(e)}")
+@app.route('/scan/<scan_id>/cancel', methods=['POST'])
+def scan_cancel(scan_id):
+    """Cancel a running scan."""
+    scan = scan_manager.get_scan(scan_id)
+    if not scan:
+        return jsonify({"error": "Scan not found"}), 404
+    scan_manager.cancel_scan(scan_id)
+    return jsonify({"status": "cancelling"})
 
 
 @app.route('/inventories')
@@ -207,12 +210,11 @@ def delete_inventory(filename):
 
 @app.route('/load-inventory', methods=['POST'])
 def load_inventory():
-    """Load an inventory file for report generation."""
+    """Load an inventory file for report generation. Returns JSON."""
     if 'file' in request.files and request.files['file'].filename:
         f = request.files['file']
         data = json.load(f)
         inventory = DiscoveryInventory(data)
-        # Save uploaded inventory so export routes can find it
         check_path = os.path.join(INVENTORY_DIR, f"{inventory.discovery_id}.json")
         if not os.path.exists(check_path):
             inventory.save(INVENTORY_DIR)
@@ -225,44 +227,37 @@ def load_inventory():
         return jsonify({"error": "No file or filename provided"}), 400
 
     inventory_data = inventory.to_dict()
-    total_devices = len(inventory.devices)
+    registry = get_report_registry()
+    available = [r.name for r in registry.values() if r.can_generate(inventory_data)]
 
-    # Count links
-    unique_links = set()
-    for device in inventory.devices.values():
-        cdp_data = device.get("collector_data", {}).get("cdp_lldp", {})
-        neighbors = cdp_data.get("parsed", {}).get("neighbors", [])
-        hostname = device["hostname"]
-        for n in neighbors:
-            remote = n.get("remote_device", "Unknown")
-            link_pair = tuple(sorted([hostname, remote]))
-            unique_links.add(link_pair)
+    return jsonify({
+        "inventory_key": inventory.discovery_id,
+        "available_reports": available,
+        "summary": inventory.get_summary(),
+    })
 
-    summary = {
-        'devices': total_devices,
-        'links': len(unique_links),
-        'visited': [],
-        'failed': {},
-        'failed_count': 0,
-    }
 
-    viz_file = None
-    try:
-        viz_file = _generate_visualization(inventory_data, inventory.seed_ip)
-    except Exception as e:
-        logger.warning(f"Failed to generate visualization: {e}")
+@app.route('/api/reports/available/<key>')
+def api_reports_available(key):
+    """Return which reports can be generated for this inventory."""
+    filepath = os.path.join(INVENTORY_DIR, f"{key}.json")
+    if not os.path.exists(filepath):
+        return jsonify({"error": "Inventory not found"}), 404
 
-    available_reports = _get_available_reports(inventory_data)
+    inventory = DiscoveryInventory.load(filepath)
+    inventory_data = inventory.to_dict()
+    registry = get_report_registry()
 
-    return render_template('index.html',
-                         device_types=DEVICE_TYPES,
-                         version=VERSION,
-                         summary=summary,
-                         visualization=viz_file,
-                         export_key=inventory.discovery_id,
-                         available_reports=available_reports,
-                         report_registry=_get_report_info(),
-                         success=True)
+    available = []
+    for r in registry.values():
+        if r.can_generate(inventory_data):
+            available.append(r.name)
+
+    return jsonify({
+        "inventory_key": key,
+        "available_reports": available,
+        "summary": inventory.get_summary(),
+    })
 
 
 @app.route('/export/inventory/<key>')
@@ -308,20 +303,6 @@ def export_archive(key):
 def health():
     """Health check endpoint"""
     return jsonify({'status': 'healthy'})
-
-
-@app.route('/visualization/<filename>')
-def serve_visualization(filename):
-    """Serve generated visualization files"""
-    try:
-        file_path = os.path.join('/tmp', filename)
-        if os.path.exists(file_path):
-            return send_file(file_path, mimetype='text/html')
-        else:
-            return "Visualization file not found", 404
-    except Exception as e:
-        logger.error(f"Error serving visualization: {e}")
-        return "Error loading visualization", 500
 
 
 @app.route('/export/report/<key>/<report_name>')
@@ -375,7 +356,100 @@ def export_report(key, report_name):
     )
 
 
+# --- Plugin API ---
+
+@app.route('/api/plugins')
+def api_list_plugins():
+    return jsonify(list_plugins())
+
+
+@app.route('/api/plugins/cisco_eox', methods=['POST'])
+def api_save_cisco_eox():
+    data = request.get_json(force=True)
+    has_creds = bool(data.get("client_id") and data.get("client_secret"))
+    config = {"enabled": data.get("enabled", has_creds)}
+    if data.get("client_id"):
+        config["client_id"] = data["client_id"]
+    if data.get("client_secret"):
+        config["client_secret"] = data["client_secret"]
+    save_plugin_config("cisco_eox", config)
+    return jsonify(get_plugin_status("cisco_eox"))
+
+
+@app.route('/api/plugins/cisco_eox/test', methods=['POST'])
+def api_test_cisco_eox():
+    cfg = get_plugin_config("cisco_eox")
+    if not cfg or not cfg.get("client_id") or not cfg.get("client_secret"):
+        return jsonify({"success": False, "error": "Plugin not configured"}), 400
+    try:
+        resp = requests.post(
+            "https://id.cisco.com/oauth2/default/v1/token",
+            data={"grant_type": "client_credentials"},
+            auth=(cfg["client_id"], cfg["client_secret"]),
+            timeout=10,
+        )
+        if resp.status_code == 200 and resp.json().get("access_token"):
+            return jsonify({"success": True})
+        else:
+            try:
+                detail = resp.json()
+            except Exception:
+                detail = resp.text[:500]
+            return jsonify({"success": False, "error": f"HTTP {resp.status_code}", "detail": detail})
+    except requests.RequestException as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+# --- Discovery Settings API ---
+
+@app.route('/api/settings/discovery')
+def api_get_discovery_settings():
+    return jsonify(get_discovery_settings())
+
+
+@app.route('/api/settings/discovery', methods=['POST'])
+def api_save_discovery_settings():
+    data = request.get_json(force=True)
+    try:
+        save_discovery_settings(data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(get_discovery_settings())
+
+
 # --- Helpers ---
+
+def _parse_host_list(raw_text, valid_types):
+    """Parse textarea host list into [(ip, device_type_or_None), ...].
+
+    Each line: IP [device_type]. Blank lines and # comments ignored.
+    """
+    hosts = []
+    seen_ips = set()
+    for lineno, line in enumerate(raw_text.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        ip = parts[0]
+        octets = ip.split(".")
+        if len(octets) != 4:
+            raise ValueError(f"Line {lineno}: invalid IP address '{ip}'")
+        for octet in octets:
+            if not octet.isdigit() or not 0 <= int(octet) <= 255:
+                raise ValueError(f"Line {lineno}: invalid IP address '{ip}'")
+        if ip in seen_ips:
+            continue
+        seen_ips.add(ip)
+        device_type = None
+        if len(parts) >= 2:
+            device_type = parts[1]
+            if device_type not in valid_types:
+                raise ValueError(f"Line {lineno}: unknown device type '{device_type}'")
+        hosts.append((ip, device_type))
+    if not hosts:
+        raise ValueError("No valid hosts provided")
+    return hosts
 
 def _get_report_info():
     """Return list of report dicts for the UI, grouped by category."""
@@ -392,63 +466,6 @@ def _get_report_info():
         }
         for r in sorted(registry.values(), key=lambda r: (r.category, r.label))
     ]
-
-
-def _get_available_reports(inventory_data):
-    """Return list of reports that can be generated from this inventory."""
-    registry = get_report_registry()
-    available = []
-    for r in sorted(registry.values(), key=lambda r: (r.category, r.label)):
-        available.append({
-            "name": r.name,
-            "label": r.label,
-            "description": r.description,
-            "format": r.supported_formats[0],
-            "supported_formats": r.supported_formats,
-            "category": r.category,
-            "ui_options": r.get_ui_options(),
-            "can_generate": r.can_generate(inventory_data),
-        })
-    return available
-
-
-def _generate_visualization(inventory_data: dict, seed_ip: str):
-    """Generate D3 topology visualization from inventory data. Returns filename or None."""
-    topology_dict = {}
-    for hostname, device in inventory_data.get("devices", {}).items():
-        cdp_data = device.get("collector_data", {}).get("cdp_lldp", {})
-        neighbors_parsed = cdp_data.get("parsed", {}).get("neighbors", [])
-
-        neighbors = []
-        for n in neighbors_parsed:
-            neighbors.append({
-                'neighbor_device': n.get('remote_device', 'Unknown'),
-                'local_interface': n.get('local_intf', '?'),
-                'remote_interface': n.get('remote_intf', '?'),
-                'protocols': n.get('protocols', []),
-            })
-
-        device_category = device.get("device_category") or "unknown"
-        topology_dict[hostname] = {
-            'device_type': device_category,
-            'has_routing': False,
-            'neighbors': neighbors,
-            'arp_entries': [],
-            'arp_count': 0,
-        }
-
-    seed_hostname = None
-    for hostname, device in inventory_data.get("devices", {}).items():
-        if device.get("mgmt_ip") == seed_ip:
-            seed_hostname = hostname
-            break
-
-    visualizer = NetworkVisualizer(topology_dict, seed_device=seed_hostname)
-    viz_filename = f"topology_{seed_ip.replace('.', '_')}.html"
-    viz_path = os.path.join('/tmp', viz_filename)
-    visualizer.generate_html(viz_path)
-    logger.info(f"Generated visualization: {viz_path} (seed: {seed_hostname})")
-    return viz_filename
 
 
 if __name__ == '__main__':

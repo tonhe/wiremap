@@ -18,6 +18,11 @@ class MacTableReport(BaseReport):
     required_collectors = ["mac_table"]
     supported_formats = ["xlsx", "json", "csv", "xml"]
 
+    @staticmethod
+    def _port_val(entry):
+        val = entry.get("ports", entry.get("destination_port", ""))
+        return ", ".join(val) if isinstance(val, list) else val
+
     def generate_tabular_data(self, inventory_data):
         headers = ["Device", "MAC Address", "VLAN", "Type", "Port"]
         rows = []
@@ -30,7 +35,7 @@ class MacTableReport(BaseReport):
                     entry.get("mac", entry.get("destination_address", "")),
                     entry.get("vlan", entry.get("vlan_id", "")),
                     entry.get("type", ""),
-                    entry.get("ports", entry.get("destination_port", "")),
+                    self._port_val(entry),
                 ])
         return OrderedDict([("MAC Table", (headers, rows))])
 
@@ -51,7 +56,7 @@ class MacTableReport(BaseReport):
                     entry.get("mac", entry.get("destination_address", "")),
                     entry.get("vlan", entry.get("vlan_id", "")),
                     entry.get("type", ""),
-                    entry.get("ports", entry.get("destination_port", "")),
+                    self._port_val(entry),
                 ])
 
         create_sheet(wb, "MAC Table",
