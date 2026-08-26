@@ -9,7 +9,10 @@ from openpyxl import Workbook
 
 from .base import BaseReport
 from .xlsx_utils import create_sheet
-from app.device_facts import extract_device_facts
+try:
+    from app.device_facts import extract_device_facts
+except ImportError:
+    from device_facts import extract_device_facts
 
 
 def _normalize_keys(d: dict) -> dict:

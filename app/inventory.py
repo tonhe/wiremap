@@ -260,7 +260,10 @@ class DiscoveryInventory:
         merge even when their normalized hostnames collide, because the serial
         key takes precedence over the hostname key.
         """
-        from app.identity import normalize_hostname
+        try:
+            from app.identity import normalize_hostname
+        except ImportError:
+            from identity import normalize_hostname
 
         with self._lock:
             devices = self._data["devices"]

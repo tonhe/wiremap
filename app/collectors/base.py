@@ -46,7 +46,10 @@ class BaseCollector(ABC):
         manipulation. The discovery engine calls this instead of the
         batch path when needs_custom_collect is True.
         """
-        from app.collectors.errors import error_reason
+        try:
+            from app.collectors.errors import error_reason
+        except ImportError:
+            from collectors.errors import error_reason
 
         if device_type in self.unsupported_platforms:
             return {"raw": {}, "parsed": {"not_applicable": True,
