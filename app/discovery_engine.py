@@ -12,15 +12,44 @@ try:
     from app.connection_manager import ConnectionManager, ConnectionError
     from app.collectors import get_registry, get_collector
     from app.inventory import DiscoveryInventory
+    from app.identity import normalize_hostname, looks_like_mac
+    from app.device_facts import extract_device_facts
 except ImportError:
     from connection_manager import ConnectionManager, ConnectionError
     from collectors import get_registry, get_collector
     from inventory import DiscoveryInventory
+    from identity import normalize_hostname, looks_like_mac
+    from device_facts import extract_device_facts
 
 logger = logging.getLogger(__name__)
 
 # Thread-local storage for per-device log context
 _log_context = threading.local()
+
+
+def _neighbour_platform_fields(remote_platform):
+    """Split a neighbour's reported platform into (platform, chassis_id).
+
+    LLDP often reports a chassis MAC where a platform string belongs. A MAC
+    is not a platform -- record it separately and leave platform empty rather
+    than writing 009a.d2d4.9700 into a Platform column.
+    """
+    if not remote_platform:
+        return None, None
+    if looks_like_mac(remote_platform):
+        return None, str(remote_platform).strip()
+    return remote_platform, None
+
+
+def _should_create_neighbour_device(neighbor) -> bool:
+    """A device row requires a real name, not just an address.
+
+    vPC peer-keepalive addresses (1.1.1.1, 1.1.1.2) repeat across every pair
+    in a fabric. Creating a device per address invents phantom chassis with
+    no serial and a keepalive address as their management IP.
+    """
+    name = (neighbor.get("remote_device") or "").strip()
+    return bool(name)
 
 
 class DeviceLogFilter(logging.Filter):
@@ -56,12 +85,14 @@ class DiscoveryEngine:
                  max_workers: int = 10,
                  target_hosts: list = None,
                  progress_callback=None,
-                 cancelled=None):
+                 cancelled=None,
+                 disable_autodetect: bool = False):
         self.seed_ip = seed_ip
         self.seed_device_type = seed_device_type
         self.username = username
         self.password = password
         self.target_hosts = target_hosts
+        self.disable_autodetect = disable_autodetect
         self.max_depth = 0 if target_hosts else max_depth
         self.protocol = protocol
         self.filters = filters or {
@@ -199,6 +230,12 @@ class DiscoveryEngine:
 
         elapsed = time.time() - start_time
 
+        # Fold records that turned out to be the same chassis under different
+        # names before anything downstream counts devices.
+        folded = inventory.merge_duplicates()
+        if folded:
+            logger.info(f"Merged {folded} duplicate device record(s)")
+
         logger.info(
             f"Discovery complete. {len(inventory.devices)} devices, "
             f"{len(self.failed)} failed"
@@ -254,10 +291,14 @@ class DiscoveryEngine:
             # Seed host uses user-selected protocol; discovered neighbors use auto
             is_seed = (ip == self.seed_ip and depth == 0)
             proto = self.protocol if is_seed else "auto"
+            # A device type supplied by the operator (host list or seed) is
+            # authoritative -- trying other platforms contradicts the request.
+            explicit_type = bool(device_type)
             conn_mgr = ConnectionManager(
                 host=ip, device_type=device_type,
                 username=self.username, password=self.password,
                 protocol=proto,
+                allow_fallback=not (explicit_type or self.disable_autodetect),
             )
             result = conn_mgr.connect()
             conn = result.connection
@@ -272,13 +313,16 @@ class DiscoveryEngine:
                 "event": "device_authenticated",
                 "ip": ip,
                 "protocol": result.protocol_used,
+                "device_type_effective": conn_mgr.effective_device_type,
             })
             hostname = ConnectionManager.get_hostname(conn)
             logger.info(f"Connected as {hostname}")
 
-            # Hostname-based dedup: a device may be reachable via multiple IPs
+            # Hostname-based dedup: a device may be reachable via multiple IPs.
+            # Normalized, so SW1 and SW1(FOC1234) are recognised as one chassis.
+            norm_hostname = normalize_hostname(hostname)
             with self._hostname_lock:
-                if hostname in self._discovered_hostnames:
+                if norm_hostname in self._discovered_hostnames:
                     logger.info(
                         f"Skipping {ip}: already discovered as {hostname}"
                     )
@@ -292,15 +336,19 @@ class DiscoveryEngine:
                     })
                     conn.disconnect()
                     return []
-                self._discovered_hostnames.add(hostname)
+                self._discovered_hostnames.add(norm_hostname)
 
             # Handle IP-placeholder rename
             self._rename_placeholder(inventory, ip, hostname)
 
-            # Add device to inventory
+            # Add device to inventory. A record that already exists from a
+            # neighbour sighting is promoted rather than replaced, so how the
+            # device was first seen survives alongside the collected data.
             inventory.add_device(
                 hostname, mgmt_ip=ip, device_type=device_type,
+                discovery_source="login",
             )
+            inventory.mark_login_succeeded(hostname)
 
             self._progress_cb({
                 "event": "collecting_data",
@@ -364,6 +412,21 @@ class DiscoveryEngine:
 
             conn.disconnect()
 
+            # Record collected hardware facts. These only ever come from a
+            # real login, which is what makes them a reliable signal that a
+            # device was actually reached.
+            inv_parsed = (inventory.devices.get(hostname, {})
+                          .get("collector_data", {})
+                          .get("device_inventory", {})
+                          .get("parsed", {}))
+            facts = extract_device_facts(inv_parsed)
+            inventory.mark_login_succeeded(
+                hostname,
+                serial=facts["serial"] or None,
+                model=facts["model"] or None,
+                software_version=facts["software_version"] or None,
+            )
+
             # Extract neighbors for next BFS layer
             neighbors = self._extract_neighbors(inventory, hostname, ip,
                                                 device_type, depth)
@@ -399,6 +462,9 @@ class DiscoveryEngine:
             logger.error(f"Connection error: {e.message}")
             with self._failed_lock:
                 self.failed[ip] = e.message
+            # A device seen as a neighbour keeps its record but records why
+            # the login attempt against it failed.
+            inventory.mark_login_failed_by_ip(ip, e.message)
             self._progress_cb({"event": "device_failed", "ip": ip, "error": e.message})
             return []
         except Exception as e:
@@ -444,21 +510,41 @@ class DiscoveryEngine:
                 )
                 continue
 
-            # Add neighbor as placeholder in inventory
-            remote_name = (
-                neighbor.get("remote_device")
-                or self._find_hostname_by_ip(inventory, neighbor.get("remote_ip"))
-                or neighbor.get("remote_ip")
-                or "Unknown"
-            )
+            # Add neighbor as placeholder in inventory. A bare address is not
+            # a chassis -- it becomes evidence on the device that saw it, and
+            # is still queued below for a login attempt that can name it.
+            platform, chassis_id = _neighbour_platform_fields(
+                neighbor.get("remote_platform"))
+            source = neighbor.get("source", "cdp")
 
-            inventory.add_device(
-                remote_name,
-                mgmt_ip=neighbor.get("remote_ip"),
-                device_type=neighbor_device_type,
-                device_category=neighbor_category,
-                platform=neighbor.get("remote_platform"),
-            )
+            remote_name = (neighbor.get("remote_device") or "").strip() \
+                or neighbor.get("remote_ip") or "unnamed"
+
+            if _should_create_neighbour_device(neighbor):
+                inventory.add_device(
+                    remote_name,
+                    mgmt_ip=neighbor.get("remote_ip"),
+                    device_type=neighbor_device_type,
+                    device_category=neighbor_category,
+                    platform=platform,
+                    discovery_source=source,
+                )
+                if chassis_id:
+                    inventory.set_chassis_id(remote_name, chassis_id)
+                inventory.add_evidence(
+                    remote_name, source=source, seen_from=hostname,
+                    remote_port=neighbor.get("remote_port"),
+                )
+            else:
+                existing = self._find_hostname_by_ip(
+                    inventory, neighbor.get("remote_ip"))
+                if existing:
+                    inventory.add_evidence(
+                        existing, source=source, seen_from=hostname,
+                        remote_port=neighbor.get("remote_port"),
+                    )
+                else:
+                    inventory.add_unresolved_neighbour(hostname, neighbor)
 
             # Queue for next layer
             remote_ip = neighbor.get("remote_ip")

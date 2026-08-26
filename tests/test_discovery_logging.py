@@ -4,6 +4,13 @@ import pytest
 from app.discovery_engine import DiscoveryEngine, DeviceLogFilter, _log_context
 
 
+@pytest.fixture(autouse=True)
+def _enable_mock_mode(monkeypatch):
+    """Discovery tests here seed from the simulated 192.168.1.0/24 topology.
+    Without WIREMAP_MOCK they attempt real connections and block on timeout."""
+    monkeypatch.setenv("WIREMAP_MOCK", "1")
+
+
 def test_device_log_filter_adds_ip_prefix():
     """Filter should prepend [device_ip] when context is set."""
     filt = DeviceLogFilter()

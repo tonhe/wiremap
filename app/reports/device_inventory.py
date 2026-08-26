@@ -9,6 +9,7 @@ from openpyxl import Workbook
 
 from .base import BaseReport
 from .xlsx_utils import create_sheet
+from app.device_facts import extract_device_facts
 
 
 def _normalize_keys(d: dict) -> dict:
@@ -199,7 +200,7 @@ class DeviceInventoryReport(BaseReport):
         headers = [
             "Hostname", "Mgmt IP", "Device Type", "Category",
             "Platform", "Platform Description", "Software Version",
-            "Serial Number",
+            "Serial Number", "Discovery Source", "Logged In", "Login Error",
         ]
         rows = []
         for hostname, device in sorted(
@@ -209,37 +210,15 @@ class DeviceInventoryReport(BaseReport):
                         .get("device_inventory", {}))
             parsed = inv_data.get("parsed", {})
 
-            version_list = parsed.get("version", [])
-            sw_version = ""
-            serial = ""
-            platform = device.get("platform", "")
-
-            if (version_list and isinstance(version_list, list)
-                    and len(version_list) > 0):
-                v = _normalize_keys(version_list[0])
-                sw_version = (v.get("version") or v.get("os_version")
-                              or v.get("os") or "")
-                serial = (v.get("serial") or v.get("serial_number")
-                          or v.get("serialnum") or "")
-                if not platform:
-                    platform = (v.get("hardware")
-                                or v.get("platform") or "")
-
-            if not serial:
-                inv_list = parsed.get("inventory", [])
-                if (inv_list and isinstance(inv_list, list)
-                        and len(inv_list) > 0):
-                    vi = _normalize_keys(inv_list[0])
-                    serial = (vi.get("sn")
-                              or vi.get("serial_number") or "")
-
+            facts = extract_device_facts(parsed)
+            sw_version = facts["software_version"]
+            serial = facts["serial"]
+            platform = device.get("platform", "") or facts["model"]
             if isinstance(platform, list):
                 platform = ", ".join(str(x) for x in platform)
-            if isinstance(sw_version, list):
-                sw_version = ", ".join(str(x) for x in sw_version)
-            if isinstance(serial, list):
-                serial = ", ".join(str(x) for x in serial)
 
+            # Provenance: a device seen only in a neighbour table has no
+            # serial or version, and must not read as fully collected.
             rows.append([
                 hostname,
                 device.get("mgmt_ip", ""),
@@ -249,6 +228,9 @@ class DeviceInventoryReport(BaseReport):
                 _get_platform_description(platform),
                 sw_version,
                 serial,
+                device.get("discovery_source", "") or "",
+                "Yes" if device.get("login_succeeded") else "No",
+                device.get("login_error", "") or "",
             ])
 
         return (headers, rows)
@@ -347,7 +329,7 @@ class DeviceInventoryReport(BaseReport):
         headers = [
             "Hostname", "Mgmt IP", "Device Type", "Category",
             "Platform", "Platform Description", "Software Version",
-            "Serial Number",
+            "Serial Number", "Discovery Source", "Logged In", "Login Error",
         ]
         rows = []
         for hostname, device in sorted(
@@ -357,37 +339,15 @@ class DeviceInventoryReport(BaseReport):
                         .get("device_inventory", {}))
             parsed = inv_data.get("parsed", {})
 
-            version_list = parsed.get("version", [])
-            sw_version = ""
-            serial = ""
-            platform = device.get("platform", "")
-
-            if (version_list and isinstance(version_list, list)
-                    and len(version_list) > 0):
-                v = _normalize_keys(version_list[0])
-                sw_version = (v.get("version") or v.get("os_version")
-                              or v.get("os") or "")
-                serial = (v.get("serial") or v.get("serial_number")
-                          or v.get("serialnum") or "")
-                if not platform:
-                    platform = (v.get("hardware")
-                                or v.get("platform") or "")
-
-            if not serial:
-                inv_list = parsed.get("inventory", [])
-                if (inv_list and isinstance(inv_list, list)
-                        and len(inv_list) > 0):
-                    vi = _normalize_keys(inv_list[0])
-                    serial = (vi.get("sn")
-                              or vi.get("serial_number") or "")
-
+            facts = extract_device_facts(parsed)
+            sw_version = facts["software_version"]
+            serial = facts["serial"]
+            platform = device.get("platform", "") or facts["model"]
             if isinstance(platform, list):
                 platform = ", ".join(str(x) for x in platform)
-            if isinstance(sw_version, list):
-                sw_version = ", ".join(str(x) for x in sw_version)
-            if isinstance(serial, list):
-                serial = ", ".join(str(x) for x in serial)
 
+            # Provenance: a device seen only in a neighbour table has no
+            # serial or version, and must not read as fully collected.
             rows.append([
                 hostname,
                 device.get("mgmt_ip", ""),
@@ -397,6 +357,9 @@ class DeviceInventoryReport(BaseReport):
                 _get_platform_description(platform),
                 sw_version,
                 serial,
+                device.get("discovery_source", "") or "",
+                "Yes" if device.get("login_succeeded") else "No",
+                device.get("login_error", "") or "",
             ])
 
         create_sheet(wb, "Devices", headers, rows)

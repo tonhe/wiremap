@@ -41,6 +41,8 @@ class BaseCollector(ABC):
         manipulation. The discovery engine calls this instead of the
         batch path when needs_custom_collect is True.
         """
+        from app.collectors.errors import error_reason
+
         cmds = self.get_commands(device_type)
         raw_outputs = {}
         for cmd in cmds:
@@ -48,5 +50,30 @@ class BaseCollector(ABC):
                 raw_outputs[cmd] = connection.send_command(cmd)
             except Exception:
                 raw_outputs[cmd] = ""
-        parsed = self.parse(raw_outputs, device_type)
+
+        # A device that rejected the command returns error text, not data.
+        # Parsing it produces rows like Area="Invalid", Interface="%".
+        errors = {cmd: error_reason(out) for cmd, out in raw_outputs.items()}
+        failed = [c for c, e in errors.items() if e]
+
+        if failed and len(failed) == len(raw_outputs):
+            return {
+                "raw": raw_outputs,
+                "parsed": {
+                    "collector_failed": True,
+                    "collector_error": errors[failed[0]],
+                    "failed_commands": failed,
+                },
+            }
+
+        # Blank the rejected commands so a partially successful collector
+        # still parses whatever did work. raw keeps the error text so the
+        # failure stays diagnosable.
+        for_parse = dict(raw_outputs)
+        for cmd in failed:
+            for_parse[cmd] = ""
+
+        parsed = self.parse(for_parse, device_type)
+        if failed:
+            parsed["failed_commands"] = failed
         return {"raw": raw_outputs, "parsed": parsed}

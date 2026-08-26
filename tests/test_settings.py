@@ -7,7 +7,7 @@ def test_get_discovery_settings_defaults(tmp_path):
     """Returns defaults when no config file exists."""
     from app.settings import get_discovery_settings
     settings = get_discovery_settings(config_dir=str(tmp_path))
-    assert settings == {"max_workers": 10}
+    assert settings == {"max_workers": 10, "disable_autodetect": False}
 
 
 def test_save_and_load_discovery_settings(tmp_path):
@@ -32,4 +32,18 @@ def test_save_ignores_unknown_keys(tmp_path):
     from app.settings import save_discovery_settings, get_discovery_settings
     save_discovery_settings({"max_workers": 8, "bogus": "value"}, config_dir=str(tmp_path))
     settings = get_discovery_settings(config_dir=str(tmp_path))
-    assert settings == {"max_workers": 8}
+    assert settings == {"max_workers": 8, "disable_autodetect": False}
+
+
+def test_disable_autodetect_default(tmp_path):
+    from app.settings import get_discovery_settings
+    settings = get_discovery_settings(config_dir=str(tmp_path))
+    assert settings["disable_autodetect"] is False
+
+
+def test_disable_autodetect_roundtrip(tmp_path):
+    from app.settings import get_discovery_settings, save_discovery_settings
+    save_discovery_settings({"max_workers": 5, "disable_autodetect": True},
+                            config_dir=str(tmp_path))
+    settings = get_discovery_settings(config_dir=str(tmp_path))
+    assert settings["disable_autodetect"] is True

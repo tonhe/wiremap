@@ -114,3 +114,33 @@ def test_three_sheets_present(sample_inventory):
     data = r.generate(sample_inventory)
     wb = load_workbook(io.BytesIO(data))
     assert wb.sheetnames == ["Devices", "Stack Members", "Modules"]
+
+
+def test_devices_sheet_exposes_provenance():
+    """Consumers must be able to tell a collected device from a neighbour."""
+    from app.reports.device_inventory import DeviceInventoryReport
+    inventory = {
+        "devices": {
+            "SW1": {
+                "hostname": "SW1", "mgmt_ip": "10.0.0.1",
+                "discovery_source": "login", "login_succeeded": True,
+                "collector_data": {},
+            },
+            "SW2": {
+                "hostname": "SW2", "mgmt_ip": "10.0.0.2",
+                "discovery_source": "cdp", "login_succeeded": False,
+                "login_error": "ssh/cisco_ios: timeout",
+                "collector_data": {},
+            },
+        }
+    }
+    headers, rows = DeviceInventoryReport()._extract_devices_data(inventory)
+    assert "Discovery Source" in headers
+    assert "Logged In" in headers
+    src = headers.index("Discovery Source")
+    logged = headers.index("Logged In")
+    by_host = {r[0]: r for r in rows}
+    assert by_host["SW1"][src] == "login"
+    assert by_host["SW1"][logged] == "Yes"
+    assert by_host["SW2"][src] == "cdp"
+    assert by_host["SW2"][logged] == "No"

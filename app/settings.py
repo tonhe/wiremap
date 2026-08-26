@@ -9,6 +9,7 @@ SETTINGS_FILE = "discovery.json"
 
 DEFAULTS = {
     "max_workers": 10,
+    "disable_autodetect": False,
 }
 
 VALID_RANGES = {

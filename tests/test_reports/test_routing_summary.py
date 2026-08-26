@@ -56,3 +56,62 @@ def test_generate_xlsx_with_routing_detail(sample_inventory):
 
     ws2 = wb["OSPF Topology"]
     assert ws2.cell(row=2, column=3).value == "1"  # Process ID
+
+
+def test_collect_collector_errors_finds_failures():
+    from app.reports.routing_summary import _collect_collector_errors
+    inventory = {
+        "devices": {
+            "SW1": {
+                "hostname": "SW1",
+                "collector_data": {
+                    "routing_detail": {
+                        "parsed": {
+                            "collector_failed": True,
+                            "collector_error": "% Invalid input detected",
+                        }
+                    }
+                },
+            },
+            "SW2": {
+                "hostname": "SW2",
+                "collector_data": {
+                    "routing_detail": {"parsed": {"ospf_processes": []}}
+                },
+            },
+        }
+    }
+    errors = _collect_collector_errors(inventory)
+    assert ("SW1", "routing_detail", "% Invalid input detected") in errors
+    assert len(errors) == 1
+
+
+def test_collect_collector_errors_empty_when_clean():
+    from app.reports.routing_summary import _collect_collector_errors
+    inventory = {"devices": {"SW1": {"collector_data": {}}}}
+    assert _collect_collector_errors(inventory) == []
+
+
+def test_failed_collector_produces_no_ospf_rows():
+    """Regression: error text was tokenised into Area/Interface/Cost columns."""
+    from app.reports.routing_summary import _build_ospf_topology_sheet
+    from openpyxl import Workbook
+    wb = Workbook()
+    wb.remove(wb.active)
+    inventory = {
+        "devices": {
+            "TRMH-DR-Top-Core2": {
+                "collector_data": {
+                    "routing_detail": {
+                        "parsed": {
+                            "collector_failed": True,
+                            "collector_error": "% Invalid input detected",
+                        }
+                    }
+                },
+            }
+        }
+    }
+    _build_ospf_topology_sheet(wb, inventory)
+    ws = wb["OSPF Topology"]
+    assert ws.max_row == 1

@@ -4,6 +4,7 @@ Simulates network devices for testing without real hardware
 """
 
 import logging
+import os
 from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -766,8 +767,19 @@ BGP neighbor is 192.168.1.1,  remote AS 65000, ebgp link,  Peer index 1
         logger.info(f"[MOCK] Disconnected from {self.device_config['hostname']}")
 
 
+def mock_mode_enabled() -> bool:
+    return os.environ.get("WIREMAP_MOCK", "").strip() == "1"
+
+
 def is_mock_mode(host: str) -> bool:
-    """Check if this IP should use mock mode"""
+    """Check if this IP should use mock mode.
+
+    Mock mode is opt-in via WIREMAP_MOCK=1. Without it no host is ever
+    mocked -- MOCK_DEVICES sits on 192.168.1.0/24, which is a real range
+    on real customer networks.
+    """
+    if not mock_mode_enabled():
+        return False
     return host in MockNetworkDevice.MOCK_DEVICES
 
 

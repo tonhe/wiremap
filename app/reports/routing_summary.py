@@ -741,6 +741,34 @@ def _build_fhrp_sheet(wb, inventory_data):
     _finalize(ws, "FHRPStatus", len(headers), row - 1)
 
 
+def _collect_collector_errors(inventory_data):
+    """Return (hostname, collector, error) for every collector that failed.
+
+    A device that rejected a command produces no rows in the data sheets,
+    which is indistinguishable from a device that simply had nothing to
+    report. This makes the difference visible.
+    """
+    rows = []
+    for hostname, device in sorted(inventory_data.get("devices", {}).items()):
+        for cname, cdata in sorted(device.get("collector_data", {}).items()):
+            parsed = cdata.get("parsed", {})
+            if parsed.get("collector_failed"):
+                rows.append((hostname, cname, parsed.get("collector_error", "")))
+    return rows
+
+
+def _build_collection_errors_sheet(wb, inventory_data):
+    rows = _collect_collector_errors(inventory_data)
+    if not rows:
+        return
+    ws = wb.create_sheet(title="Collection Errors")
+    headers = ["Device", "Site/Location", "Collector", "Error"]
+    _write_header_row(ws, headers)
+    for idx, (hostname, cname, error) in enumerate(rows, start=2):
+        _write_row(ws, idx, [hostname, _derive_site(hostname), cname, error])
+    _finalize(ws, "CollectionErrors", len(headers), len(rows) + 1)
+
+
 def _build_findings_sheet(wb, analysis):
     ws = wb.create_sheet(title="Findings")
     headers = ["Device", "Site/Location", "Severity", "Finding", "Details"]
@@ -835,6 +863,9 @@ class RoutingSummaryReport(BaseReport):
 
         # Tab 11: Findings
         _build_findings_sheet(wb, analysis)
+
+        # Tab 12: Collection Errors (only when something failed)
+        _build_collection_errors_sheet(wb, inventory_data)
 
         buf = io.BytesIO()
         wb.save(buf)

@@ -9,27 +9,60 @@ logger = logging.getLogger(__name__)
 
 _TELNET_SUFFIX = "_telnet"
 
+
+def telnet_type_for(device_type: str):
+    """Return the netmiko telnet platform for device_type, or None.
+
+    Netmiko has no telnet driver for many platforms -- cisco_nxos and
+    cisco_xe among them. Appending _telnet blindly raises ValueError
+    carrying a 40-line dump of every supported platform, which then
+    buries the genuine SSH failure.
+    """
+    from netmiko.ssh_dispatcher import CLASS_MAPPER
+
+    candidate = device_type
+    if not candidate.endswith(_TELNET_SUFFIX):
+        candidate = candidate + _TELNET_SUFFIX
+    return candidate if candidate in CLASS_MAPPER else None
+
 ConnectionResult = namedtuple("ConnectionResult", ["connection", "protocol_used", "fallback_occurred"])
 
 
+def _connect_handler(**params):
+    """Indirection point for ConnectHandler so tests can substitute it."""
+    from netmiko import ConnectHandler
+    return ConnectHandler(**params)
+
+
 class ConnectionError(Exception):
-    """Raised when connection fails."""
-    def __init__(self, message: str, error_type: str = "connection"):
+    """Raised when connection fails.
+
+    attempts holds every (protocol, device_type, error) tried, so the
+    genuine SSH failure survives alongside later fallback failures.
+    """
+    def __init__(self, message: str, error_type: str = "connection",
+                 attempts=None):
         super().__init__(message)
         self.message = message
         self.error_type = error_type
+        self.attempts = attempts or []
 
 
 class ConnectionManager:
     """Manages SSH/Telnet connections to network devices."""
 
     def __init__(self, host: str, device_type: str, username: str,
-                 password: str, protocol: str = "ssh"):
+                 password: str, protocol: str = "ssh",
+                 allow_fallback: bool = True):
         self.host = host
         self.device_type = device_type
         self.username = username
         self.password = password
         self.protocol = protocol  # "ssh", "telnet", "auto"
+        # False when the caller supplied device_type explicitly -- trying
+        # other platforms then contradicts what the operator asked for.
+        self.allow_fallback = allow_fallback
+        self.effective_device_type = None
 
     def _build_device_params(self, device_type: str = None) -> dict:
         """Build Netmiko connection parameters."""
@@ -66,6 +99,11 @@ class ConnectionManager:
         }
         return fallbacks.get(device_type, [])
 
+    def _types_to_try(self) -> list[str]:
+        if not self.allow_fallback:
+            return [self.device_type]
+        return [self.device_type] + self._get_fallback_types(self.device_type)
+
     def connect(self):
         """Connect to device. Returns Netmiko connection object.
 
@@ -84,60 +122,59 @@ class ConnectionManager:
                 get_mock_connection = None
 
         if is_mock_mode(self.host):
-            logger.info(f"Using MOCK mode for {self.host}")
+            logger.warning(
+                f"MOCK MODE: returning simulated data for {self.host} -- "
+                f"this is not a real device"
+            )
             mock_conn = get_mock_connection(self.host, self.device_type,
                                             self.username, self.password)
             return ConnectionResult(connection=mock_conn, protocol_used="mock", fallback_occurred=False)
 
         # Lazy import -- netmiko is only available inside Docker
-        from netmiko import ConnectHandler, NetmikoTimeoutException, NetmikoAuthenticationException
+        from netmiko import NetmikoTimeoutException, NetmikoAuthenticationException
 
         protocols_to_try = ["ssh", "telnet"] if self.protocol == "auto" else [self.protocol]
-        last_error = None
+        attempts = []
         fallback_occurred = False
 
         for proto in protocols_to_try:
-            types_to_try = [self.device_type] + self._get_fallback_types(self.device_type)
+            for dt in self._types_to_try():
+                if proto == "telnet":
+                    effective_dt = telnet_type_for(dt)
+                    if effective_dt is None:
+                        attempts.append(
+                            (proto, dt, "telnet not supported for this platform"))
+                        continue
+                else:
+                    effective_dt = dt
 
-            for dt in types_to_try:
+                params = self._build_device_params(effective_dt)
+                params["device_type"] = effective_dt
                 try:
-                    if proto == "telnet" and not dt.endswith(_TELNET_SUFFIX):
-                        effective_dt = dt + _TELNET_SUFFIX
-                    else:
-                        effective_dt = dt
-                    params = {
-                        "device_type": effective_dt,
-                        "host": self.host,
-                        "username": self.username,
-                        "password": self.password,
-                        "timeout": 10,
-                        "session_timeout": 20,
-                        "auth_timeout": 10,
-                        "banner_timeout": 10,
-                        "fast_cli": True,
-                        "global_delay_factor": 1,
-                    }
                     logger.info(f"Connecting to {self.host} ({effective_dt} via {proto})")
-                    conn = ConnectHandler(**params)
+                    conn = _connect_handler(**params)
                     logger.info(f"Connected to {self.host} ({effective_dt} via {proto})")
-                    return ConnectionResult(connection=conn, protocol_used=proto, fallback_occurred=fallback_occurred)
-                except NetmikoTimeoutException:
+                    self.effective_device_type = effective_dt
+                    return ConnectionResult(connection=conn, protocol_used=proto,
+                                            fallback_occurred=fallback_occurred)
+                except NetmikoAuthenticationException as e:
+                    attempts.append((proto, effective_dt, f"authentication failed: {e}"))
+                    raise ConnectionError(
+                        f"Authentication failed to {self.host}", "auth", attempts)
+                except NetmikoTimeoutException as e:
+                    attempts.append((proto, effective_dt, f"timeout: {e}"))
+                    logger.warning(f"Timeout {self.host} with {effective_dt} via {proto}")
                     if proto == "ssh" and "telnet" in protocols_to_try:
-                        logger.info(f"SSH timeout to {self.host}, will try telnet")
                         fallback_occurred = True
-                        break  # skip fallback types, try telnet
-                    raise ConnectionError(f"Connection timeout to {self.host}", "timeout")
-                except NetmikoAuthenticationException:
-                    raise ConnectionError(f"Authentication failed to {self.host}", "auth")
+                        break  # skip remaining ssh types, try telnet
                 except Exception as e:
-                    last_error = f"{type(e).__name__}: {e}"
-                    logger.warning(f"Failed {self.host} with {dt} via {proto}: {last_error}")
-                    continue
+                    detail = f"{type(e).__name__}: {e}"
+                    attempts.append((proto, effective_dt, detail))
+                    logger.warning(f"Failed {self.host} with {effective_dt} via {proto}: {detail}")
 
+        summary = "; ".join(f"{p}/{d}: {e}" for p, d, e in attempts)
         raise ConnectionError(
-            f"Connection failed to {self.host} (tried {protocols_to_try}): {last_error}",
-            "connection"
-        )
+            f"Connection failed to {self.host}: {summary}", "connection", attempts)
 
     @staticmethod
     def get_hostname(connection) -> str:

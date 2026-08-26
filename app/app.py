@@ -95,6 +95,7 @@ def scan_start():
     protocol = request.form.get('protocol', 'ssh')
     disc_settings = get_discovery_settings()
     max_workers = disc_settings.get("max_workers", 10)
+    disable_autodetect = disc_settings.get("disable_autodetect", False)
 
     if not username or not password:
         return jsonify({"error": "Username and password are required"}), 400
@@ -143,6 +144,7 @@ def scan_start():
             target_hosts=target_hosts,
             progress_callback=progress_cb,
             cancelled=cancelled,
+            disable_autodetect=disable_autodetect,
         )
         inventory = engine.discover()
         inventory.save(INVENTORY_DIR)
