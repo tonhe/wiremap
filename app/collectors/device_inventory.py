@@ -22,6 +22,10 @@ _COMMANDS = {
     "arista_eos": ["show version", "show inventory", "show module"],
     "juniper_junos": ["show version", "show chassis hardware", "show virtual-chassis"],
     "extreme": ["show version", "show switch"],
+    "vyos": ["show version", "show hardware cpu"],
+    # AireOS puts model, serial and software version in sysinfo, not version.
+    "cisco_wlc": ["show sysinfo", "show inventory"],
+    "watchguard_fireware": ["show system", "show version"],
 }
 _DEFAULT_COMMANDS = ["show version", "show inventory"]
 

@@ -19,6 +19,8 @@ class StpDetailCollector(BaseCollector):
     label = "STP Detail"
     description = "Collect spanning-tree detail, inconsistent ports, and root summary"
     enabled_by_default = True
+    # No spanning-tree on a router, a WLC or a firewall.
+    unsupported_platforms = frozenset({"cisco_wlc", "vyos", "watchguard_fireware"})
 
     def get_commands(self, device_type: str) -> list[str]:
         cmds = [_CMD_DETAIL]

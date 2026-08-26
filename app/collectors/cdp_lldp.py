@@ -24,6 +24,10 @@ _COMMANDS = {
     "cisco_nxos": ["show cdp neighbors detail", "show lldp neighbors detail"],
     "arista_eos": ["show lldp neighbors detail"],
     "juniper_junos": ["show lldp neighbors"],
+    # VyOS runs lldpd; there is no CDP.
+    "vyos": ["show lldp neighbors detail"],
+    # AireOS speaks CDP to the wired side, and LLDP only toward APs.
+    "cisco_wlc": ["show cdp neighbors detail"],
 }
 _DEFAULT_COMMANDS = ["show cdp neighbors detail", "show lldp neighbors detail"]
 
@@ -33,6 +37,8 @@ class CdpLldpCollector(BaseCollector):
     label = "CDP/LLDP Neighbors"
     description = "Discover neighbors via CDP and LLDP protocols"
     enabled_by_default = True
+    # Fireware speaks neither CDP nor LLDP.
+    unsupported_platforms = frozenset({"watchguard_fireware"})
 
     def get_commands(self, device_type: str) -> list[str]:
         return _COMMANDS.get(device_type, _DEFAULT_COMMANDS)

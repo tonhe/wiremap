@@ -38,6 +38,17 @@ _COMMANDS = {
         "show ip eigrp neighbors detail",
         "show ip bgp",
     ],
+    # VyOS runs FRR, so the show syntax is close to IOS but has no EIGRP.
+    "vyos": [
+        "show ip route summary",
+        "show ip ospf",
+        "show ip ospf interface",
+        "show ip bgp summary",
+    ],
+    "watchguard_fireware": [
+        "show ospf",
+        "show bgp",
+    ],
 }
 _DEFAULT_COMMANDS = _COMMANDS["cisco_ios"]
 
@@ -270,6 +281,8 @@ class RoutingDetailCollector(BaseCollector):
     label = "Routing Detail"
     description = "Collect route summaries, OSPF process details, OSPF interfaces, and BGP summaries"
     enabled_by_default = True
+    # A WLC does not participate in routing protocols.
+    unsupported_platforms = frozenset({"cisco_wlc"})
 
     def get_commands(self, device_type: str) -> list[str]:
         return list(_COMMANDS.get(device_type, _DEFAULT_COMMANDS))

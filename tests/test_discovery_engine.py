@@ -275,7 +275,7 @@ def test_named_neighbour_records_evidence():
     dev = inv.devices["SW2"]
     assert dev["platform"] == "cisco WS-C3850-48P"
     assert dev["login_succeeded"] is False
-    assert dev["discovery_source"] == "cdp"
+    assert dev["discovery_source"] == "cdp_lldp"
     assert dev["evidence"][0]["seen_from"] == "CORE1"
     assert dev["evidence"][0]["remote_port"] == "Gi1/0/1"
 
@@ -312,3 +312,164 @@ def test_no_device_platform_holds_a_mac():
     for name, dev in inventory.devices.items():
         assert not looks_like_mac(dev.get("platform")), \
             f"{name} has a MAC in platform: {dev.get('platform')}"
+
+
+def test_targeted_scan_pinned_to_depth_zero_by_default():
+    engine = DiscoveryEngine(
+        seed_ip="192.168.1.1", seed_device_type="cisco_nxos",
+        username="u", password="p", max_depth=3,
+        target_hosts=[("192.168.1.1", "cisco_nxos")],
+    )
+    assert engine.max_depth == 0
+
+
+def test_targeted_scan_crawls_when_enabled():
+    """Targeted scan should be able to discover onward from each target."""
+    engine = DiscoveryEngine(
+        seed_ip="192.168.1.1", seed_device_type="cisco_nxos",
+        username="u", password="p", max_depth=2,
+        target_hosts=[("192.168.1.1", "cisco_nxos")],
+        crawl_from_targets=True,
+    )
+    assert engine.max_depth == 2
+
+
+def test_discovery_scan_unaffected_by_crawl_flag():
+    engine = DiscoveryEngine(
+        seed_ip="192.168.1.1", seed_device_type="cisco_nxos",
+        username="u", password="p", max_depth=3,
+    )
+    assert engine.max_depth == 3
+
+
+def test_targeted_crawl_does_not_reprocess_targets():
+    """Targets already visited must not be rediscovered as neighbours."""
+    engine = DiscoveryEngine(
+        seed_ip="192.168.1.1", seed_device_type="cisco_nxos",
+        username="admin", password="admin", max_depth=1,
+        target_hosts=[("192.168.1.1", "cisco_nxos")],
+        crawl_from_targets=True,
+        filters={"include_routers": True, "include_switches": True},
+    )
+    engine.discover()
+    assert len(engine.visited) == len(set(engine.visited))
+    assert "192.168.1.1" in engine.visited
+
+
+def test_public_next_hop_is_not_crawled():
+    """Regression: next-hop crawling must not walk into ISP space."""
+    from app.inventory import DiscoveryInventory
+    engine = DiscoveryEngine(
+        seed_ip="10.0.0.1", seed_device_type="cisco_ios",
+        username="u", password="p", max_depth=1,
+        neighbor_sources={"next_hop"},
+        filters={"include_routers": True, "include_switches": True},
+    )
+    inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    inv.add_device("EDGE1", mgmt_ip="10.0.0.1", discovery_source="login")
+    inv.set_collector_data("EDGE1", "l3_routing", {}, {"routes": [
+        {"network": "0.0.0.0", "nexthop_ip": "8.8.8.8"},
+        {"network": "10.5.0.0", "nexthop_ip": "10.0.0.9"},
+    ]})
+    next_layer = engine._extract_neighbors(inv, "EDGE1", "10.0.0.1",
+                                           "cisco_ios", 0)
+    queued = {ip for ip, _ in next_layer}
+    assert "10.0.0.9" in queued
+    assert "8.8.8.8" not in queued
+    assert "8.8.8.8" in engine._out_of_scope
+
+
+def test_allow_list_scope_is_honoured():
+    from app.inventory import DiscoveryInventory
+    from app.neighbors import CrawlScope
+    engine = DiscoveryEngine(
+        seed_ip="10.0.0.1", seed_device_type="cisco_ios",
+        username="u", password="p", max_depth=1,
+        neighbor_sources={"next_hop"},
+        crawl_scope=CrawlScope(allow_cidrs=["10.1.0.0/16"]),
+        filters={"include_routers": True, "include_switches": True},
+    )
+    inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    inv.add_device("EDGE1", mgmt_ip="10.0.0.1", discovery_source="login")
+    inv.set_collector_data("EDGE1", "l3_routing", {}, {"routes": [
+        {"network": "a", "nexthop_ip": "10.1.2.3"},
+        {"network": "b", "nexthop_ip": "10.9.9.9"},
+    ]})
+    queued = {ip for ip, _ in engine._extract_neighbors(
+        inv, "EDGE1", "10.0.0.1", "cisco_ios", 0)}
+    assert queued == {"10.1.2.3"}
+
+
+def test_routing_adjacency_feeds_the_crawl():
+    """A device reachable only via OSPF must now be discovered."""
+    from app.inventory import DiscoveryInventory
+    engine = DiscoveryEngine(
+        seed_ip="10.0.0.1", seed_device_type="cisco_ios",
+        username="u", password="p", max_depth=1,
+        filters={"include_routers": True, "include_switches": True},
+    )
+    inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    inv.add_device("CORE1", mgmt_ip="10.0.0.1", discovery_source="login")
+    inv.set_collector_data("CORE1", "l3_routing", {}, {"neighbors": [
+        {"remote_ip": "10.0.0.7", "protocol": "OSPF",
+         "remote_capabilities": "Router"},
+    ]})
+    queued = {ip for ip, _ in engine._extract_neighbors(
+        inv, "CORE1", "10.0.0.1", "cisco_ios", 0)}
+    assert "10.0.0.7" in queued
+
+
+def test_snmp_fallback_records_identified_device(monkeypatch):
+    """A device that refuses login is still identified, not left anonymous."""
+    from app.inventory import DiscoveryInventory
+    from app.snmp_probe import SnmpCredentials
+    import app.discovery_engine as mod
+
+    monkeypatch.setattr(mod, "snmp_probe", lambda ip, creds: {
+        "hostname": "SW-NOLOGIN", "mgmt_ip": ip, "device_type": "cisco_ios",
+        "software_version": "15.0(2)SE11", "sys_descr": "Cisco IOS Software",
+        "sys_object_id": "1.3.6.1.4.1.9.1.516", "sys_location": "IDF-3",
+        "discovery_source": "snmp", "login_succeeded": False,
+    })
+
+    engine = DiscoveryEngine(
+        seed_ip="10.0.0.1", seed_device_type="cisco_ios",
+        username="u", password="p", max_depth=0,
+        snmp_credentials=SnmpCredentials(version="v2c", community="public"),
+    )
+    inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    ok = engine._snmp_fallback(inv, "10.0.0.50", "ssh/cisco_ios: timeout")
+
+    assert ok is True
+    dev = inv.devices["SW-NOLOGIN"]
+    assert dev["discovery_source"] == "snmp"
+    assert dev["login_succeeded"] is False
+    assert "timeout" in dev["login_error"]
+    assert dev["software_version"] == "15.0(2)SE11"
+    assert dev["snmp"]["sys_location"] == "IDF-3"
+
+
+def test_snmp_fallback_noop_without_credentials():
+    from app.inventory import DiscoveryInventory
+    engine = DiscoveryEngine(
+        seed_ip="10.0.0.1", seed_device_type="cisco_ios",
+        username="u", password="p", max_depth=0,
+    )
+    inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    assert engine._snmp_fallback(inv, "10.0.0.50", "err") is False
+    assert inv.devices == {}
+
+
+def test_snmp_fallback_noop_when_device_silent(monkeypatch):
+    from app.inventory import DiscoveryInventory
+    from app.snmp_probe import SnmpCredentials
+    import app.discovery_engine as mod
+
+    monkeypatch.setattr(mod, "snmp_probe", lambda ip, creds: None)
+    engine = DiscoveryEngine(
+        seed_ip="10.0.0.1", seed_device_type="cisco_ios",
+        username="u", password="p", max_depth=0,
+        snmp_credentials=SnmpCredentials(version="v2c", community="public"),
+    )
+    inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    assert engine._snmp_fallback(inv, "10.0.0.50", "err") is False

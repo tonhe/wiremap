@@ -13,6 +13,8 @@ import requests
 from device_detector import DeviceTypeDetector
 from discovery_engine import DiscoveryEngine, DiscoveryError
 from inventory import DiscoveryInventory
+from neighbors import CrawlScope, get_registry as get_neighbor_sources
+from snmp_probe import SnmpCredentials
 from scan_manager import ScanManager
 from plugins import get_plugin_config, save_plugin_config, get_plugin_status, list_plugins
 from settings import get_discovery_settings, save_discovery_settings
@@ -72,15 +74,25 @@ DEVICE_TYPES = [
     ('extreme', 'Extreme ExtremeXOS'),
     ('extreme_vsp', 'Extreme VOSS'),
     ('ubiquiti_edge', 'Ubiquiti EdgeOS'),
-    ('barracuda', 'Barracuda'),
+    # 'barracuda' was offered here but is not a netmiko platform in any
+    # version -- selecting it could only ever raise ValueError.
+    ('vyos', 'VyOS'),
+    ('cisco_wlc', 'Cisco AireOS WLC'),
+    ('watchguard_fireware', 'WatchGuard Firebox'),
 ]
 
 
 @app.route('/')
 def index():
     """Main page with discovery form"""
+    sources = [
+        {"name": s.name, "label": s.label, "description": s.description,
+         "enabled_by_default": s.enabled_by_default}
+        for s in sorted(get_neighbor_sources().values(), key=lambda s: s.name)
+    ]
     return render_template('index.html', device_types=DEVICE_TYPES, version=VERSION,
-                         report_registry=_get_report_info())
+                         report_registry=_get_report_info(),
+                         neighbor_sources=sources)
 
 
 @app.route('/scan/start', methods=['POST'])
@@ -119,6 +131,28 @@ def scan_start():
         target_hosts = None
 
     max_depth = int(request.form.get('max_depth', 3))
+    crawl_from_targets = request.form.get('crawl_from_targets') == 'true'
+
+    # Neighbour sources: which sightings are allowed to feed the crawl.
+    submitted_sources = request.form.getlist('neighbor_sources')
+    neighbor_sources = set(submitted_sources) if submitted_sources else None
+
+    try:
+        crawl_scope = CrawlScope(
+            allow_cidrs=_split_cidrs(request.form.get('scope_allow', '')),
+            deny_cidrs=_split_cidrs(request.form.get('scope_deny', '')),
+            rfc1918_only=request.form.get('scope_private_only', 'true') != 'false',
+            max_devices=int(request.form.get('max_devices') or 0) or None,
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    # SNMP is a fallback for hosts that refuse SSH and telnet, so credentials
+    # are supplied per run alongside the login credentials.
+    try:
+        snmp_credentials = _build_snmp_credentials(request.form)
+    except ValueError as e:
+        return jsonify({"error": f"SNMP: {e}"}), 400
     filters = {
         'include_routers': request.form.get('include_routers') == 'true',
         'include_switches': request.form.get('include_switches') == 'true',
@@ -126,7 +160,7 @@ def scan_start():
         'include_servers': request.form.get('include_servers') == 'true',
         'include_aps': request.form.get('include_aps') == 'true',
         'include_other': request.form.get('include_other') == 'true',
-    } if scan_type == 'discovery' else None
+    } if (scan_type == 'discovery' or crawl_from_targets) else None
 
     def run_scan(progress_cb, cancelled):
         det = DeviceTypeDetector()
@@ -145,6 +179,10 @@ def scan_start():
             progress_callback=progress_cb,
             cancelled=cancelled,
             disable_autodetect=disable_autodetect,
+            crawl_from_targets=crawl_from_targets,
+            neighbor_sources=neighbor_sources,
+            crawl_scope=crawl_scope,
+            snmp_credentials=snmp_credentials,
         )
         inventory = engine.discover()
         inventory.save(INVENTORY_DIR)
@@ -420,6 +458,30 @@ def api_save_discovery_settings():
 
 
 # --- Helpers ---
+
+def _build_snmp_credentials(form):
+    """Build SNMP credentials from a scan form, or None when not enabled."""
+    if form.get('snmp_enabled') != 'true':
+        return None
+    version = (form.get('snmp_version') or 'v2c').strip()
+    return SnmpCredentials(
+        version=version,
+        community=form.get('snmp_community', '').strip(),
+        username=form.get('snmp_username', '').strip(),
+        auth_key=form.get('snmp_auth_key', ''),
+        priv_key=form.get('snmp_priv_key', ''),
+        auth_protocol=form.get('snmp_auth_protocol', 'sha'),
+        priv_protocol=form.get('snmp_priv_protocol', 'aes'),
+    )
+
+
+def _split_cidrs(raw_text):
+    """Split a comma or newline separated CIDR list."""
+    if not raw_text:
+        return []
+    parts = raw_text.replace("\n", ",").split(",")
+    return [p.strip() for p in parts if p.strip()]
+
 
 def _parse_host_list(raw_text, valid_types):
     """Parse textarea host list into [(ip, device_type_or_None), ...].

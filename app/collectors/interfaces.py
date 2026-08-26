@@ -40,6 +40,17 @@ _COMMANDS = {
         "show interfaces terse",
         "show interfaces descriptions",
     ],
+    "vyos": [
+        "show interfaces",
+        "show interfaces detail",
+    ],
+    "cisco_wlc": [
+        "show interface summary",
+        "show port summary",
+    ],
+    "watchguard_fireware": [
+        "show interface",
+    ],
 }
 _DEFAULT_COMMANDS = [
     "show interfaces status",

@@ -191,3 +191,23 @@ def test_merge_carries_collector_data_and_evidence():
     survivor = list(inv.devices.values())[0]
     assert "arp" in survivor["collector_data"]
     assert len(survivor["evidence"]) == 1
+
+
+def test_out_of_scope_addresses_are_reported():
+    """A bounded scan that does not say what it skipped reads as complete."""
+    inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    inv.set_scan_summary(elapsed=1.0, failed={},
+                         out_of_scope={"8.8.8.8", "1.1.1.1"},
+                         ceiling_hit=True)
+    summary = inv.to_dict()["scan_summary"]
+    assert summary["out_of_scope_count"] == 2
+    assert "8.8.8.8" in summary["out_of_scope"]
+    assert summary["device_ceiling_hit"] is True
+
+
+def test_scan_summary_defaults_are_empty():
+    inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    inv.set_scan_summary(elapsed=1.0, failed={})
+    summary = inv.to_dict()["scan_summary"]
+    assert summary["out_of_scope"] == []
+    assert summary["device_ceiling_hit"] is False

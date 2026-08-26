@@ -14,12 +14,16 @@ try:
     from app.inventory import DiscoveryInventory
     from app.identity import normalize_hostname, looks_like_mac
     from app.device_facts import extract_device_facts
+    from app.neighbors import extract_all, default_enabled, CrawlScope
+    from app.snmp_probe import probe as snmp_probe
 except ImportError:
     from connection_manager import ConnectionManager, ConnectionError
     from collectors import get_registry, get_collector
     from inventory import DiscoveryInventory
     from identity import normalize_hostname, looks_like_mac
     from device_facts import extract_device_facts
+    from neighbors import extract_all, default_enabled, CrawlScope
+    from snmp_probe import probe as snmp_probe
 
 logger = logging.getLogger(__name__)
 
@@ -86,14 +90,32 @@ class DiscoveryEngine:
                  target_hosts: list = None,
                  progress_callback=None,
                  cancelled=None,
-                 disable_autodetect: bool = False):
+                 disable_autodetect: bool = False,
+                 crawl_from_targets: bool = False,
+                 neighbor_sources=None,
+                 crawl_scope=None,
+                 snmp_credentials=None):
         self.seed_ip = seed_ip
         self.seed_device_type = seed_device_type
         self.username = username
         self.password = password
         self.target_hosts = target_hosts
         self.disable_autodetect = disable_autodetect
-        self.max_depth = 0 if target_hosts else max_depth
+        self.crawl_from_targets = crawl_from_targets
+        self.neighbor_sources = (set(neighbor_sources)
+                                 if neighbor_sources is not None
+                                 else default_enabled())
+        # Without a scope, next-hop crawling walks out into ISP space.
+        self.crawl_scope = crawl_scope or CrawlScope()
+        # Used only after SSH and telnet have both failed.
+        self.snmp_credentials = snmp_credentials
+        # A targeted scan visits exactly its host list unless the operator
+        # asks it to keep going from each target. Already-visited IPs are
+        # filtered per layer, so targets are never reprocessed.
+        if target_hosts and not crawl_from_targets:
+            self.max_depth = 0
+        else:
+            self.max_depth = max_depth
         self.protocol = protocol
         self.filters = filters or {
             "include_routers": True,
@@ -111,6 +133,10 @@ class DiscoveryEngine:
         self._hostname_lock = threading.Lock()
         self.failed: dict[str, str] = {}
         self._failed_lock = threading.Lock()
+        # Addresses seen but deliberately not crawled -- reported so a silent
+        # boundary never reads as "nothing was there".
+        self._out_of_scope: set[str] = set()
+        self._ceiling_hit = False
         self.max_workers = max(1, max_workers)
         self._progress_cb = progress_callback or (lambda event: None)
         self._cancelled = cancelled
@@ -245,7 +271,14 @@ class DiscoveryEngine:
         inventory.set_scan_summary(
             elapsed=round(elapsed, 1),
             failed=dict(self.failed),
+            out_of_scope=set(self._out_of_scope),
+            ceiling_hit=self._ceiling_hit,
         )
+        if self._out_of_scope:
+            logger.info(
+                f"{len(self._out_of_scope)} address(es) seen but not crawled "
+                f"(outside scope)"
+            )
 
         # Save inventory before emitting scan_complete so the file
         # exists when the frontend fetches /api/reports/available/<key>
@@ -465,6 +498,9 @@ class DiscoveryEngine:
             # A device seen as a neighbour keeps its record but records why
             # the login attempt against it failed.
             inventory.mark_login_failed_by_ip(ip, e.message)
+            # SSH and telnet are gone; SNMP may still say what this thing is.
+            if self._snmp_fallback(inventory, ip, e.message):
+                return []
             self._progress_cb({"event": "device_failed", "ip": ip, "error": e.message})
             return []
         except Exception as e:
@@ -476,17 +512,49 @@ class DiscoveryEngine:
         finally:
             _log_context.device_ip = None
 
+    def _snmp_fallback(self, inventory: DiscoveryInventory, ip: str,
+                       login_error: str) -> bool:
+        """Try SNMP after a failed login. Returns True if the device answered.
+
+        The record is still login_succeeded=False -- SNMP identifies a device,
+        it does not collect one.
+        """
+        if not self.snmp_credentials or not self.snmp_credentials.is_configured():
+            return False
+
+        record = snmp_probe(ip, self.snmp_credentials)
+        if not record:
+            return False
+
+        hostname = record["hostname"]
+        logger.info(f"SNMP identified {ip} as {hostname} "
+                    f"({record.get('device_type') or 'unknown platform'})")
+
+        inventory.add_device(
+            hostname,
+            mgmt_ip=ip,
+            device_type=record.get("device_type"),
+            discovery_source="snmp",
+        )
+        inventory.mark_login_failed(hostname, login_error)
+        inventory.set_snmp_facts(hostname, record)
+        self._progress_cb({
+            "event": "device_snmp_identified",
+            "ip": ip,
+            "hostname": hostname,
+            "device_type": record.get("device_type"),
+        })
+        return True
+
     def _extract_neighbors(self, inventory: DiscoveryInventory,
                            hostname: str, ip: str, device_type: str,
                            depth: int) -> list[tuple[str, str]]:
-        """Extract neighbors from cdp_lldp collector data.
+        """Extract neighbors from every enabled neighbour source.
 
         Returns list of (ip, device_type) for next BFS layer.
         """
         device = inventory.devices.get(hostname, {})
-        cdp_lldp_data = device.get("collector_data", {}).get("cdp_lldp", {})
-        parsed = cdp_lldp_data.get("parsed", {})
-        neighbors = parsed.get("neighbors", [])
+        neighbors = extract_all(device, enabled=self.neighbor_sources)
 
         next_layer = []
 
@@ -515,7 +583,7 @@ class DiscoveryEngine:
             # is still queued below for a login attempt that can name it.
             platform, chassis_id = _neighbour_platform_fields(
                 neighbor.get("remote_platform"))
-            source = neighbor.get("source", "cdp")
+            source = neighbor.get("source", "cdp_lldp")
 
             remote_name = (neighbor.get("remote_device") or "").strip() \
                 or neighbor.get("remote_ip") or "unnamed"
@@ -551,13 +619,30 @@ class DiscoveryEngine:
             if remote_ip:
                 with self._visited_lock:
                     already_visited = remote_ip in self.visited
-                if not already_visited:
-                    capabilities = neighbor.get("remote_capabilities", "")
-                    if self._detector._should_crawl(capabilities, self.filters):
-                        next_layer.append((remote_ip, neighbor_device_type))
-                        logger.info(
-                            f"Queued {remote_name} ({remote_ip}) at depth {depth + 1}"
-                        )
+                    visited_count = len(self.visited)
+                if already_visited:
+                    continue
+                if not self.crawl_scope.allows(remote_ip):
+                    logger.info(
+                        f"Out of scope, not crawling {remote_name} ({remote_ip}) "
+                        f"seen via {neighbor.get('source', 'cdp_lldp')}"
+                    )
+                    self._out_of_scope.add(remote_ip)
+                    continue
+                if not self.crawl_scope.under_ceiling(visited_count):
+                    logger.warning(
+                        f"Device ceiling {self.crawl_scope.max_devices} reached; "
+                        f"not queueing {remote_ip}"
+                    )
+                    self._ceiling_hit = True
+                    continue
+                capabilities = neighbor.get("remote_capabilities", "")
+                if self._detector._should_crawl(capabilities, self.filters):
+                    next_layer.append((remote_ip, neighbor_device_type))
+                    logger.info(
+                        f"Queued {remote_name} ({remote_ip}) at depth {depth + 1} "
+                        f"via {neighbor.get('source', 'cdp_lldp')}"
+                    )
 
         return next_layer
 

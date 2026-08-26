@@ -34,6 +34,11 @@ class BaseCollector(ABC):
     # or post-collection processing (e.g. SNMP redaction).
     needs_custom_collect = False
 
+    # Platforms this collector cannot serve at all -- a VyOS box has no
+    # switchports, a WLC has no Cisco-style routing table. Running the default
+    # Cisco commands at them produces nothing but rejected-command noise.
+    unsupported_platforms = frozenset()
+
     def collect(self, connection, device_type: str) -> dict:
         """Run commands and return raw + parsed data.
 
@@ -43,7 +48,15 @@ class BaseCollector(ABC):
         """
         from app.collectors.errors import error_reason
 
+        if device_type in self.unsupported_platforms:
+            return {"raw": {}, "parsed": {"not_applicable": True,
+                                          "reason": f"{self.name} does not apply to {device_type}"}}
+
         cmds = self.get_commands(device_type)
+        if not cmds:
+            return {"raw": {}, "parsed": {"not_applicable": True,
+                                          "reason": f"no commands defined for {device_type}"}}
+
         raw_outputs = {}
         for cmd in cmds:
             try:

@@ -32,6 +32,19 @@ _COMMANDS = {
         "show aaa sessions",
         "show running-config | section aaa",
     ],
+    "vyos": [
+        "show ntp",
+        "show log tail",
+    ],
+    "cisco_wlc": [
+        "show time",
+        "show logging",
+        "show snmpversion",
+    ],
+    "watchguard_fireware": [
+        "show ntp",
+        "show log",
+    ],
 }
 _DEFAULT_COMMANDS = [
     "show ntp status",

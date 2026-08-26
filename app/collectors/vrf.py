@@ -14,6 +14,9 @@ _COMMANDS = {
     "cisco_ios": ["show ip vrf", "show ip vrf interfaces"],
     "cisco_xe": ["show ip vrf", "show ip vrf interfaces"],
     "cisco_nxos": ["show vrf", "show vrf all interface"],
+    # VyOS gained VRF support in 1.4; older builds reject this and the
+    # collector records the rejection rather than parsing it.
+    "vyos": ["show vrf"],
 }
 _DEFAULT_COMMANDS = ["show ip vrf", "show ip vrf interfaces"]
 
@@ -187,6 +190,8 @@ class VrfCollector(BaseCollector):
     description = "Collect VRF definitions, interface assignments, per-VRF routes and ARP"
     enabled_by_default = True
     needs_custom_collect = True
+    # A WLC and a Firebox have no VRF concept.
+    unsupported_platforms = frozenset({"cisco_wlc", "watchguard_fireware"})
 
     def get_commands(self, device_type: str) -> list[str]:
         return list(_COMMANDS.get(device_type, _DEFAULT_COMMANDS))

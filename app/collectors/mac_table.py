@@ -39,6 +39,8 @@ class MacTableCollector(BaseCollector):
     label = "MAC Address Table"
     description = "Collect MAC address table entries from devices"
     enabled_by_default = True
+    # None of these keep an IOS-style MAC address table.
+    unsupported_platforms = frozenset({"cisco_wlc", "vyos", "watchguard_fireware"})
 
     def get_commands(self, device_type: str) -> list[str]:
         return [_COMMANDS.get(device_type, _DEFAULT_COMMAND)]

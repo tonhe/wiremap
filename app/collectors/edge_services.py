@@ -26,6 +26,15 @@ _COMMANDS = {
         "show ip nat translations",
         "show ip nat statistics",
     ],
+    "vyos": [
+        "show firewall",
+        "show nat source rules",
+        "show nat destination rules",
+    ],
+    "watchguard_fireware": [
+        "show policy",
+        "show nat",
+    ],
 }
 _DEFAULT_COMMANDS = [
     "show access-lists",
@@ -299,6 +308,8 @@ class EdgeServicesCollector(BaseCollector):
     label = "Edge Services"
     description = "Collect ACLs and IP interface security data from devices"
     enabled_by_default = True
+    # A WLC has no ACL/NAT edge role.
+    unsupported_platforms = frozenset({"cisco_wlc"})
 
     def get_commands(self, device_type: str) -> list[str]:
         return list(_COMMANDS.get(device_type, _DEFAULT_COMMANDS))

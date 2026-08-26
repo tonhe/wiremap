@@ -26,6 +26,10 @@ _COMMANDS = {
     "juniper_junos": [
         # Junos uses VRRP
     ],
+    # VyOS runs VRRP via keepalived.
+    "vyos": [
+        "show vrrp",
+    ],
 }
 _DEFAULT_COMMANDS = [
     "show standby brief",
@@ -179,6 +183,8 @@ class HsrpCollector(BaseCollector):
     label = "HSRP/VRRP"
     description = "Collect HSRP/VRRP first-hop redundancy state, virtual IPs, and priorities"
     enabled_by_default = True
+    # A WLC has no FHRP; a Firebox clusters via FireCluster, not VRRP.
+    unsupported_platforms = frozenset({"cisco_wlc", "watchguard_fireware"})
 
     def get_commands(self, device_type: str) -> list[str]:
         return _COMMANDS.get(device_type, _DEFAULT_COMMANDS)

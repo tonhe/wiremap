@@ -11,6 +11,10 @@ _COMMANDS = {
     "arista_eos": "show running-config",
     "juniper_junos": "show configuration",
     "extreme": "show configuration",
+    "vyos": "show configuration commands",
+    # Plain "show run-config" is paged and interactive on AireOS.
+    "cisco_wlc": "show run-config startup-commands",
+    "watchguard_fireware": "show configuration",
 }
 _DEFAULT_COMMAND = "show running-config"
 

@@ -78,3 +78,42 @@ def test_partial_failure_preserves_raw_error_text():
     result = collector.collect(conn, "cisco_ios")
     assert "Invalid input" in result["raw"]["bad"]
     assert result["parsed"]["failed_commands"] == ["bad"]
+
+
+class _NoCmd(BaseCollector):
+    name = "nocmd"
+    unsupported_platforms = frozenset({"vyos"})
+
+    def get_commands(self, device_type):
+        return ["show ip arp"]
+
+    def parse(self, raw_outputs, device_type):
+        return {"parsed": True}
+
+
+class _EmptyCmd(BaseCollector):
+    name = "emptycmd"
+
+    def get_commands(self, device_type):
+        return []
+
+    def parse(self, raw_outputs, device_type):
+        raise AssertionError("parse must not run with no commands")
+
+
+def test_unsupported_platform_is_not_collected():
+    """A collector that cannot serve a platform must not run Cisco commands
+    at it and produce a wall of errors."""
+    result = _NoCmd().collect(_Conn("irrelevant"), "vyos")
+    assert result["parsed"]["not_applicable"] is True
+    assert result["raw"] == {}
+
+
+def test_supported_platform_still_collects():
+    result = _NoCmd().collect(_Conn("Gi0/1 up"), "cisco_ios")
+    assert result["parsed"].get("not_applicable") is not True
+
+
+def test_empty_command_list_short_circuits():
+    result = _EmptyCmd().collect(_Conn("x"), "cisco_ios")
+    assert result["parsed"]["not_applicable"] is True

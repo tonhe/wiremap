@@ -122,3 +122,78 @@ def test_reports_available_missing_key(client):
     """GET /api/reports/available/<key> returns 404 for missing inventory."""
     rv = client.get('/api/reports/available/nonexistent')
     assert rv.status_code == 404
+
+
+def _point_at_repo_templates():
+    """In Docker the app runs from /app with templates alongside; from the
+    repo root the folder is one level up."""
+    import pathlib
+    repo = pathlib.Path(__file__).resolve().parent.parent
+    app.template_folder = str(repo / "templates")
+
+
+def test_index_renders_with_neighbor_sources(client):
+    _point_at_repo_templates()
+    """The discovery form needs the source list; a missing variable would
+    render an empty checkbox grid rather than erroring."""
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert "Discover Neighbours Via" in body
+    assert "routing_adjacency" in body
+    assert "next_hop" in body
+    assert "Crawl boundaries" in body
+
+
+def test_index_lists_new_device_types(client):
+    _point_at_repo_templates()
+    body = client.get("/").get_data(as_text=True)
+    for dt in ("vyos", "cisco_wlc", "watchguard_fireware"):
+        assert dt in body
+    assert "barracuda" not in body
+
+
+def test_snmp_fields_on_both_scan_forms(client):
+    _point_at_repo_templates()
+    body = client.get("/").get_data(as_text=True)
+    assert body.count("Fall back to SNMP when login fails") == 2
+    assert "disc_snmp_enabled" in body
+    assert "ts_snmp_enabled" in body
+    assert "snmp_community" in body
+    assert "snmp_priv_key" in body
+
+
+def test_snmp_credentials_built_from_form():
+    from app.app import _build_snmp_credentials
+    assert _build_snmp_credentials({}) is None
+    creds = _build_snmp_credentials({
+        "snmp_enabled": "true", "snmp_version": "v2c",
+        "snmp_community": "public",
+    })
+    assert creds.is_configured() is True
+    assert creds.version == "v2c"
+
+
+def test_snmp_v3_credentials_built_from_form():
+    from app.app import _build_snmp_credentials
+    creds = _build_snmp_credentials({
+        "snmp_enabled": "true", "snmp_version": "v3",
+        "snmp_username": "netadmin", "snmp_auth_key": "authpass",
+        "snmp_priv_key": "privpass",
+    })
+    assert creds.version == "v3"
+    assert creds.username == "netadmin"
+
+
+def test_snmp_v2c_without_community_is_rejected():
+    import pytest
+    from app.app import _build_snmp_credentials
+    with pytest.raises(ValueError):
+        _build_snmp_credentials({"snmp_enabled": "true", "snmp_version": "v2c"})
+
+
+def test_split_cidrs_handles_commas_and_newlines():
+    from app.app import _split_cidrs
+    assert _split_cidrs("10.0.0.0/8, 192.168.0.0/16") == ["10.0.0.0/8", "192.168.0.0/16"]
+    assert _split_cidrs("10.0.0.0/8\n172.16.0.0/12") == ["10.0.0.0/8", "172.16.0.0/12"]
+    assert _split_cidrs("") == []

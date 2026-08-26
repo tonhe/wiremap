@@ -47,6 +47,14 @@ _L3_NEIGHBOR_COMMANDS = {
         "ospf": "show ospf neighbor",
         "bgp": "show bgp neighbor",
     },
+    "vyos": {
+        "ospf": "show ip ospf neighbor",
+        "bgp": "show ip bgp summary",
+    },
+    "watchguard_fireware": {
+        "ospf": "show ospf neighbor",
+        "bgp": "show bgp neighbor",
+    },
 }
 _DEFAULT_L3_NEIGHBOR_COMMANDS = {
     "ospf": "show ip ospf neighbor",
@@ -63,6 +71,10 @@ _ROUTE_COMMANDS = {
     "arista_eos": "show ip route",
     "juniper_junos": "show route",
     "extreme": "show ip route",
+    "vyos": "show ip route",
+    "watchguard_fireware": "show route",
+    # AireOS has only the controller's own routes, not a routing table.
+    "cisco_wlc": "show route summary",
 }
 _DEFAULT_ROUTE_COMMAND = "show ip route"
 
@@ -74,6 +86,7 @@ _PROTOCOLS_COMMANDS = {
     "arista_eos": "show ip protocols",
     "juniper_junos": "show protocols",
     "extreme": "show ip protocols",
+    "vyos": "show ip protocol",
 }
 _DEFAULT_PROTOCOLS_COMMAND = "show ip protocols"
 

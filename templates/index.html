@@ -653,6 +653,128 @@
                         </div>
                     </div>
 
+                    <div class="form-group">
+                        <label>Discover Neighbours Via</label>
+                        <div class="checkbox-grid">
+                            {% for src in neighbor_sources %}
+                            <label title="{{ src.description }}">
+                                <input type="checkbox" name="neighbor_sources" value="{{ src.name }}"
+                                       {% if src.enabled_by_default %}checked{% endif %}> {{ src.label }}
+                            </label>
+                            {% endfor %}
+                        </div>
+                        <p style="font-size: 12px; color: var(--text-muted); margin: 6px 0 0 0;">
+                            Route next-hops are off by default &mdash; a routing table names far more
+                            gateways than a site owns, and each one costs a login attempt.
+                        </p>
+                    </div>
+
+                    <details style="margin-bottom: 16px;">
+                        <summary style="cursor: pointer; font-size: 13px; color: var(--text-muted);">
+                            Crawl boundaries
+                        </summary>
+                        <div style="margin-top: 10px;">
+                            <div class="form-group">
+                                <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                                    <input type="checkbox" name="scope_private_only" value="true" checked
+                                           style="width: auto; margin-right: 8px; accent-color: var(--accent);">
+                                    Private address space only (RFC1918)
+                                </label>
+                                <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 24px;">
+                                    Keeps next-hop crawling from walking out into transit and ISP space.
+                                </p>
+                            </div>
+                            <div class="form-group">
+                                <label for="scope_allow">Restrict to CIDRs</label>
+                                <input type="text" name="scope_allow" id="scope_allow"
+                                       placeholder="10.1.0.0/16, 10.2.0.0/16">
+                                <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 0;">
+                                    Optional. When set this is the entire scope, replacing the private-only default.
+                                </p>
+                            </div>
+                            <div class="form-group">
+                                <label for="scope_deny">Never crawl CIDRs</label>
+                                <input type="text" name="scope_deny" id="scope_deny"
+                                       placeholder="10.99.0.0/16">
+                            </div>
+                            <div class="form-group">
+                                <label for="max_devices">Device ceiling</label>
+                                <input type="number" name="max_devices" id="max_devices" min="0"
+                                       placeholder="unlimited">
+                                <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 0;">
+                                    Stops queueing new devices once reached. Anything skipped is reported, not silently dropped.
+                                </p>
+                            </div>
+                        </div>
+                    </details>
+
+
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" name="snmp_enabled" id="disc_snmp_enabled" value="true"
+                                   class="snmp-toggle" data-prefix="disc"
+                                   style="width: auto; margin-right: 8px; accent-color: var(--accent);">
+                            Fall back to SNMP when login fails
+                        </label>
+                        <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 24px;">
+                            Tried only after SSH and telnet both fail. Identifies the device
+                            (name, platform, version) but does not collect from it.
+                        </p>
+                    </div>
+
+                    <div id="disc_snmp_options" style="display: none;">
+                        <div class="form-group">
+                            <label for="disc_snmp_version">SNMP Version</label>
+                            <select name="snmp_version" id="disc_snmp_version"
+                                    class="snmp-version" data-prefix="disc">
+                                <option value="v2c" selected>v2c</option>
+                                <option value="v3">v3</option>
+                            </select>
+                        </div>
+                        <div id="disc_snmp_v2c">
+                            <div class="form-group">
+                                <label for="disc_snmp_community">Community String</label>
+                                <input type="password" name="snmp_community" id="disc_snmp_community"
+                                       autocomplete="off">
+                            </div>
+                        </div>
+                        <div id="disc_snmp_v3" style="display: none;">
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                                <div class="form-group">
+                                    <label for="disc_snmp_username">v3 Username</label>
+                                    <input type="text" name="snmp_username" id="disc_snmp_username"
+                                           autocomplete="off">
+                                </div>
+                                <div class="form-group">
+                                    <label for="disc_snmp_auth_protocol">Auth Protocol</label>
+                                    <select name="snmp_auth_protocol" id="disc_snmp_auth_protocol">
+                                        <option value="sha" selected>SHA</option>
+                                        <option value="md5">MD5</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                                <div class="form-group">
+                                    <label for="disc_snmp_auth_key">Auth Passphrase</label>
+                                    <input type="password" name="snmp_auth_key" id="disc_snmp_auth_key"
+                                           autocomplete="off">
+                                </div>
+                                <div class="form-group">
+                                    <label for="disc_snmp_priv_protocol">Privacy Protocol</label>
+                                    <select name="snmp_priv_protocol" id="disc_snmp_priv_protocol">
+                                        <option value="aes" selected>AES</option>
+                                        <option value="des">DES</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="disc_snmp_priv_key">Privacy Passphrase</label>
+                                <input type="password" name="snmp_priv_key" id="disc_snmp_priv_key"
+                                       autocomplete="off">
+                            </div>
+                        </div>
+                    </div>
+
                     <button type="submit" class="btn-primary">Run Discovery</button>
                 </form>
             </div>
@@ -698,6 +820,108 @@
                             </select>
                         </div>
                     </div>
+
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" name="crawl_from_targets" id="ts_crawl" value="true"
+                                   style="width: auto; margin-right: 8px; accent-color: var(--accent);">
+                            Also discover neighbours of each target
+                        </label>
+                        <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 24px;">
+                            Off by default: the scan visits exactly the hosts listed. When on, discovery
+                            continues outward from each target. Already-scanned hosts are never revisited.
+                        </p>
+                    </div>
+
+                    <div id="ts_crawl_options" style="display: none;">
+                        <div class="form-group">
+                            <label for="ts_max_depth">Crawl Depth</label>
+                            <select id="ts_max_depth" name="max_depth">
+                                <option value="1" selected>1 hop</option>
+                                <option value="2">2 hops</option>
+                                <option value="3">3 hops</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Device Types to Crawl</label>
+                            <div class="checkbox-grid">
+                                <label><input type="checkbox" name="include_routers" value="true" checked> Routers</label>
+                                <label><input type="checkbox" name="include_switches" value="true" checked> Switches</label>
+                                <label><input type="checkbox" name="include_phones" value="true"> IP Phones</label>
+                                <label><input type="checkbox" name="include_servers" value="true"> Servers</label>
+                                <label><input type="checkbox" name="include_aps" value="true"> Access Points</label>
+                                <label><input type="checkbox" name="include_other" value="true"> Other Devices</label>
+                            </div>
+                        </div>
+                    </div>
+
+
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" name="snmp_enabled" id="ts_snmp_enabled" value="true"
+                                   class="snmp-toggle" data-prefix="ts"
+                                   style="width: auto; margin-right: 8px; accent-color: var(--accent);">
+                            Fall back to SNMP when login fails
+                        </label>
+                        <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 24px;">
+                            Tried only after SSH and telnet both fail. Identifies the device
+                            (name, platform, version) but does not collect from it.
+                        </p>
+                    </div>
+
+                    <div id="ts_snmp_options" style="display: none;">
+                        <div class="form-group">
+                            <label for="ts_snmp_version">SNMP Version</label>
+                            <select name="snmp_version" id="ts_snmp_version"
+                                    class="snmp-version" data-prefix="ts">
+                                <option value="v2c" selected>v2c</option>
+                                <option value="v3">v3</option>
+                            </select>
+                        </div>
+                        <div id="ts_snmp_v2c">
+                            <div class="form-group">
+                                <label for="ts_snmp_community">Community String</label>
+                                <input type="password" name="snmp_community" id="ts_snmp_community"
+                                       autocomplete="off">
+                            </div>
+                        </div>
+                        <div id="ts_snmp_v3" style="display: none;">
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                                <div class="form-group">
+                                    <label for="ts_snmp_username">v3 Username</label>
+                                    <input type="text" name="snmp_username" id="ts_snmp_username"
+                                           autocomplete="off">
+                                </div>
+                                <div class="form-group">
+                                    <label for="ts_snmp_auth_protocol">Auth Protocol</label>
+                                    <select name="snmp_auth_protocol" id="ts_snmp_auth_protocol">
+                                        <option value="sha" selected>SHA</option>
+                                        <option value="md5">MD5</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                                <div class="form-group">
+                                    <label for="ts_snmp_auth_key">Auth Passphrase</label>
+                                    <input type="password" name="snmp_auth_key" id="ts_snmp_auth_key"
+                                           autocomplete="off">
+                                </div>
+                                <div class="form-group">
+                                    <label for="ts_snmp_priv_protocol">Privacy Protocol</label>
+                                    <select name="snmp_priv_protocol" id="ts_snmp_priv_protocol">
+                                        <option value="aes" selected>AES</option>
+                                        <option value="des">DES</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="ts_snmp_priv_key">Privacy Passphrase</label>
+                                <input type="password" name="snmp_priv_key" id="ts_snmp_priv_key"
+                                       autocomplete="off">
+                            </div>
+                        </div>
+                    </div>
+
                     <button type="submit" class="btn-primary">Start Scan</button>
                 </form>
             </div>
@@ -802,6 +1026,36 @@
     var _scanStartTime = null;
     var _discoveredCount = 0;
     var _failedCount = 0;
+
+    // Crawl depth and device-type filters only matter when the targeted scan
+    // is allowed to continue past its host list.
+    (function () {
+        var toggle = document.getElementById('ts_crawl');
+        if (!toggle) return;
+        toggle.addEventListener('change', function () {
+            document.getElementById('ts_crawl_options').style.display =
+                toggle.checked ? 'block' : 'none';
+        });
+    })();
+
+    // SNMP fields stay hidden until the fallback is enabled, and the v2c/v3
+    // halves are mutually exclusive.
+    (function () {
+        document.querySelectorAll('.snmp-toggle').forEach(function (toggle) {
+            toggle.addEventListener('change', function () {
+                var box = document.getElementById(toggle.dataset.prefix + '_snmp_options');
+                if (box) box.style.display = toggle.checked ? 'block' : 'none';
+            });
+        });
+        document.querySelectorAll('.snmp-version').forEach(function (sel) {
+            sel.addEventListener('change', function () {
+                var p = sel.dataset.prefix;
+                var isV3 = sel.value === 'v3';
+                document.getElementById(p + '_snmp_v2c').style.display = isV3 ? 'none' : 'block';
+                document.getElementById(p + '_snmp_v3').style.display = isV3 ? 'block' : 'none';
+            });
+        });
+    })();
 
     function startScan(formEl, scanType) {
         var formData = new FormData(formEl);

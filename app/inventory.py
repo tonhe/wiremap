@@ -75,12 +75,20 @@ class DiscoveryInventory:
     def devices(self):
         return self._data["devices"]
 
-    def set_scan_summary(self, elapsed: float, failed: dict):
-        """Persist scan summary metadata into the inventory data."""
+    def set_scan_summary(self, elapsed: float, failed: dict,
+                         out_of_scope=None, ceiling_hit=False):
+        """Persist scan summary metadata into the inventory data.
+
+        out_of_scope records addresses a crawl boundary refused. A bounded
+        scan that does not say what it skipped reads as a complete one.
+        """
         self._data["scan_summary"] = {
             "elapsed": elapsed,
             "failed_count": len(failed),
             "failed": failed,
+            "out_of_scope": sorted(out_of_scope or []),
+            "out_of_scope_count": len(out_of_scope or []),
+            "device_ceiling_hit": ceiling_hit,
         }
 
     def get_summary(self) -> dict:
@@ -203,6 +211,24 @@ class DiscoveryInventory:
                 "remote_port": remote_port,
             })
 
+    def set_snmp_facts(self, hostname, record):
+        """Record what SNMP could tell us about a device we could not log into.
+
+        login_succeeded stays False -- SNMP identifies a device, it does not
+        collect one.
+        """
+        with self._lock:
+            dev = self._data["devices"].get(hostname)
+            if dev is None:
+                return
+            if record.get("software_version") and not dev.get("software_version"):
+                dev["software_version"] = record["software_version"]
+            dev["snmp"] = {
+                "sys_descr": record.get("sys_descr"),
+                "sys_object_id": record.get("sys_object_id"),
+                "sys_location": record.get("sys_location"),
+            }
+
     def set_chassis_id(self, hostname, chassis_id):
         with self._lock:
             dev = self._data["devices"].get(hostname)
@@ -223,7 +249,7 @@ class DiscoveryInventory:
             dev.setdefault("unresolved_neighbours", []).append({
                 "remote_ip": neighbor.get("remote_ip"),
                 "remote_port": neighbor.get("remote_port"),
-                "source": neighbor.get("source", "cdp"),
+                "source": neighbor.get("source", "cdp_lldp"),
             })
 
     def merge_duplicates(self) -> int:

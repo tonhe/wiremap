@@ -268,6 +268,43 @@ device_types:
       - "RouterOS"
     priority: 81
 
+  # VyOS (Debian-based router/firewall, FRR under the hood)
+  vyos:
+    platforms:
+      - vyos
+      - vyatta
+    system_descriptions:
+      - "VyOS"
+      - "Vyatta"
+    priority: 85
+
+  # Cisco AireOS Wireless LAN Controller
+  cisco_wlc:
+    platforms:
+      - air-ct
+      - air-ctvm
+      - "cisco controller"
+      - wism
+      - "5508"
+      - "5520"
+      - "3504"
+      - "8540"
+    system_descriptions:
+      - "Cisco Controller"
+      - "AireOS"
+    priority: 88
+
+  # WatchGuard Firebox (Fireware)
+  watchguard_fireware:
+    platforms:
+      - firebox
+      - watchguard
+      - "xtm "
+    system_descriptions:
+      - "WatchGuard"
+      - "Fireware"
+    priority: 87
+
 # Device capability filtering
 # Only crawl devices with these capabilities
 allowed_capabilities:
