@@ -203,3 +203,49 @@ def test_cisco_ios_fallback_never_raises_platform_dump(monkeypatch):
     tried_telnet = [d for p, d, _ in exc.value.attempts if p == "telnet"]
     assert "cisco_ios_telnet" in tried_telnet
     assert "cisco_nxos" in tried_telnet
+
+
+def test_none_device_type_does_not_crash():
+    """Regression: a host list line with no device type crashed with
+    "'NoneType' object has no attribute 'endswith'" before any connection
+    was attempted. Three Citrix NetScalers were never reached because of it."""
+    cm = ConnectionManager("172.20.10.37", None, "u", "p", protocol="auto")
+    assert cm.device_type
+    assert cm._types_to_try()
+    params = cm._build_device_params()
+    assert params["device_type"]
+
+
+def test_empty_device_type_does_not_crash():
+    cm = ConnectionManager("10.0.0.1", "", "u", "p", protocol="telnet")
+    params = cm._build_device_params()
+    assert params["device_type"].endswith("_telnet")
+
+
+def test_telnet_type_for_handles_none():
+    from app.connection_manager import telnet_type_for
+    assert telnet_type_for(None) is None
+    assert telnet_type_for("") is None
+
+
+def test_none_device_type_still_allows_fallback():
+    """No type supplied means autodetect, so fallbacks must stay on."""
+    cm = ConnectionManager("10.0.0.1", None, "u", "p")
+    assert len(cm._types_to_try()) > 1
+
+
+def test_none_device_type_connect_reports_cleanly(monkeypatch):
+    """The failure must be a connection error naming the host, not an
+    AttributeError from inside wiremap."""
+    import app.connection_manager as cmod
+    from app.connection_manager import ConnectionError as WiremapConnectionError
+
+    monkeypatch.delenv("WIREMAP_MOCK", raising=False)
+    monkeypatch.setattr(cmod, "_connect_handler",
+                        lambda **p: (_ for _ in ()).throw(OSError("refused")))
+
+    cm = ConnectionManager("172.20.10.37", None, "u", "p", protocol="auto")
+    with pytest.raises(WiremapConnectionError) as exc:
+        cm.connect()
+    assert "172.20.10.37" in str(exc.value)
+    assert "endswith" not in str(exc.value)

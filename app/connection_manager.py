@@ -9,6 +9,10 @@ logger = logging.getLogger(__name__)
 
 _TELNET_SUFFIX = "_telnet"
 
+# Used when a host list line names no device type. Matches
+# default_device_type in config/device_type_patterns.yaml.
+DEFAULT_DEVICE_TYPE = "cisco_ios"
+
 
 def telnet_type_for(device_type: str):
     """Return the netmiko telnet platform for device_type, or None.
@@ -20,6 +24,8 @@ def telnet_type_for(device_type: str):
     """
     from netmiko.ssh_dispatcher import CLASS_MAPPER
 
+    if not device_type:
+        return None
     candidate = device_type
     if not candidate.endswith(_TELNET_SUFFIX):
         candidate = candidate + _TELNET_SUFFIX
@@ -55,7 +61,11 @@ class ConnectionManager:
                  password: str, protocol: str = "ssh",
                  allow_fallback: bool = True):
         self.host = host
-        self.device_type = device_type
+        # A host list line may name no device type at all. Carrying None
+        # through crashes on the first .endswith() -- three Citrix NetScalers
+        # were never reached because of exactly that.
+        self.device_type = device_type or DEFAULT_DEVICE_TYPE
+        self.device_type_supplied = bool(device_type)
         self.username = username
         self.password = password
         self.protocol = protocol  # "ssh", "telnet", "auto"

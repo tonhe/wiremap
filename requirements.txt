@@ -1,6 +1,16 @@
 cryptography
 flask==3.0.0
 netmiko==4.3.0
+# Pinned deliberately. paramiko 4.0 removed the SHA-1 key exchanges
+# (diffie-hellman-group14-sha1, diffie-hellman-group1-sha1) and the ssh-rsa
+# host key algorithm outright -- not merely deprioritised them, so no setting
+# restores them. Legacy Cisco (2950, 2960L, 3750X, Nexus 5548) offers nothing
+# else and fails negotiation before authentication. 3.5.1 still prefers modern
+# algorithms first and falls back to SHA-1 only when the device offers no
+# alternative, so this costs nothing against current gear.
+# Leaving it unpinned means every rebuild silently changes which devices are
+# reachable.
+paramiko==3.5.1
 ntc-templates==7.1.0
 openpyxl==3.1.5
 pysnmp==7.1.29
