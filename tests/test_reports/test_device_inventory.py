@@ -144,3 +144,76 @@ def test_devices_sheet_exposes_provenance():
     assert by_host["SW1"][logged] == "Yes"
     assert by_host["SW2"][src] == "cdp"
     assert by_host["SW2"][logged] == "No"
+
+
+def test_merged_inventory_gets_a_sources_sheet():
+    """A merged workbook should say what it was built from."""
+    from app.reports.device_inventory import DeviceInventoryReport
+    inventory = {
+        "devices": {"SW1": {"hostname": "SW1", "mgmt_ip": "10.0.0.1",
+                            "source_scan": "scan-a", "collector_data": {}}},
+        "merged_from": [
+            {"discovery_id": "scan-a", "filename": "a.json", "seed_ip": "10.0.0.1",
+             "timestamp": "2026-08-25T10:00:00+00:00", "device_count": 12},
+            {"discovery_id": "scan-b", "filename": "b.json", "seed_ip": "10.1.0.1",
+             "timestamp": "2026-08-26T10:00:00+00:00", "device_count": 30},
+        ],
+        "merge_conflicts": [
+            {"hostname": "SW1", "also_named": "", "kept_from": "scan-a",
+             "discarded_from": "scan-b", "reason": "newer scan"},
+        ],
+    }
+    data = DeviceInventoryReport().generate_tabular_data(inventory)
+    assert "Merge Sources" in data
+    headers, rows = data["Merge Sources"]
+    assert len(rows) == 2
+    assert "scan-a" in rows[0]
+
+
+def test_unmerged_inventory_has_no_sources_sheet():
+    from app.reports.device_inventory import DeviceInventoryReport
+    inventory = {"devices": {"SW1": {"hostname": "SW1", "collector_data": {}}}}
+    assert "Merge Sources" not in DeviceInventoryReport().generate_tabular_data(inventory)
+
+
+def test_devices_sheet_shows_source_scan_when_merged():
+    from app.reports.device_inventory import DeviceInventoryReport
+    inventory = {
+        "devices": {"SW1": {"hostname": "SW1", "source_scan": "scan-a",
+                            "collector_data": {}}},
+        "merged_from": [{"discovery_id": "scan-a", "filename": "a.json",
+                         "seed_ip": "", "timestamp": "", "device_count": 1}],
+    }
+    headers, rows = DeviceInventoryReport().generate_tabular_data(inventory)["Devices"]
+    assert "Source Scan" in headers
+    assert rows[0][headers.index("Source Scan")] == "scan-a"
+
+
+def test_merge_conflicts_get_their_own_sheet():
+    from app.reports.device_inventory import DeviceInventoryReport
+    inventory = {
+        "devices": {},
+        "merged_from": [{"discovery_id": "scan-a", "filename": "a.json",
+                         "seed_ip": "", "timestamp": "", "device_count": 1}],
+        "merge_conflicts": [
+            {"hostname": "DCN5K-5A", "also_named": "DCN5K-5A(SSI1).trmc.us",
+             "kept_from": "scan-a", "discarded_from": "scan-b",
+             "reason": "logged-in record preferred over a neighbour sighting"},
+        ],
+    }
+    data = DeviceInventoryReport().generate_tabular_data(inventory)
+    headers, rows = data["Merge Conflicts"]
+    assert rows[0][headers.index("Device")] == "DCN5K-5A"
+    assert rows[0][headers.index("Also Seen As")] == "DCN5K-5A(SSI1).trmc.us"
+    assert "neighbour" in rows[0][headers.index("Why")]
+
+
+def test_no_conflicts_sheet_when_none():
+    from app.reports.device_inventory import DeviceInventoryReport
+    inventory = {"devices": {},
+                 "merged_from": [{"discovery_id": "a", "filename": "a.json",
+                                  "seed_ip": "", "timestamp": "",
+                                  "device_count": 0}]}
+    data = DeviceInventoryReport().generate_tabular_data(inventory)
+    assert "Merge Sources" in data
+    assert "Merge Conflicts" not in data

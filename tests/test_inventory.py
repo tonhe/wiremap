@@ -211,3 +211,87 @@ def test_scan_summary_defaults_are_empty():
     summary = inv.to_dict()["scan_summary"]
     assert summary["out_of_scope"] == []
     assert summary["device_ceiling_hit"] is False
+
+
+def test_snmp_facts_fill_model_and_serial():
+    """A Palo Alto identified only by SNMP should still carry model and serial
+    into the report, not five null columns."""
+    inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    inv.add_device("pa-fw01", mgmt_ip="172.21.0.13", discovery_source="snmp")
+    inv.set_snmp_facts("pa-fw01", {
+        "model": "PA-440", "serial": "012345678901",
+        "software_version": "10.2.3", "sys_descr": "Palo Alto Networks",
+        "sys_object_id": "1.3.6.1.4.1.25461.2.3.20", "sys_location": "MDF",
+    })
+    dev = inv.devices["pa-fw01"]
+    assert dev["model"] == "PA-440"
+    assert dev["serial"] == "012345678901"
+    assert dev["software_version"] == "10.2.3"
+    assert dev["platform"] == "PA-440"
+    assert dev["login_succeeded"] is False
+
+
+def test_snmp_facts_never_overwrite_collected_data():
+    inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    inv.add_device("SW1", discovery_source="login")
+    inv.mark_login_succeeded("SW1", serial="REAL123", model="WS-C3850")
+    inv.set_snmp_facts("SW1", {"model": "WRONG", "serial": "WRONG"})
+    assert inv.devices["SW1"]["serial"] == "REAL123"
+    assert inv.devices["SW1"]["model"] == "WS-C3850"
+
+
+def test_continue_from_copies_devices():
+    base = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    base.add_device("SW1", mgmt_ip="10.0.0.1", discovery_source="login")
+    base.mark_login_succeeded("SW1", serial="FOC1")
+    cont = DiscoveryInventory.continue_from(base, seed_ip="10.0.0.9")
+    assert "SW1" in cont.devices
+    assert cont.devices["SW1"]["serial"] == "FOC1"
+
+
+def test_continue_from_is_a_new_scan():
+    """The original must survive untouched -- a continuation writes its own
+    file rather than overwriting the scan it builds on."""
+    base = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    cont = DiscoveryInventory.continue_from(base, seed_ip="10.0.0.9")
+    assert cont.discovery_id != base.discovery_id
+    assert cont.to_dict()["continued_from"] == base.discovery_id
+
+
+def test_continue_from_does_not_alias_the_base():
+    base = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    base.add_device("SW1", mgmt_ip="10.0.0.1", discovery_source="login")
+    cont = DiscoveryInventory.continue_from(base, seed_ip="10.0.0.9")
+    cont.add_device("SW2", discovery_source="login")
+    cont.devices["SW1"]["platform"] = "changed"
+    assert "SW2" not in base.devices
+    assert base.devices["SW1"]["platform"] is None
+
+
+def test_continue_from_carries_prior_failures():
+    base = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    base.set_scan_summary(elapsed=1.0, failed={"10.0.0.5": "timeout"})
+    cont = DiscoveryInventory.continue_from(base, seed_ip="10.0.0.9")
+    assert cont.prior_failures() == {"10.0.0.5": "timeout"}
+
+
+def test_prior_failures_empty_for_fresh_scan():
+    inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    assert inv.prior_failures() == {}
+
+
+def test_collected_ips_lists_only_successful_logins():
+    """A continuation should skip what was collected and retry what failed."""
+    inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    inv.add_device("SW1", mgmt_ip="10.0.0.1", discovery_source="login")
+    inv.mark_login_succeeded("SW1")
+    inv.add_device("SW2", mgmt_ip="10.0.0.2", discovery_source="cdp_lldp")
+    inv.add_device("SW3", discovery_source="cdp_lldp")
+    assert inv.collected_ips() == {"10.0.0.1"}
+
+
+def test_collected_hostnames_are_normalized():
+    inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    inv.add_device("DCN5K-5A(SSI1).trmc.us", mgmt_ip="10.0.0.1")
+    inv.mark_login_succeeded("DCN5K-5A(SSI1).trmc.us")
+    assert inv.collected_hostnames() == {"dcn5k-5a"}

@@ -141,7 +141,9 @@ class SwitchportCollector(BaseCollector):
     description = "Collect switchport, port-security, errdisable, and storm-control data"
     enabled_by_default = True
     # None of these have switchports.
-    unsupported_platforms = frozenset({"cisco_wlc", "vyos", "watchguard_fireware"})
+    unsupported_platforms = frozenset({"cisco_wlc", "vyos",
+                                       "watchguard_fireware",
+                                       "paloalto_panos"})
 
     def get_commands(self, device_type: str) -> list[str]:
         return list(_COMMANDS.get(device_type, _DEFAULT_COMMANDS))

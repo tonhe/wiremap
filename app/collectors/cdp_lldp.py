@@ -28,6 +28,7 @@ _COMMANDS = {
     "vyos": ["show lldp neighbors detail"],
     # AireOS speaks CDP to the wired side, and LLDP only toward APs.
     "cisco_wlc": ["show cdp neighbors detail"],
+    "paloalto_panos": ["show lldp neighbors all"],
 }
 _DEFAULT_COMMANDS = ["show cdp neighbors detail", "show lldp neighbors detail"]
 
@@ -44,6 +45,16 @@ class CdpLldpCollector(BaseCollector):
         return _COMMANDS.get(device_type, _DEFAULT_COMMANDS)
 
     def parse(self, raw_outputs: dict[str, str], device_type: str) -> dict:
+        if device_type == "paloalto_panos":
+            # No ntc-templates entry for "show lldp neighbors all", and the
+            # Cisco LLDP parser does not understand PAN-OS output.
+            try:
+                from app.parsers_panos import parse_lldp_neighbors as _panos_lldp
+            except ImportError:
+                from parsers_panos import parse_lldp_neighbors as _panos_lldp
+            raw = raw_outputs.get("show lldp neighbors all", "")
+            return {"neighbors": _panos_lldp(raw)}
+
         cdp_output = raw_outputs.get("show cdp neighbors detail", "")
         lldp_output = raw_outputs.get(
             "show lldp neighbors detail",

@@ -30,6 +30,11 @@ _COMMANDS = {
     "vyos": [
         "show vrrp",
     ],
+    # PAN-OS pairs via HA, not an FHRP. active/passive is the only way to
+    # tell which of a pair is carrying traffic.
+    "paloalto_panos": [
+        "show high-availability all",
+    ],
 }
 _DEFAULT_COMMANDS = [
     "show standby brief",

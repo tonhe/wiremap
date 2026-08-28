@@ -191,7 +191,8 @@ class VrfCollector(BaseCollector):
     enabled_by_default = True
     needs_custom_collect = True
     # A WLC and a Firebox have no VRF concept.
-    unsupported_platforms = frozenset({"cisco_wlc", "watchguard_fireware"})
+    unsupported_platforms = frozenset({"cisco_wlc", "watchguard_fireware",
+                                       "paloalto_panos"})
 
     def get_commands(self, device_type: str) -> list[str]:
         return list(_COMMANDS.get(device_type, _DEFAULT_COMMANDS))

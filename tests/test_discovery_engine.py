@@ -15,6 +15,15 @@ def _enable_mock_mode(monkeypatch):
     monkeypatch.setenv("WIREMAP_MOCK", "1")
 
 
+@pytest.fixture(autouse=True)
+def _no_snmp_network(monkeypatch):
+    """SNMP table collection walks real sockets and blocks on timeout.
+    Neutralise it by default; tests that exercise it substitute their own."""
+    import app.discovery_engine as mod
+    monkeypatch.setattr(mod, "snmp_make_walker", lambda ip, creds: (lambda oid: {}))
+    monkeypatch.setattr(mod, "snmp_collect_all", lambda walker: {})
+
+
 def test_discovery_engine_creates_inventory():
     """Discovery engine should produce a DiscoveryInventory with devices."""
     engine = DiscoveryEngine(
@@ -473,3 +482,207 @@ def test_snmp_fallback_noop_when_device_silent(monkeypatch):
     )
     inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
     assert engine._snmp_fallback(inv, "10.0.0.50", "err") is False
+
+
+def test_server_nic_is_categorised_not_counted_as_device():
+    """LLDP from a server NIC advertises the adapter description as the system
+    name, so it arrived looking like a network device."""
+    engine, inv = _engine_with_neighbors([{
+        "remote_device": "10/25Gb 2-port SFP28 BCM57414 OCP3 Adapter fw_version:AFW_228",
+        "remote_capabilities": "Station",
+        "remote_port": "Eth1/20",
+    }])
+    engine.filters["include_other"] = True
+    engine._extract_neighbors(inv, "CORE1", "10.0.0.1", "cisco_nxos", 0)
+    nic = [d for n, d in inv.devices.items() if "Adapter" in n]
+    assert nic, "expected the NIC to be recorded"
+    assert nic[0]["device_category"] == "host_nic"
+
+
+def test_server_nic_excluded_when_other_devices_off():
+    engine, inv = _engine_with_neighbors([{
+        "remote_device": "Broadcom P225p NetXtreme-E Dual-port 10Gb/25Gb Ethernet Adapter",
+        "remote_capabilities": "Station",
+        "remote_port": "Eth1/21",
+    }])
+    engine.filters["include_other"] = False
+    before = set(inv.devices)
+    engine._extract_neighbors(inv, "CORE1", "10.0.0.1", "cisco_nxos", 0)
+    assert set(inv.devices) == before
+
+
+def test_real_switch_neighbour_not_categorised_as_nic():
+    engine, inv = _engine_with_neighbors([{
+        "remote_device": "SW2",
+        "remote_ip": "10.0.0.6",
+        "remote_platform": "cisco WS-C3850-48P",
+        "remote_capabilities": "Switch",
+        "remote_port": "Gi1/0/1",
+    }])
+    engine._extract_neighbors(inv, "CORE1", "10.0.0.1", "cisco_nxos", 0)
+    assert inv.devices["SW2"]["device_category"] != "host_nic"
+
+
+def test_continuation_skips_already_collected_devices():
+    """Adding to a previous scan should not redo work already done."""
+    from app.inventory import DiscoveryInventory
+    base = DiscoveryInventory.create(seed_ip="192.168.1.1")
+    base.add_device("CORE-NX-01", mgmt_ip="192.168.1.1", discovery_source="login")
+    base.mark_login_succeeded("CORE-NX-01")
+
+    engine = DiscoveryEngine(
+        seed_ip="192.168.1.10", seed_device_type="extreme",
+        username="admin", password="admin", max_depth=1,
+        base_inventory=base,
+        filters={"include_routers": True, "include_switches": True},
+    )
+    inv = engine.discover()
+    # Marked visited up front, which is how the BFS skips it.
+    assert "192.168.1.1" in engine.visited
+    assert "CORE-NX-01" in inv.devices
+    assert inv.devices["CORE-NX-01"]["login_succeeded"] is True
+    # Never re-collected: it carries only what the base scan had.
+    assert inv.devices["CORE-NX-01"]["collector_data"] == {}
+    # The new seed was scanned.
+    assert "DIST-EXTREME-01" in inv.devices
+    assert inv.devices["DIST-EXTREME-01"]["collector_data"]
+
+
+def test_continuation_retries_previously_failed_devices():
+    """A device that failed last time is not "already collected", so a
+    continuation should attempt it again without being asked."""
+    from app.inventory import DiscoveryInventory
+    base = DiscoveryInventory.create(seed_ip="192.168.1.1")
+    base.add_device("DIST-EXTREME-01", mgmt_ip="192.168.1.10",
+                    discovery_source="cdp_lldp")
+    base.mark_login_failed("DIST-EXTREME-01", "timeout")
+    base.set_scan_summary(elapsed=1.0, failed={"192.168.1.10": "timeout"})
+
+    engine = DiscoveryEngine(
+        seed_ip="192.168.1.1", seed_device_type="cisco_nxos",
+        username="admin", password="admin", max_depth=1,
+        base_inventory=base,
+        filters={"include_routers": True, "include_switches": True},
+    )
+    inv = engine.discover()
+    assert "192.168.1.10" in engine.visited
+    assert inv.devices["DIST-EXTREME-01"]["login_succeeded"] is True
+
+
+def test_continuation_always_scans_explicit_targets():
+    """An explicitly listed host is a request, so it runs even if the base
+    scan already collected it -- that is how a refresh works."""
+    from app.inventory import DiscoveryInventory
+    base = DiscoveryInventory.create(seed_ip="192.168.1.1")
+    base.add_device("CORE-NX-01", mgmt_ip="192.168.1.1", discovery_source="login")
+    base.mark_login_succeeded("CORE-NX-01")
+
+    engine = DiscoveryEngine(
+        seed_ip="192.168.1.1", seed_device_type="cisco_nxos",
+        username="admin", password="admin", max_depth=0,
+        base_inventory=base,
+        target_hosts=[("192.168.1.1", "cisco_nxos")],
+    )
+    inv = engine.discover()
+    assert "192.168.1.1" in engine.visited
+    assert len(inv.devices["CORE-NX-01"]["collector_data"]) > 0
+
+
+def test_continuation_preserves_the_original_inventory():
+    from app.inventory import DiscoveryInventory
+    base = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    base.add_device("OLD-DEVICE", mgmt_ip="10.0.0.99", discovery_source="login")
+    base.mark_login_succeeded("OLD-DEVICE")
+    before = set(base.devices)
+
+    engine = DiscoveryEngine(
+        seed_ip="192.168.1.1", seed_device_type="cisco_nxos",
+        username="admin", password="admin", max_depth=0,
+        base_inventory=base,
+    )
+    inv = engine.discover()
+    assert set(base.devices) == before, "base inventory was mutated"
+    assert "OLD-DEVICE" in inv.devices
+    assert "CORE-NX-01" in inv.devices
+
+
+def test_continuation_merges_failure_records():
+    from app.inventory import DiscoveryInventory
+    base = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    base.set_scan_summary(elapsed=1.0, failed={"10.99.99.99": "unreachable"})
+
+    engine = DiscoveryEngine(
+        seed_ip="192.168.1.1", seed_device_type="cisco_nxos",
+        username="admin", password="admin", max_depth=0,
+        base_inventory=base,
+    )
+    inv = engine.discover()
+    failed = inv.to_dict()["scan_summary"]["failed"]
+    assert "10.99.99.99" in failed, "a failure not retried must not vanish"
+
+
+def test_snmp_fallback_collects_standard_mib_tables(monkeypatch):
+    """A Firebox with SSH disabled should still yield interfaces, addressing,
+    routes and neighbours."""
+    from app.inventory import DiscoveryInventory
+    from app.snmp_probe import SnmpCredentials
+    import app.discovery_engine as mod
+
+    monkeypatch.setattr(mod, "snmp_probe", lambda ip, creds: {
+        "hostname": "TRMCDVCP-C1", "mgmt_ip": ip,
+        "device_type": "watchguard_fireware", "software_version": "12.10",
+        "model": "M5800", "serial": "ABC123", "sys_descr": "WatchGuard Fireware",
+        "sys_object_id": "1.3.6.1.4.1.3097", "sys_location": "DC",
+        "discovery_source": "snmp", "login_succeeded": False,
+    })
+    monkeypatch.setattr(mod, "snmp_make_walker", lambda ip, creds: (lambda oid: {}))
+    monkeypatch.setattr(mod, "snmp_collect_all", lambda walker: {
+        "interfaces": {"interfaces_status": [{"port": "External", "status": "up"}],
+                       "ip_interfaces": [{"intf": "External",
+                                          "ipaddr": "12.202.247.129"}],
+                       "collected_via": "snmp"},
+        "l3_routing": {"routes": [{"network": "0.0.0.0",
+                                   "nexthop_ip": "12.202.247.130"}],
+                       "collected_via": "snmp"},
+    })
+
+    engine = DiscoveryEngine(
+        seed_ip="10.0.0.1", seed_device_type="cisco_ios",
+        username="u", password="p", max_depth=0,
+        snmp_credentials=SnmpCredentials(version="v2c", community="public"),
+    )
+    inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    assert engine._snmp_fallback(inv, "10.254.254.1", "no ssh listener") is True
+
+    dev = inv.devices["TRMCDVCP-C1"]
+    assert dev["login_succeeded"] is False
+    assert dev["model"] == "M5800"
+    cd = dev["collector_data"]
+    assert cd["interfaces"]["parsed"]["interfaces_status"][0]["port"] == "External"
+    assert cd["l3_routing"]["parsed"]["routes"][0]["nexthop_ip"] == "12.202.247.130"
+
+
+def test_snmp_table_failure_keeps_the_identification(monkeypatch):
+    """Table collection is enrichment; losing it must not lose the device."""
+    from app.inventory import DiscoveryInventory
+    from app.snmp_probe import SnmpCredentials
+    import app.discovery_engine as mod
+
+    monkeypatch.setattr(mod, "snmp_probe", lambda ip, creds: {
+        "hostname": "FW1", "mgmt_ip": ip, "device_type": "watchguard_fireware",
+        "discovery_source": "snmp", "login_succeeded": False,
+    })
+
+    def boom(*a, **k):
+        raise OSError("timeout")
+
+    monkeypatch.setattr(mod, "snmp_make_walker", boom)
+
+    engine = DiscoveryEngine(
+        seed_ip="10.0.0.1", seed_device_type="cisco_ios",
+        username="u", password="p", max_depth=0,
+        snmp_credentials=SnmpCredentials(version="v2c", community="public"),
+    )
+    inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
+    assert engine._snmp_fallback(inv, "10.254.254.1", "no ssh") is True
+    assert "FW1" in inv.devices

@@ -15,6 +15,7 @@ _COMMANDS = {
     # Plain "show run-config" is paged and interactive on AireOS.
     "cisco_wlc": "show run-config startup-commands",
     "watchguard_fireware": "show configuration",
+    "paloalto_panos": "show config running",
 }
 _DEFAULT_COMMAND = "show running-config"
 

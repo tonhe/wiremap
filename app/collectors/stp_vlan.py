@@ -215,7 +215,9 @@ class StpVlanCollector(BaseCollector):
     description = "Collect spanning-tree state, root bridges, blocked ports, VLANs, and VTP status"
     enabled_by_default = True
     # No spanning-tree on a router, a WLC or a firewall.
-    unsupported_platforms = frozenset({"cisco_wlc", "vyos", "watchguard_fireware"})
+    unsupported_platforms = frozenset({"cisco_wlc", "vyos",
+                                       "watchguard_fireware",
+                                       "paloalto_panos"})
 
     def get_commands(self, device_type: str) -> list[str]:
         return _COMMANDS.get(device_type, _DEFAULT_COMMANDS)

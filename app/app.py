@@ -13,6 +13,7 @@ import requests
 from device_detector import DeviceTypeDetector
 from discovery_engine import DiscoveryEngine, DiscoveryError
 from inventory import DiscoveryInventory
+from inventory_merge import merge_inventories as merge_inventory_dicts
 from neighbors import CrawlScope, get_registry as get_neighbor_sources
 from snmp_probe import SnmpCredentials
 from scan_manager import ScanManager
@@ -153,6 +154,19 @@ def scan_start():
         snmp_credentials = _build_snmp_credentials(request.form)
     except ValueError as e:
         return jsonify({"error": f"SNMP: {e}"}), 400
+
+    # Adding to a previous scan: load it and hand it to the engine, which
+    # treats its collected devices as already visited.
+    base_inventory = None
+    continue_from = request.form.get('continue_from', '').strip()
+    if continue_from:
+        base_path = os.path.join(INVENTORY_DIR, os.path.basename(continue_from))
+        if not os.path.exists(base_path):
+            return jsonify({"error": f"Previous scan not found: {continue_from}"}), 400
+        try:
+            base_inventory = DiscoveryInventory.load(base_path)
+        except Exception as e:
+            return jsonify({"error": f"Could not load previous scan: {e}"}), 400
     filters = {
         'include_routers': request.form.get('include_routers') == 'true',
         'include_switches': request.form.get('include_switches') == 'true',
@@ -183,6 +197,7 @@ def scan_start():
             neighbor_sources=neighbor_sources,
             crawl_scope=crawl_scope,
             snmp_credentials=snmp_credentials,
+            base_inventory=base_inventory,
         )
         inventory = engine.discover()
         inventory.save(INVENTORY_DIR)
@@ -234,6 +249,50 @@ def list_inventories():
     except FileNotFoundError:
         inventories = []
     return jsonify(inventories)
+
+
+@app.route('/inventories/merge', methods=['POST'])
+def merge_inventories_route():
+    """Merge two or more saved scans into a new one.
+
+    The sources are left in place -- a merge adds a scan, it never consumes
+    the ones it was built from.
+    """
+    payload = request.get_json(silent=True) or {}
+    filenames = payload.get('filenames') or request.form.getlist('filenames')
+    if not isinstance(filenames, list) or len(filenames) < 2:
+        return jsonify({"error": "Select at least two scans to merge"}), 400
+
+    loaded = []
+    for name in filenames:
+        path = os.path.join(INVENTORY_DIR, os.path.basename(name))
+        if not os.path.exists(path):
+            return jsonify({"error": f"Scan not found: {name}"}), 404
+        try:
+            loaded.append(DiscoveryInventory.load(path).to_dict())
+        except Exception as e:
+            return jsonify({"error": f"Could not read {name}: {e}"}), 400
+
+    try:
+        merged_data = merge_inventory_dicts(
+            loaded, filenames=[os.path.basename(n) for n in filenames])
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    merged = DiscoveryInventory(merged_data)
+    merged.save(INVENTORY_DIR)
+
+    registry = get_report_registry()
+    available = [r.name for r in registry.values() if r.can_generate(merged_data)]
+
+    return jsonify({
+        "inventory_key": merged.discovery_id,
+        "filename": f"{merged.discovery_id}.json",
+        "device_count": len(merged.devices),
+        "merged_from": merged_data.get("merged_from", []),
+        "merge_conflicts": merged_data.get("merge_conflicts", []),
+        "available_reports": available,
+    })
 
 
 @app.route('/inventories/<filename>', methods=['DELETE'])

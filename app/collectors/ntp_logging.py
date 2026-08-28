@@ -45,6 +45,11 @@ _COMMANDS = {
         "show ntp",
         "show log",
     ],
+    "paloalto_panos": [
+        "show ntp",
+        "show system info",
+        "show log system direction equal backward",
+    ],
 }
 _DEFAULT_COMMANDS = [
     "show ntp status",

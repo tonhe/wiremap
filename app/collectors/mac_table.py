@@ -15,6 +15,7 @@ _COMMANDS = {
     "arista_eos": "show mac address-table",
     "juniper_junos": "show ethernet-switching table",
     "extreme": "show fdb",
+    "paloalto_panos": "show mac all",
 }
 _DEFAULT_COMMAND = "show mac address-table"
 

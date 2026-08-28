@@ -49,6 +49,11 @@ _COMMANDS = {
         "show ospf",
         "show bgp",
     ],
+    "paloalto_panos": [
+        "show routing summary",
+        "show routing protocol ospf summary",
+        "show routing protocol bgp summary",
+    ],
 }
 _DEFAULT_COMMANDS = _COMMANDS["cisco_ios"]
 

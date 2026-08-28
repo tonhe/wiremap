@@ -30,7 +30,10 @@ def extract_device_facts(parsed) -> dict:
             v.get("version") or v.get("os_version") or v.get("os"))
         facts["serial"] = _as_text(
             v.get("serial") or v.get("serial_number") or v.get("serialnum"))
-        facts["model"] = _as_text(v.get("hardware") or v.get("platform"))
+        # PAN-OS "show system info" reports the chassis under "model"; Cisco
+        # templates use "hardware".
+        facts["model"] = _as_text(
+            v.get("hardware") or v.get("platform") or v.get("model"))
 
     if not facts["serial"]:
         inv_list = parsed.get("inventory", [])

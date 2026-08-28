@@ -188,9 +188,27 @@ class ConnectionManager:
 
     @staticmethod
     def get_hostname(connection) -> str:
-        """Extract hostname from device prompt."""
+        """Extract hostname from device prompt.
+
+        PAN-OS reports admin@fw01(active), so a raw prompt is not a hostname.
+        """
+        try:
+            from app.identity import parse_device_prompt
+        except ImportError:
+            from identity import parse_device_prompt
+
         prompt = connection.find_prompt()
-        return prompt.rstrip("#>").strip()
+        return parse_device_prompt(prompt)["hostname"] or prompt.rstrip("#>").strip()
+
+    @staticmethod
+    def get_prompt_facts(connection) -> dict:
+        """Hostname plus anything else the prompt encodes, such as HA role."""
+        try:
+            from app.identity import parse_device_prompt
+        except ImportError:
+            from identity import parse_device_prompt
+
+        return parse_device_prompt(connection.find_prompt())
 
     @staticmethod
     def run_commands(connection, commands: list[str],

@@ -23,6 +23,28 @@ SYS_OIDS = {
     "sysLocation": "1.3.6.1.2.1.1.6.0",
 }
 
+# ENTITY-MIB table columns, not scalars -- read with GETNEXT to take the first
+# entry, which is the chassis on essentially all implementations. sysDescr says
+# nothing useful on PAN-OS and several other platforms, so this is where model
+# and serial actually come from.
+ENTITY_COLUMNS = {
+    "entPhysicalModelName": "1.3.6.1.2.1.47.1.1.1.1.13",
+    "entPhysicalSerialNum": "1.3.6.1.2.1.47.1.1.1.1.11",
+}
+
+# Vendor branches for platforms that populate neither sysDescr nor ENTITY-MIB.
+# Keyed by the device type parse_sysdescr resolves.
+VENDOR_OIDS = {
+    "paloalto_panos": {
+        # PAN-COMMON-MIB::panSys
+        "software_version": "1.3.6.1.4.1.25461.2.1.2.1.1.0",
+        "model": "1.3.6.1.4.1.25461.2.1.2.1.2.0",
+        "serial": "1.3.6.1.4.1.25461.2.1.2.1.3.0",
+    },
+}
+# Alias so callers can look the branch up by vendor name too.
+VENDOR_OIDS["paloalto"] = VENDOR_OIDS["paloalto_panos"]
+
 _VALID_VERSIONS = ("v2c", "v3")
 
 # sysDescr is the only universally implemented identity string, so platform
@@ -155,9 +177,97 @@ async def _get_async(host, creds, oids, timeout, port):
     return results
 
 
+async def _next_async(host, creds, oid, timeout, port):
+    from pysnmp.hlapi.v3arch.asyncio import (
+        ContextData, ObjectIdentity, ObjectType, SnmpEngine,
+        UdpTransportTarget, next_cmd)
+
+    engine = SnmpEngine()
+    target = await UdpTransportTarget.create((host, port), timeout=timeout, retries=1)
+    error_indication, error_status, _, var_binds = await next_cmd(
+        engine,
+        _auth_data(creds),
+        target,
+        ContextData(),
+        ObjectType(ObjectIdentity(oid)),
+        lexicographicMode=False,
+    )
+
+    if error_indication or error_status or not var_binds:
+        return None
+    _, value = var_binds[0]
+    text = str(value).strip()
+    if not text or "No Such" in text:
+        return None
+    return text
+
+
 def _snmp_get(host, creds, oids, timeout, port):
     """Seam for tests -- performs the actual network call."""
     return asyncio.run(_get_async(host, creds, oids, timeout, port))
+
+
+def _snmp_walk_first(host, creds, oid, timeout, port):
+    """First value under a table column, or None. Seam for tests."""
+    return asyncio.run(_next_async(host, creds, oid, timeout, port))
+
+
+async def _walk_async(host, creds, oid, timeout, port, max_rows):
+    from pysnmp.hlapi.v3arch.asyncio import (
+        ContextData, ObjectIdentity, ObjectType, SnmpEngine,
+        UdpTransportTarget, bulk_cmd, next_cmd)
+
+    engine = SnmpEngine()
+    target = await UdpTransportTarget.create((host, port), timeout=timeout, retries=1)
+    prefix = oid.rstrip(".") + "."
+    results = {}
+    current = ObjectType(ObjectIdentity(oid))
+
+    while len(results) < max_rows:
+        if creds.version == "v2c":
+            error_indication, error_status, _, var_bind_table = await bulk_cmd(
+                engine, _auth_data(creds), target, ContextData(),
+                0, 25, current, lexicographicMode=False)
+        else:
+            error_indication, error_status, _, var_bind_table = await next_cmd(
+                engine, _auth_data(creds), target, ContextData(),
+                current, lexicographicMode=False)
+
+        if error_indication or error_status or not var_bind_table:
+            break
+
+        advanced = False
+        for var_bind in var_bind_table:
+            name, value = var_bind
+            name = str(name)
+            if not name.startswith(prefix):
+                return results
+            text = str(value).strip()
+            if text and "No Such" not in text:
+                results[name] = text
+            current = ObjectType(ObjectIdentity(name))
+            advanced = True
+
+        if not advanced:
+            break
+
+    return results
+
+
+def _snmp_walk(host, creds, oid, timeout, port, max_rows=5000):
+    """Every value under an OID subtree. Seam for tests."""
+    return asyncio.run(_walk_async(host, creds, oid, timeout, port, max_rows))
+
+
+def make_walker(host, creds, timeout: int = 5, port: int = 161):
+    """Return a walk(oid) callable bound to one device.
+
+    snmp_tables takes this rather than a host, so table collection is testable
+    without a network and independent of the transport.
+    """
+    def walk(oid):
+        return _snmp_walk(host, creds, oid, timeout, port)
+    return walk
 
 
 def probe(host, creds: SnmpCredentials, timeout: int = 3, port: int = 161):
@@ -183,12 +293,46 @@ def probe(host, creds: SnmpCredentials, timeout: int = 3, port: int = 161):
     facts = parse_sysdescr(sys_descr)
 
     hostname = sys_name.split(".")[0].strip() if sys_name else host
+    model = ""
+    serial = ""
+    version = facts["software_version"] or ""
+
+    # Enrichment is best effort: a device that answered the system group has
+    # already been identified, and losing that to a table timeout would be
+    # worse than returning a thinner record.
+    try:
+        model = _snmp_walk_first(
+            host, creds, ENTITY_COLUMNS["entPhysicalModelName"], timeout, port) or ""
+        serial = _snmp_walk_first(
+            host, creds, ENTITY_COLUMNS["entPhysicalSerialNum"], timeout, port) or ""
+    except Exception as e:
+        logger.debug(f"SNMP entity walk failed for {host}: {type(e).__name__}: {e}")
+
+    vendor = VENDOR_OIDS.get(facts["device_type"] or "")
+    if vendor and not (model and serial and version):
+        try:
+            vendor_values = _snmp_get(
+                host, creds, list(vendor.values()), timeout, port)
+            for field, oid in vendor.items():
+                got = vendor_values.get(oid)
+                if not got:
+                    continue
+                if field == "model" and not model:
+                    model = got
+                elif field == "serial" and not serial:
+                    serial = got
+                elif field == "software_version" and not version:
+                    version = got
+        except Exception as e:
+            logger.debug(f"SNMP vendor probe failed for {host}: {type(e).__name__}: {e}")
 
     return {
         "hostname": hostname,
         "mgmt_ip": host,
         "device_type": facts["device_type"],
-        "software_version": facts["software_version"],
+        "software_version": version or None,
+        "model": model or None,
+        "serial": serial or None,
         "sys_descr": sys_descr,
         "sys_object_id": values.get(SYS_OIDS["sysObjectID"]),
         "sys_location": values.get(SYS_OIDS["sysLocation"]),

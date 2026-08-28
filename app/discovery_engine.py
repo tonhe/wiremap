@@ -12,18 +12,20 @@ try:
     from app.connection_manager import ConnectionManager, ConnectionError
     from app.collectors import get_registry, get_collector
     from app.inventory import DiscoveryInventory
-    from app.identity import normalize_hostname, looks_like_mac
+    from app.identity import normalize_hostname, looks_like_mac, looks_like_host_nic
     from app.device_facts import extract_device_facts
     from app.neighbors import extract_all, default_enabled, CrawlScope
-    from app.snmp_probe import probe as snmp_probe
+    from app.snmp_probe import probe as snmp_probe, make_walker as snmp_make_walker
+    from app.snmp_tables import collect_all as snmp_collect_all
 except ImportError:
     from connection_manager import ConnectionManager, ConnectionError
     from collectors import get_registry, get_collector
     from inventory import DiscoveryInventory
-    from identity import normalize_hostname, looks_like_mac
+    from identity import normalize_hostname, looks_like_mac, looks_like_host_nic
     from device_facts import extract_device_facts
     from neighbors import extract_all, default_enabled, CrawlScope
-    from snmp_probe import probe as snmp_probe
+    from snmp_probe import probe as snmp_probe, make_walker as snmp_make_walker
+    from snmp_tables import collect_all as snmp_collect_all
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +96,8 @@ class DiscoveryEngine:
                  crawl_from_targets: bool = False,
                  neighbor_sources=None,
                  crawl_scope=None,
-                 snmp_credentials=None):
+                 snmp_credentials=None,
+                 base_inventory=None):
         self.seed_ip = seed_ip
         self.seed_device_type = seed_device_type
         self.username = username
@@ -109,6 +112,10 @@ class DiscoveryEngine:
         self.crawl_scope = crawl_scope or CrawlScope()
         # Used only after SSH and telnet have both failed.
         self.snmp_credentials = snmp_credentials
+        # When set, this run adds to an existing scan rather than starting
+        # empty. Devices already collected are not re-visited; devices that
+        # failed last time are, since a retry is usually the point.
+        self.base_inventory = base_inventory
         # A targeted scan visits exactly its host list unless the operator
         # asks it to keep going from each target. Already-visited IPs are
         # filtered per layer, so targets are never reprocessed.
@@ -133,6 +140,9 @@ class DiscoveryEngine:
         self._hostname_lock = threading.Lock()
         self.failed: dict[str, str] = {}
         self._failed_lock = threading.Lock()
+        # Hosts the operator asked for by name. These are never skipped as
+        # duplicates, so re-listing a device refreshes it.
+        self._requested_ips: set[str] = set()
         # Addresses seen but deliberately not crawled -- reported so a silent
         # boundary never reads as "nothing was there".
         self._out_of_scope: set[str] = set()
@@ -167,21 +177,51 @@ class DiscoveryEngine:
             f"collectors={list(self._collectors.keys())}"
         )
 
+    def _prime_from_base(self, inventory: DiscoveryInventory):
+        """Seed dedup state so a continuation behaves like a resumed scan.
+
+        Devices already logged into are treated as visited. Explicitly
+        requested hosts are exempt -- asking for a host is a request to scan
+        it, which is how a refresh of one device works.
+        """
+        requested = {ip for ip, _ in (self.target_hosts or [])}
+        if not self.target_hosts:
+            requested.add(self.seed_ip)
+
+        collected_ips = inventory.collected_ips() - requested
+        self.visited |= collected_ips
+        self._discovered_hostnames |= inventory.collected_hostnames()
+        self._requested_ips = requested
+        self.failed.update(inventory.prior_failures())
+
+        logger.info(
+            f"Continuing from {inventory.to_dict().get('continued_from')}: "
+            f"{len(inventory.devices)} known device(s), "
+            f"{len(collected_ips)} already collected, "
+            f"{len(self.failed)} prior failure(s) to retry"
+        )
+
     def discover(self) -> DiscoveryInventory:
         """Run BFS discovery and return a populated DiscoveryInventory.
 
         Devices at each BFS depth layer are discovered in parallel using
         a thread pool. Neighbor queueing happens between layers.
         """
-        inventory = DiscoveryInventory.create(
-            seed_ip=self.seed_ip,
-            params={
-                "max_depth": self.max_depth,
-                "connection_protocol": self.protocol,
-                "collectors_enabled": list(self._collectors.keys()),
-                "filters": self.filters,
-            },
-        )
+        params = {
+            "max_depth": self.max_depth,
+            "connection_protocol": self.protocol,
+            "collectors_enabled": list(self._collectors.keys()),
+            "filters": self.filters,
+        }
+
+        if self.base_inventory is not None:
+            params["continued_from"] = self.base_inventory.discovery_id
+            inventory = DiscoveryInventory.continue_from(
+                self.base_inventory, seed_ip=self.seed_ip, params=params)
+            self._prime_from_base(inventory)
+        else:
+            inventory = DiscoveryInventory.create(
+                seed_ip=self.seed_ip, params=params)
 
         # Layer-based BFS: process all devices at a given depth in parallel,
         # then collect neighbors and advance to the next depth.
@@ -348,14 +388,20 @@ class DiscoveryEngine:
                 "protocol": result.protocol_used,
                 "device_type_effective": conn_mgr.effective_device_type,
             })
-            hostname = ConnectionManager.get_hostname(conn)
-            logger.info(f"Connected as {hostname}")
+            prompt_facts = ConnectionManager.get_prompt_facts(conn)
+            hostname = prompt_facts["hostname"]
+            ha_state = prompt_facts["ha_state"]
+            if ha_state:
+                logger.info(f"Connected as {hostname} (HA {ha_state})")
+            else:
+                logger.info(f"Connected as {hostname}")
 
             # Hostname-based dedup: a device may be reachable via multiple IPs.
             # Normalized, so SW1 and SW1(FOC1234) are recognised as one chassis.
             norm_hostname = normalize_hostname(hostname)
+            explicitly_requested = ip in self._requested_ips
             with self._hostname_lock:
-                if norm_hostname in self._discovered_hostnames:
+                if norm_hostname in self._discovered_hostnames and not explicitly_requested:
                     logger.info(
                         f"Skipping {ip}: already discovered as {hostname}"
                     )
@@ -382,6 +428,12 @@ class DiscoveryEngine:
                 discovery_source="login",
             )
             inventory.mark_login_succeeded(hostname)
+            # A device that failed in the scan being continued and works now
+            # must stop being reported as a failure.
+            with self._failed_lock:
+                self.failed.pop(ip, None)
+            if ha_state:
+                inventory.set_ha_state(hostname, ha_state)
 
             self._progress_cb({
                 "event": "collecting_data",
@@ -538,6 +590,23 @@ class DiscoveryEngine:
         )
         inventory.mark_login_failed(hostname, login_error)
         inventory.set_snmp_facts(hostname, record)
+
+        # Standard MIBs give interfaces, addressing, routes and neighbours on
+        # devices that will never accept a CLI session. Shaped like the CLI
+        # collectors, so the reports need no special case.
+        collected = {}
+        try:
+            walker = snmp_make_walker(ip, self.snmp_credentials)
+            collected = snmp_collect_all(walker)
+        except Exception as e:
+            logger.debug(f"SNMP table collection failed for {ip}: "
+                         f"{type(e).__name__}: {e}")
+
+        for collector_name, parsed in collected.items():
+            inventory.set_collector_data(hostname, collector_name,
+                                         raw={"source": "snmp"}, parsed=parsed)
+        if collected:
+            logger.info(f"SNMP collected {sorted(collected)} from {hostname}")
         self._progress_cb({
             "event": "device_snmp_identified",
             "ip": ip,
@@ -568,6 +637,15 @@ class DiscoveryEngine:
                 continue
 
             neighbor_device_type, neighbor_category, neighbor_has_routing = neighbor_info
+
+            # A server NIC advertises its product description over LLDP, so it
+            # arrives looking like a device with no management address and
+            # nothing to log into. Categorise it so it stops being counted as
+            # network hardware.
+            if looks_like_host_nic(neighbor.get("remote_device"),
+                                   neighbor.get("remote_platform"),
+                                   neighbor.get("system_description")):
+                neighbor_category = "host_nic"
 
             if not self._should_include(neighbor_category):
                 logger.info(
@@ -696,6 +774,9 @@ class DiscoveryEngine:
             "firewall": "include_routers",
             "switch": "include_switches",
             "phone": "include_phones",
+            # Server NICs are endpoints, not network devices. Off unless the
+            # operator explicitly asks for other devices.
+            "host_nic": "include_other",
             "server": "include_servers",
             "access_point": "include_aps",
         }

@@ -31,6 +31,50 @@ class DiscoveryInventory:
         return cls(data)
 
     @classmethod
+    def continue_from(cls, base, seed_ip: str, params: dict = None):
+        """Start a scan that builds on an existing one.
+
+        The result is a new scan with its own id and file -- the inventory it
+        continues is never modified, so a continuation can never destroy the
+        scan it was based on. Devices are deep-copied, and lineage is recorded.
+        """
+        import copy
+
+        inventory = cls.create(seed_ip=seed_ip, params=params)
+        inventory._data["devices"] = copy.deepcopy(base.devices)
+        inventory._data["continued_from"] = base.discovery_id
+        prior = base.to_dict().get("scan_summary", {})
+        inventory._data["prior_failures"] = dict(prior.get("failed", {}))
+        return inventory
+
+    def prior_failures(self) -> dict:
+        """Failures inherited from the scan this one continues."""
+        return dict(self._data.get("prior_failures", {}))
+
+    def collected_ips(self) -> set:
+        """Management addresses of devices already logged into.
+
+        A continuation skips these and retries everything else, so devices
+        that failed last time are attempted again without being asked for.
+        """
+        return {
+            dev["mgmt_ip"] for dev in self._data.get("devices", {}).values()
+            if dev.get("login_succeeded") and dev.get("mgmt_ip")
+        }
+
+    def collected_hostnames(self) -> set:
+        try:
+            from app.identity import normalize_hostname
+        except ImportError:
+            from identity import normalize_hostname
+
+        return {
+            normalize_hostname(name)
+            for name, dev in self._data.get("devices", {}).items()
+            if dev.get("login_succeeded")
+        }
+
+    @classmethod
     def load(cls, filepath: str):
         """Load inventory from a JSON file."""
         with open(filepath, "r") as f:
@@ -47,6 +91,7 @@ class DiscoveryInventory:
             try:
                 with open(filepath, "r") as f:
                     data = json.load(f)
+                merged_from = data.get("merged_from") or []
                 inventories.append({
                     "filename": filename,
                     "filepath": filepath,
@@ -54,6 +99,11 @@ class DiscoveryInventory:
                     "seed_ip": data.get("seed_ip", ""),
                     "timestamp": data.get("timestamp", ""),
                     "device_count": len(data.get("devices", {})),
+                    # Lineage, so a merged or continued scan says so in the
+                    # list rather than looking like an ordinary one.
+                    "merged_from": merged_from,
+                    "merge_conflict_count": len(data.get("merge_conflicts") or []),
+                    "continued_from": data.get("continued_from", ""),
                 })
             except (json.JSONDecodeError, KeyError):
                 continue
@@ -221,13 +271,28 @@ class DiscoveryInventory:
             dev = self._data["devices"].get(hostname)
             if dev is None:
                 return
-            if record.get("software_version") and not dev.get("software_version"):
-                dev["software_version"] = record["software_version"]
+            # Collected data always wins; SNMP only fills what is still empty.
+            for field in ("software_version", "model", "serial"):
+                if record.get(field) and not dev.get(field):
+                    dev[field] = record[field]
+            if record.get("model") and not dev.get("platform"):
+                dev["platform"] = record["model"]
             dev["snmp"] = {
                 "sys_descr": record.get("sys_descr"),
                 "sys_object_id": record.get("sys_object_id"),
                 "sys_location": record.get("sys_location"),
             }
+
+    def set_ha_state(self, hostname, ha_state):
+        """Record which half of an HA pair this is.
+
+        On PAN-OS active/passive is the only indication of which member is
+        actually carrying traffic.
+        """
+        with self._lock:
+            dev = self._data["devices"].get(hostname)
+            if dev is not None:
+                dev["ha_state"] = ha_state
 
     def set_chassis_id(self, hostname, chassis_id):
         with self._lock:

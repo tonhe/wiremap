@@ -35,6 +35,10 @@ _COMMANDS = {
         "show policy",
         "show nat",
     ],
+    "paloalto_panos": [
+        "show running security-policy",
+        "show running nat-policy",
+    ],
 }
 _DEFAULT_COMMANDS = [
     "show access-lists",

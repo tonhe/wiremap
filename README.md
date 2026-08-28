@@ -18,9 +18,18 @@
 - **Device Type Auto-detection** -- YAML-based pattern matching against CDP platform strings and LLDP system descriptions
 - **Hostname Dedup** -- Prevents collecting the same device twice when it's reachable via multiple IPs (management, loopback, SVI)
 - **Loop Prevention** -- Tracks visited devices and enforces depth limits
+- **Multiple Neighbour Sources** -- Crawls from CDP/LLDP, routing adjacencies (OSPF, EIGRP, BGP, IS-IS), HSRP/VRRP peers, and optionally routing next-hops. A device seen by several sources is merged into one record that keeps every sighting
+- **Crawl Boundaries** -- Private address space only by default, with CIDR allow/deny lists and a device ceiling, so next-hop crawling cannot wander into transit or ISP space. Addresses skipped by a boundary are reported, never silently dropped
+- **SNMP Fallback** -- When SSH and Telnet both fail, SNMP v2c or v3 identifies the device and collects interfaces, addressing, routes, ARP and neighbours from the standard MIBs. Reaches gear that never accepts a CLI session, such as firewalls shipped with SSH disabled
+- **Add to a Previous Scan** -- Continue an earlier scan instead of starting over. Devices already collected are skipped, ones that failed are retried, and results merge into a new scan. The original is never modified
+- **Device Provenance** -- Every device records how it was found (`login`, `cdp_lldp`, `routing_adjacency`, `snmp`, ...), whether login succeeded, and why it failed. A device seen only in a neighbour table is never mistaken for one that was fully collected
 
 ### Multi-Vendor Support
-Cisco IOS / IOS-XE / NX-OS / IOS-XR, Arista EOS, Juniper JunOS, Palo Alto PAN-OS, MikroTik RouterOS, Fortinet FortiGate, HPE Comware / ProCurve, Aruba OS-CX, Dell OS10, Extreme ExtremeXOS / VOSS, Ubiquiti EdgeOS, Barracuda
+Cisco IOS / IOS-XE / NX-OS / IOS-XR, Cisco AireOS WLC, Arista EOS, Juniper JunOS, Palo Alto PAN-OS, WatchGuard Firebox (Fireware), VyOS, MikroTik RouterOS, Fortinet FortiGate, HPE Comware / ProCurve, Aruba OS-CX, Dell OS10, Extreme ExtremeXOS / VOSS, Ubiquiti EdgeOS
+
+Each platform has its own command set per collector. A collector that cannot serve a platform -- spanning tree on a firewall, switchports on a router -- declares it and is skipped, rather than sending commands the device will reject.
+
+**Legacy SSH:** paramiko is pinned to 3.5.x deliberately. Version 4.0 removed the SHA-1 key exchanges and the `ssh-rsa` host key algorithm outright, which strands older Catalyst and Nexus hardware that offers nothing else. Modern algorithms are still preferred wherever the device supports them.
 
 ### Data Collection (15 Collectors)
 All collectors run automatically on every device -- no pre-selection needed.
@@ -51,19 +60,22 @@ A dedicated **Reports** tab serves as the single destination for all report gene
 | Report | Formats | Description |
 |--------|---------|-------------|
 | Topology Map | HTML | Interactive D3.js network diagram with color-coded device types |
-| Device Inventory | XLSX, JSON, CSV, XML | Device summary, stack members, modules and line cards |
+| Device Inventory | XLSX, JSON, CSV, XML | Device summary with provenance (discovery source, whether login succeeded, why it failed), stack members, modules and line cards |
 | Link Inventory | XLSX, JSON, CSV, XML | All discovered neighbor links (CDP/LLDP + L3) |
+| L2/L3 Diagram Data | XLSX, JSON, CSV, XML | Node and edge lists for drawing diagrams: device details, deduplicated L2 links, L3 adjacencies, subnets |
 | Interface Summary | XLSX, JSON, CSV, XML | Port status, descriptions, IP assignments |
 | ARP Summary | XLSX, JSON, CSV, XML | ARP entries by device with summary and detail tabs |
 | MAC Table | XLSX, JSON, CSV, XML | MAC-to-port mappings per device |
 | L2 Discovery | XLSX, JSON, CSV, XML | VLANs, STP topology, routed interfaces, anomaly findings |
-| L3 Routing & IP | XLSX, JSON, CSV, XML | Protocol neighbors, route tables, OSPF topology, FHRP status, IP audit, ARP/MAC map, VRF summary |
+| L3 Routing & IP | XLSX, JSON, CSV, XML | Protocol neighbors, route tables, OSPF topology, FHRP status, IP audit, ARP/MAC map, VRF summary, and a Collection Errors sheet listing any command a device rejected |
 | Internet Edge | XLSX, JSON, CSV, XML | BGP peering, NAT overview, ACL audit, FHRP status, edge interface security |
 | EOX Lifecycle | XLSX | Hardware/software end-of-life dates, module EOX status (requires Cisco API credentials) |
 | Config Archive | ZIP | Running configs as individual text files |
 
 ### Targeted Scan
 Connect to a specific list of devices without BFS crawling. Designed for edge assessments where you know exactly which devices to audit (firewalls, border routers). Enter one device per line in the format `IP [device_type]` — device type is optional (auto-detect if omitted).
+
+A supplied device type is authoritative: no other platform is tried against that host. Optionally the scan can also discover onward from each target, with its own crawl depth and device-type filters.
 
 ### Saved Scans
 - Every discovery saves a JSON scan data file (raw command output + parsed data)
@@ -72,7 +84,9 @@ Connect to a specific list of devices without BFS crawling. Designed for edge as
 - Export full ZIP archives (scan data + device configs)
 
 ### Demo Mode
-Built-in mock device simulator with a multi-vendor topology for testing without real hardware. Use seed IP `192.168.1.1` with any credentials.
+Built-in mock device simulator with a multi-vendor topology for testing without real hardware.
+
+**Opt-in only.** Set `WIREMAP_MOCK=1` and use seed IP `192.168.1.1` with any credentials. Without that variable no host is ever simulated -- `192.168.1.0/24` is a real range on real networks, and a scan must never return fabricated data.
 
 ---
 
@@ -93,11 +107,25 @@ Persistent volumes for logs, config, and inventories are configured automaticall
 ### Local Development
 
 ```bash
-python3 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cd app && python app.py
 ```
+
+Use Python 3.12. `telnetlib` was removed in 3.13, so netmiko will not import on
+newer versions and Telnet support is lost. The container runs 3.11.
+
+**Iterating without rebuilds.** The Dockerfile copies `app/` and `templates/`
+into the image, so `docker compose up -d` after a pull runs the previous build.
+The dev overlay bind-mounts the source instead:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+docker compose restart wiremap   # picks up code and template changes
+```
+
+A rebuild is only needed when `requirements.txt` changes.
 
 ## Usage
 
@@ -113,6 +141,47 @@ cd app && python app.py
 ### Load Previous Scan
 
 Switch to the **Saved Scans** tab to browse previous discoveries or upload a scan data JSON. Loading a scan automatically opens the **Reports** tab.
+
+### Merge Saved Scans
+
+Tick two or more scans in the **Saved Scans** tab and choose **Merge selected**.
+An engagement accumulates scans -- a discovery here, a targeted run there, an
+edge assessment from a different seed -- and the as-built picture lives across
+all of them.
+
+Merging uses the same identity rules discovery uses within one scan, so a
+device named three ways is still one device. Where two files describe the same
+device:
+
+1. a record that was logged into beats one only seen in a neighbour table
+2. between two collected records, the one carrying more data wins
+3. failing that, the newer scan wins
+
+The loser is never discarded -- it fills fields the winner lacks, and its
+collector data and evidence are folded in. Two chassis that genuinely share a
+hostname but differ by serial stay separate.
+
+The result is a **new** scan; the originals are left in place and are never
+modified. What it came from is recorded at three levels:
+
+- the **Saved Scans** list badges it `merged x N`, listing each source on hover
+- every device records the scan its winning record came from, shown as a
+  **Source Scan** column in the Device Inventory report
+- the workbook gains **Merge Sources** and **Merge Conflicts** sheets naming
+  every input and, for each device seen in more than one scan, which record was
+  kept and why
+
+### Add to a Previous Scan
+
+Both scan forms offer **Add results to a previous scan**. Pick a saved scan and
+the run continues it rather than starting empty:
+
+- devices already collected are skipped
+- devices that failed last time are retried automatically
+- hosts you list explicitly are always scanned, which is how a single device is
+  refreshed
+- results are written to a **new** scan that records what it continued from, so
+  the original is never modified
 
 ## Configuration
 
@@ -144,6 +213,22 @@ device_types:
 
 Configure concurrent worker count from the **Settings** tab under **Discovery Settings**. The setting is persisted to `config/discovery.json` and used by all scan types.
 
+`disable_autodetect` is also stored there. With it on, a device type must be supplied for every host and no platform fallback is attempted.
+
+### SNMP
+
+SNMP credentials are entered per scan on both the discovery and targeted forms, alongside the login credentials. Both v2c (community string) and v3 (auth and privacy) are supported.
+
+SNMP runs only after SSH and Telnet have both failed. It identifies the device and collects what the standard MIBs expose -- IF-MIB, IP-MIB, IP-FORWARD-MIB, LLDP-MIB, ENTITY-MIB, and CISCO-CDP-MIB where present. Because these are IETF standards rather than vendor commands, one implementation covers every supported platform.
+
+A device reached this way is recorded with `discovery_source = snmp` and `login_succeeded = false`. SNMP identifies a device; it does not collect one, and the reports keep that distinction visible.
+
+### Environment Variables
+
+| Variable | Purpose |
+|----------|---------|
+| `WIREMAP_MOCK` | Set to `1` to enable the built-in mock topology. Off by default; without it no host is ever simulated |
+
 ### Capability Filtering
 
 Control which device types are crawled during recursive discovery:
@@ -167,8 +252,15 @@ wiremap/
 │   ├── settings.py           # Discovery settings (JSON config)
 │   ├── device_detector.py    # Device type detection
 │   ├── parsers.py            # CDP/LLDP parsers
-│   ├── mock_devices.py       # Demo mode simulator
+│   ├── parsers_panos.py      # PAN-OS routing and LLDP parsers
+│   ├── identity.py           # Hostname normalization, device identity
+│   ├── inventory_merge.py    # Merge several scans into one
+│   ├── device_facts.py       # Serial/model/version extraction
+│   ├── snmp_probe.py         # SNMP identification (v2c/v3)
+│   ├── snmp_tables.py        # Standard-MIB table collection
+│   ├── mock_devices.py       # Demo mode simulator (opt-in)
 │   ├── collectors/           # 15 modular data collectors
+│   ├── neighbors/            # Neighbour sources and crawl scope
 │   └── reports/              # On-demand report generators
 ├── config/
 │   └── device_type_patterns.yaml
@@ -176,6 +268,7 @@ wiremap/
 ├── inventories/              # Saved scan data
 ├── Dockerfile
 ├── docker-compose.yml
+├── docker-compose.dev.yml    # Dev overlay: bind-mounts source, no rebuild
 └── requirements.txt
 ```
 

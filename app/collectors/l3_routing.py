@@ -55,6 +55,10 @@ _L3_NEIGHBOR_COMMANDS = {
         "ospf": "show ospf neighbor",
         "bgp": "show bgp neighbor",
     },
+    "paloalto_panos": {
+        "ospf": "show routing protocol ospf neighbor",
+        "bgp": "show routing protocol bgp peer",
+    },
 }
 _DEFAULT_L3_NEIGHBOR_COMMANDS = {
     "ospf": "show ip ospf neighbor",
@@ -73,6 +77,7 @@ _ROUTE_COMMANDS = {
     "extreme": "show ip route",
     "vyos": "show ip route",
     "watchguard_fireware": "show route",
+    "paloalto_panos": "show routing route",
     # AireOS has only the controller's own routes, not a routing table.
     "cisco_wlc": "show route summary",
 }
@@ -87,6 +92,7 @@ _PROTOCOLS_COMMANDS = {
     "juniper_junos": "show protocols",
     "extreme": "show ip protocols",
     "vyos": "show ip protocol",
+    "paloalto_panos": "show routing summary",
 }
 _DEFAULT_PROTOCOLS_COMMAND = "show ip protocols"
 
@@ -140,7 +146,15 @@ class L3RoutingCollector(BaseCollector):
         # Parse route table via ntc-templates
         route_cmd = _ROUTE_COMMANDS.get(device_type, _DEFAULT_ROUTE_COMMAND)
         route_raw = raw_outputs.get(route_cmd, "")
-        routes = _parse_routes_ntc(route_raw, device_type, route_cmd)
+        if device_type == "paloalto_panos":
+            # No ntc-templates entry for "show routing route".
+            try:
+                from app.parsers_panos import parse_routes as _parse_panos_routes
+            except ImportError:
+                from parsers_panos import parse_routes as _parse_panos_routes
+            routes = _parse_panos_routes(route_raw)
+        else:
+            routes = _parse_routes_ntc(route_raw, device_type, route_cmd)
 
         # Store ip protocols raw (no parser)
         protocols_cmd = _PROTOCOLS_COMMANDS.get(device_type, _DEFAULT_PROTOCOLS_COMMAND)

@@ -197,7 +197,65 @@ class DeviceInventoryReport(BaseReport):
         result["Devices"] = self._extract_devices_data(inventory_data)
         result["Stack Members"] = self._extract_stack_data(inventory_data)
         result["Modules"] = self._extract_modules_data(inventory_data)
+        sources = self._extract_merge_sources(inventory_data)
+        if sources:
+            result["Merge Sources"] = sources
+        conflicts = self._extract_merge_conflicts(inventory_data)
+        if conflicts:
+            result["Merge Conflicts"] = conflicts
         return result
+
+    def _extract_merge_sources(self, inventory_data):
+        """Where a merged inventory came from, and what it had to choose between.
+
+        Only present on merged scans -- a merge that silently picks winners
+        should still be able to show what it set aside.
+        """
+        merged_from = inventory_data.get("merged_from") or []
+        if not merged_from:
+            return None
+
+        headers = ["Source Scan", "File", "Seed IP", "Scanned", "Devices",
+                   "Notes"]
+        rows = []
+        conflicts = inventory_data.get("merge_conflicts") or []
+        for source in merged_from:
+            source_id = source.get("discovery_id", "")
+            kept = sum(1 for c in conflicts if c.get("kept_from") == source_id)
+            dropped = sum(1 for c in conflicts
+                          if c.get("discarded_from") == source_id)
+            notes = []
+            if kept:
+                notes.append(f"{kept} device(s) taken from here on conflict")
+            if dropped:
+                notes.append(f"{dropped} superseded by another scan")
+            rows.append([
+                source_id,
+                source.get("filename", ""),
+                source.get("seed_ip", ""),
+                (source.get("timestamp", "") or "").split("T")[0],
+                source.get("device_count", ""),
+                "; ".join(notes),
+            ])
+
+        return headers, rows
+
+    def _extract_merge_conflicts(self, inventory_data):
+        """Devices that appeared in more than one scan, and which won."""
+        conflicts = inventory_data.get("merge_conflicts") or []
+        if not conflicts:
+            return None
+
+        headers = ["Device", "Also Seen As", "Kept From", "Superseded",
+                   "Why"]
+        rows = [[
+            c.get("hostname", ""),
+            c.get("also_named", ""),
+            c.get("kept_from", ""),
+            c.get("discarded_from", ""),
+            c.get("reason", ""),
+        ] for c in conflicts]
+        return headers, rows
 
     def _extract_devices_data(self, inventory_data):
         headers = [
@@ -205,6 +263,11 @@ class DeviceInventoryReport(BaseReport):
             "Platform", "Platform Description", "Software Version",
             "Serial Number", "Discovery Source", "Logged In", "Login Error",
         ]
+        # Only meaningful on a merged inventory, so the column is not there
+        # to be ignored on every ordinary scan.
+        merged = bool(inventory_data.get("merged_from"))
+        if merged:
+            headers.append("Source Scan")
         rows = []
         for hostname, device in sorted(
             inventory_data.get("devices", {}).items()
@@ -222,7 +285,7 @@ class DeviceInventoryReport(BaseReport):
 
             # Provenance: a device seen only in a neighbour table has no
             # serial or version, and must not read as fully collected.
-            rows.append([
+            row = [
                 hostname,
                 device.get("mgmt_ip", ""),
                 device.get("device_type", ""),
@@ -234,7 +297,10 @@ class DeviceInventoryReport(BaseReport):
                 device.get("discovery_source", "") or "",
                 "Yes" if device.get("login_succeeded") else "No",
                 device.get("login_error", "") or "",
-            ])
+            ]
+            if merged:
+                row.append(device.get("source_scan", "") or "")
+            rows.append(row)
 
         return (headers, rows)
 
@@ -334,6 +400,11 @@ class DeviceInventoryReport(BaseReport):
             "Platform", "Platform Description", "Software Version",
             "Serial Number", "Discovery Source", "Logged In", "Login Error",
         ]
+        # Only meaningful on a merged inventory, so the column is not there
+        # to be ignored on every ordinary scan.
+        merged = bool(inventory_data.get("merged_from"))
+        if merged:
+            headers.append("Source Scan")
         rows = []
         for hostname, device in sorted(
             inventory_data.get("devices", {}).items()
@@ -351,7 +422,7 @@ class DeviceInventoryReport(BaseReport):
 
             # Provenance: a device seen only in a neighbour table has no
             # serial or version, and must not read as fully collected.
-            rows.append([
+            row = [
                 hostname,
                 device.get("mgmt_ip", ""),
                 device.get("device_type", ""),
@@ -363,7 +434,10 @@ class DeviceInventoryReport(BaseReport):
                 device.get("discovery_source", "") or "",
                 "Yes" if device.get("login_succeeded") else "No",
                 device.get("login_error", "") or "",
-            ])
+            ]
+            if merged:
+                row.append(device.get("source_scan", "") or "")
+            rows.append(row)
 
         create_sheet(wb, "Devices", headers, rows)
 

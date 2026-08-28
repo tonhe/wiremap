@@ -197,3 +197,57 @@ def test_split_cidrs_handles_commas_and_newlines():
     assert _split_cidrs("10.0.0.0/8, 192.168.0.0/16") == ["10.0.0.0/8", "192.168.0.0/16"]
     assert _split_cidrs("10.0.0.0/8\n172.16.0.0/12") == ["10.0.0.0/8", "172.16.0.0/12"]
     assert _split_cidrs("") == []
+
+
+def test_continue_from_option_on_both_forms(client):
+    _point_at_repo_templates()
+    body = client.get("/").get_data(as_text=True)
+    assert body.count("Add results to a previous scan") == 2
+    assert "disc_continue_from" in body
+    assert "ts_continue_from" in body
+
+
+def test_continue_from_rejects_missing_scan(client):
+    resp = client.post("/scan/start", data={
+        "scan_type": "discovery", "seed_ip": "10.0.0.1",
+        "device_type": "cisco_ios", "username": "u", "password": "p",
+        "continue_from": "does-not-exist.json",
+    })
+    assert resp.status_code == 400
+    assert "not found" in resp.get_json()["error"].lower()
+
+
+def test_continue_from_cannot_escape_inventory_dir(client):
+    """The filename is attacker-adjacent input; it must not traverse."""
+    resp = client.post("/scan/start", data={
+        "scan_type": "discovery", "seed_ip": "10.0.0.1",
+        "device_type": "cisco_ios", "username": "u", "password": "p",
+        "continue_from": "../../etc/passwd",
+    })
+    assert resp.status_code == 400
+
+
+def test_merge_requires_two_scans(client):
+    resp = client.post("/inventories/merge", json={"filenames": ["one.json"]})
+    assert resp.status_code == 400
+    assert "at least two" in resp.get_json()["error"].lower()
+
+
+def test_merge_rejects_missing_file(client):
+    resp = client.post("/inventories/merge",
+                       json={"filenames": ["a.json", "nope.json"]})
+    assert resp.status_code in (400, 404)
+
+
+def test_merge_cannot_escape_inventory_dir(client):
+    resp = client.post("/inventories/merge",
+                       json={"filenames": ["../../etc/passwd", "../../etc/hosts"]})
+    assert resp.status_code in (400, 404)
+
+
+def test_merge_ui_present_in_saved_scans(client):
+    _point_at_repo_templates()
+    body = client.get("/").get_data(as_text=True)
+    assert "merge-bar" in body
+    assert "mergeSelectedScans" in body
+    assert "Merge selected" in body

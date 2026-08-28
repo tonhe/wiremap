@@ -2,6 +2,14 @@ import pytest
 from app.snmp_probe import SnmpCredentials, parse_sysdescr, probe, SYS_OIDS
 
 
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    """Enrichment walks are best effort and hit the network. Stub them by
+    default so no test can reach a real host; individual tests override."""
+    import app.snmp_probe as mod
+    monkeypatch.setattr(mod, "_snmp_walk_first", lambda *a, **k: None)
+
+
 def test_credentials_v2c_requires_community():
     with pytest.raises(ValueError):
         SnmpCredentials(version="v2c", community="")
@@ -120,3 +128,69 @@ def test_probe_without_sysname_still_reports(monkeypatch):
     assert result is not None
     assert result["hostname"] == "10.0.0.9"
     assert result["device_type"] == "vyos"
+
+
+def test_entity_and_vendor_oids_are_defined():
+    from app.snmp_probe import ENTITY_COLUMNS, VENDOR_OIDS
+    assert ENTITY_COLUMNS["entPhysicalSerialNum"] == "1.3.6.1.2.1.47.1.1.1.1.11"
+    assert ENTITY_COLUMNS["entPhysicalModelName"] == "1.3.6.1.2.1.47.1.1.1.1.13"
+    # PAN-COMMON-MIB, enterprise 25461
+    assert all(o.startswith("1.3.6.1.4.1.25461") for o in VENDOR_OIDS["paloalto"].values())
+
+
+def test_probe_fills_model_and_serial_from_entity_mib(monkeypatch):
+    """PAN-OS leaves sysDescr uninformative; ENTITY-MIB carries the facts."""
+    import app.snmp_probe as mod
+    monkeypatch.setattr(mod, "_snmp_get", lambda *a, **k: {
+        SYS_OIDS["sysName"]: "pa-trmc-mdf-campus-fw01",
+        SYS_OIDS["sysDescr"]: "Palo Alto Networks",
+    })
+    monkeypatch.setattr(mod, "_snmp_walk_first", lambda host, creds, oid, t, p: {
+        "1.3.6.1.2.1.47.1.1.1.1.13": "PA-440",
+        "1.3.6.1.2.1.47.1.1.1.1.11": "012345678901",
+    }.get(oid))
+
+    r = probe("172.21.0.13", SnmpCredentials(version="v2c", community="public"))
+    assert r["model"] == "PA-440"
+    assert r["serial"] == "012345678901"
+    assert r["device_type"] == "paloalto_panos"
+
+
+def test_probe_uses_vendor_oids_when_entity_is_empty(monkeypatch):
+    import app.snmp_probe as mod
+    monkeypatch.setattr(mod, "_snmp_get", lambda host, creds, oids, t, p: (
+        {SYS_OIDS["sysName"]: "pa-fw", SYS_OIDS["sysDescr"]: "Palo Alto Networks",
+         SYS_OIDS["sysObjectID"]: "1.3.6.1.4.1.25461.2.3.20"}
+        if oids[0] == SYS_OIDS["sysDescr"] or SYS_OIDS["sysName"] in oids
+        else {"1.3.6.1.4.1.25461.2.1.2.1.1.0": "10.2.3",
+              "1.3.6.1.4.1.25461.2.1.2.1.3.0": "0123456789"}))
+    monkeypatch.setattr(mod, "_snmp_walk_first", lambda *a, **k: None)
+
+    r = probe("172.21.0.13", SnmpCredentials(version="v2c", community="public"))
+    assert r["serial"] == "0123456789"
+    assert r["software_version"] == "10.2.3"
+
+
+def test_probe_survives_entity_walk_failure(monkeypatch):
+    """A best-effort enrichment must never lose the identification."""
+    import app.snmp_probe as mod
+    monkeypatch.setattr(mod, "_snmp_get", lambda *a, **k: {
+        SYS_OIDS["sysName"]: "SW1", SYS_OIDS["sysDescr"]: "Cisco IOS Software"})
+
+    def boom(*a, **k):
+        raise OSError("timeout")
+
+    monkeypatch.setattr(mod, "_snmp_walk_first", boom)
+    r = probe("10.0.0.1", SnmpCredentials(version="v2c", community="public"))
+    assert r is not None
+    assert r["hostname"] == "SW1"
+
+
+def test_probe_keeps_sysdescr_version_when_entity_has_none(monkeypatch):
+    import app.snmp_probe as mod
+    monkeypatch.setattr(mod, "_snmp_get", lambda *a, **k: {
+        SYS_OIDS["sysName"]: "SW1",
+        SYS_OIDS["sysDescr"]: "Cisco IOS Software, Version 15.0(2)SE11"})
+    monkeypatch.setattr(mod, "_snmp_walk_first", lambda *a, **k: None)
+    r = probe("10.0.0.1", SnmpCredentials(version="v2c", community="public"))
+    assert r["software_version"] == "15.0(2)SE11"

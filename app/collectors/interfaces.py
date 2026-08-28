@@ -51,6 +51,11 @@ _COMMANDS = {
     "watchguard_fireware": [
         "show interface",
     ],
+    "paloalto_panos": [
+        "show interface logical",
+        "show interface hardware",
+        "show interface management",
+    ],
 }
 _DEFAULT_COMMANDS = [
     "show interfaces status",

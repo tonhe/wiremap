@@ -26,6 +26,16 @@ _COMMANDS = {
     # AireOS puts model, serial and software version in sysinfo, not version.
     "cisco_wlc": ["show sysinfo", "show inventory"],
     "watchguard_fireware": ["show system", "show version"],
+    "paloalto_panos": ["show system info"],
+}
+
+# Platforms whose identity command is not named "... version ...". Sniffing
+# for the word left PAN-OS and AireOS parsing nothing at all, which is why
+# their rows carried no model, serial or software version.
+_IDENTITY_COMMANDS = {
+    "paloalto_panos": "show system info",
+    "cisco_wlc": "show sysinfo",
+    "watchguard_fireware": "show system",
 }
 _DEFAULT_COMMANDS = ["show version", "show inventory"]
 
@@ -80,8 +90,9 @@ class DeviceInventoryCollector(BaseCollector):
     def parse(self, raw_outputs: dict[str, str], device_type: str) -> dict:
         commands = _COMMANDS.get(device_type, _DEFAULT_COMMANDS)
 
-        # show version
-        version_cmd = next((c for c in commands if "version" in c), None)
+        # show version, or the platform's own identity command
+        version_cmd = _IDENTITY_COMMANDS.get(device_type) or next(
+            (c for c in commands if "version" in c), None)
         version = _ntc_parse(
             raw_outputs.get(version_cmd, ""), device_type, version_cmd
         ) if version_cmd else []

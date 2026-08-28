@@ -775,6 +775,24 @@
                         </div>
                     </div>
 
+
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" id="disc_continue_toggle" value="true"
+                                   class="continue-toggle" data-prefix="disc"
+                                   style="width: auto; margin-right: 8px; accent-color: var(--accent);">
+                            Add results to a previous scan
+                        </label>
+                        <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 24px;">
+                            Devices already collected are skipped, ones that failed are retried,
+                            and findings merge into a new scan. The original is left untouched.
+                        </p>
+                        <select name="continue_from" id="disc_continue_from"
+                                class="continue-select" style="display: none; margin-top: 8px;">
+                            <option value="">Select a previous scan...</option>
+                        </select>
+                    </div>
+
                     <button type="submit" class="btn-primary">Run Discovery</button>
                 </form>
             </div>
@@ -922,6 +940,24 @@
                         </div>
                     </div>
 
+
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" id="ts_continue_toggle" value="true"
+                                   class="continue-toggle" data-prefix="ts"
+                                   style="width: auto; margin-right: 8px; accent-color: var(--accent);">
+                            Add results to a previous scan
+                        </label>
+                        <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 24px;">
+                            Devices already collected are skipped, ones that failed are retried,
+                            and findings merge into a new scan. The original is left untouched.
+                        </p>
+                        <select name="continue_from" id="ts_continue_from"
+                                class="continue-select" style="display: none; margin-top: 8px;">
+                            <option value="">Select a previous scan...</option>
+                        </select>
+                    </div>
+
                     <button type="submit" class="btn-primary">Start Scan</button>
                 </form>
             </div>
@@ -929,6 +965,20 @@
             <!-- Saved Scans Tab -->
             <div id="tab-load" class="tab-content">
                 <div class="inventory-list" id="inventory-list">
+                </div>
+
+                <div id="merge-bar" style="display: none; align-items: center; gap: 12px;
+                            margin-top: 12px; padding: 12px; background: var(--bg-card-alt);
+                            border: 1px solid var(--border); border-radius: var(--radius);">
+                    <span id="merge-count" class="mono" style="color: var(--text-bright);"></span>
+                    <span class="text-muted" style="font-size: 12px; flex: 1;">
+                        Combines them into a new scan. Devices seen in more than one keep the
+                        fullest record. The originals are left in place.
+                    </span>
+                    <button type="button" id="merge-btn" class="btn-sm"
+                            onclick="mergeSelectedScans()"
+                            style="background: var(--accent); color: #fff; border: none;
+                                   padding: 8px 16px; cursor: pointer;">Merge selected</button>
                 </div>
                 <div style="margin-top: 16px; text-align: center;">
                     <label class="upload-link" style="display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-muted); cursor: pointer; margin-bottom: 0;">
@@ -1053,6 +1103,41 @@
                 var isV3 = sel.value === 'v3';
                 document.getElementById(p + '_snmp_v2c').style.display = isV3 ? 'none' : 'block';
                 document.getElementById(p + '_snmp_v3').style.display = isV3 ? 'block' : 'none';
+            });
+        });
+    })();
+
+    // "Add to a previous scan" -- the picker only appears when enabled, and
+    // the list is fetched on first use so it always reflects saved scans.
+    (function () {
+        var loaded = false;
+
+        function populate() {
+            if (loaded) return;
+            loaded = true;
+            fetch('/inventories')
+                .then(function (r) { return r.json(); })
+                .then(function (items) {
+                    document.querySelectorAll('.continue-select').forEach(function (sel) {
+                        items.forEach(function (inv) {
+                            var opt = document.createElement('option');
+                            opt.value = inv.filename;
+                            opt.textContent = inv.discovery_id + '  (' +
+                                inv.device_count + ' devices)';
+                            sel.appendChild(opt);
+                        });
+                    });
+                })
+                .catch(function () { loaded = false; });
+        }
+
+        document.querySelectorAll('.continue-toggle').forEach(function (toggle) {
+            toggle.addEventListener('change', function () {
+                var sel = document.getElementById(toggle.dataset.prefix + '_continue_from');
+                if (!sel) return;
+                sel.style.display = toggle.checked ? 'block' : 'none';
+                if (toggle.checked) populate();
+                else sel.value = '';
             });
         });
     })();
@@ -1437,6 +1522,16 @@
                     row.addEventListener('click', function() {
                         loadScan(inv.filename);
                     });
+                    var pick = document.createElement('input');
+                    pick.type = 'checkbox';
+                    pick.className = 'merge-pick';
+                    pick.value = inv.filename;
+                    pick.title = 'Select for merge';
+                    pick.style.cssText = 'width:auto;margin-right:10px;accent-color:var(--accent);';
+                    pick.addEventListener('click', function(e) { e.stopPropagation(); });
+                    pick.addEventListener('change', updateMergeBar);
+                    row.appendChild(pick);
+
                     var info = document.createElement('div');
                     info.className = 'inv-info';
                     var ip = document.createElement('span');
@@ -1455,6 +1550,35 @@
                     ts.style.marginLeft = '12px';
                     ts.textContent = inv.timestamp.split('T')[0];
                     info.appendChild(ts);
+
+                    if (inv.merged_from && inv.merged_from.length) {
+                        var badge = document.createElement('span');
+                        badge.className = 'mono';
+                        badge.style.cssText = 'margin-left:12px;font-size:11px;' +
+                            'padding:2px 8px;border-radius:3px;' +
+                            'background:var(--accent-muted);color:var(--accent);';
+                        badge.textContent = 'merged \u00d7' + inv.merged_from.length;
+                        badge.title = 'Merged from:\n' + inv.merged_from.map(
+                            function (m) {
+                                return '  ' + m.discovery_id + '  (' +
+                                    m.device_count + ' devices, seed ' +
+                                    m.seed_ip + ')';
+                            }).join('\n') +
+                            (inv.merge_conflict_count
+                                ? '\n\n' + inv.merge_conflict_count +
+                                  ' device(s) appeared in more than one scan'
+                                : '');
+                        info.appendChild(badge);
+                    } else if (inv.continued_from) {
+                        var cont = document.createElement('span');
+                        cont.className = 'mono';
+                        cont.style.cssText = 'margin-left:12px;font-size:11px;' +
+                            'padding:2px 8px;border-radius:3px;' +
+                            'background:var(--cyan-muted);color:var(--cyan);';
+                        cont.textContent = 'continued';
+                        cont.title = 'Continued from ' + inv.continued_from;
+                        info.appendChild(cont);
+                    }
                     row.appendChild(info);
                     var actions = document.createElement('div');
                     actions.className = 'inv-actions';
@@ -1477,6 +1601,47 @@
                     row.appendChild(actions);
                     list.appendChild(row);
                 });
+                updateMergeBar();
+            });
+    }
+
+    /* Merge saved scans */
+    function updateMergeBar() {
+        var picked = document.querySelectorAll('.merge-pick:checked');
+        var bar = document.getElementById('merge-bar');
+        var label = document.getElementById('merge-count');
+        if (!bar) return;
+        bar.style.display = picked.length >= 2 ? 'flex' : 'none';
+        if (label) label.textContent = picked.length + ' scans selected';
+    }
+
+    function mergeSelectedScans() {
+        var picked = Array.prototype.map.call(
+            document.querySelectorAll('.merge-pick:checked'),
+            function(el) { return el.value; });
+        if (picked.length < 2) return;
+
+        var btn = document.getElementById('merge-btn');
+        btn.disabled = true;
+        btn.textContent = 'Merging...';
+
+        fetch('/inventories/merge', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filenames: picked })
+        })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                btn.disabled = false;
+                btn.textContent = 'Merge selected';
+                if (data.error) { alert('Merge failed: ' + data.error); return; }
+                loadInventoryList();
+                loadScan(data.filename);
+            })
+            .catch(function(err) {
+                btn.disabled = false;
+                btn.textContent = 'Merge selected';
+                alert('Merge failed: ' + err.message);
             });
     }
 
