@@ -5,7 +5,7 @@ ROUTES = """flags: A:active, ?:loose, C:connect, H:host, S:static, ~:internal, R
 VIRTUAL ROUTER: default (id 1)
   ==========
 destination         nexthop         metric flags   age     interface         next-AS
-0.0.0.0/0           12.202.247.1    10     A S             ethernet1/1
+0.0.0.0/0           203.0.113.1    10     A S             ethernet1/1
 10.1.0.0/16         10.1.1.2        10     A B             ethernet1/2       65001
 172.21.0.0/24       0.0.0.0         0      A C             ethernet1/3
 172.21.0.10/32      0.0.0.0         0      A H             ethernet1/3
@@ -19,7 +19,7 @@ LLDP_BLOCKS = """LLDP neighbors:
 Interface: ethernet1/1
   Chassis ID: 00:1b:17:aa:bb:cc  (MAC address)
   Port ID: GigabitEthernet1/0/24  (Interface name)
-  System Name: DCN5K-8A
+  System Name: N5K-8A
   System Description: Cisco Nexus Operating System
   Management Address: 172.21.0.20
   System Capabilities: Bridge, Router
@@ -27,12 +27,12 @@ Interface: ethernet1/1
 Interface: ethernet1/2
   Chassis ID: 00:1b:17:dd:ee:ff  (MAC address)
   Port ID: Ethernet1/5  (Interface name)
-  System Name: DCN5K-8B
+  System Name: N5K-8B
 """
 
 LLDP_TABLE = """Local Interface   Remote Chassis ID     Port ID          System Name
-ethernet1/1       00:1b:17:aa:bb:cc     Gi1/0/24         DCN5K-8A
-ethernet1/2       00:1b:17:dd:ee:ff     Eth1/5           DCN5K-8B
+ethernet1/1       00:1b:17:aa:bb:cc     Gi1/0/24         N5K-8A
+ethernet1/2       00:1b:17:dd:ee:ff     Eth1/5           N5K-8B
 """
 
 
@@ -44,7 +44,7 @@ def test_parses_all_routes():
 def test_default_route_carries_nexthop_and_interface():
     route = [r for r in parse_routes(ROUTES) if r["network"] == "0.0.0.0"][0]
     assert route["prefix_length"] == "0"
-    assert route["nexthop_ip"] == "12.202.247.1"
+    assert route["nexthop_ip"] == "203.0.113.1"
     assert route["interface"] == "ethernet1/1"
     assert route["protocol"] == "static"
 
@@ -84,7 +84,7 @@ def test_lldp_block_format_gives_both_port_names():
     first = neighbors[0]
     assert first["local_intf"] == "ethernet1/1"
     assert first["remote_intf"] == "GigabitEthernet1/0/24"
-    assert first["remote_device"] == "DCN5K-8A"
+    assert first["remote_device"] == "N5K-8A"
     assert first["remote_ip"] == "172.21.0.20"
 
 
@@ -99,7 +99,7 @@ def test_lldp_table_format():
     assert len(neighbors) == 2
     assert neighbors[0]["local_intf"] == "ethernet1/1"
     assert neighbors[0]["remote_intf"] == "Gi1/0/24"
-    assert neighbors[0]["remote_device"] == "DCN5K-8A"
+    assert neighbors[0]["remote_device"] == "N5K-8A"
 
 
 def test_lldp_header_not_parsed_as_neighbour():

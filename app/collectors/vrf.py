@@ -7,6 +7,7 @@ import logging
 import re
 
 from .base import BaseCollector, split_command_errors
+from .errors import send_failure_output
 
 try:
     from app.parsers import parse_arp_table
@@ -242,8 +243,8 @@ class VrfCollector(BaseCollector):
         for cmd in cmds:
             try:
                 raw_outputs[cmd] = connection.send_command(cmd)
-            except Exception:
-                raw_outputs[cmd] = ""
+            except Exception as e:
+                raw_outputs[cmd] = send_failure_output(e)
 
         # Parse VRF names from phase 1. A rejected "show ip vrf" must not
         # yield VRF names, or phase 2 fires commands at VRFs like "%".
@@ -267,9 +268,9 @@ class VrfCollector(BaseCollector):
             for cmd in (route_cmd, arp_cmd):
                 try:
                     raw_outputs[cmd] = connection.send_command(cmd)
-                except Exception:
+                except Exception as e:
                     logger.debug(f"VRF command failed: {cmd}")
-                    raw_outputs[cmd] = ""
+                    raw_outputs[cmd] = send_failure_output(e)
 
         return {"raw": raw_outputs,
                 "parsed": self.parse_collected(raw_outputs, device_type)}

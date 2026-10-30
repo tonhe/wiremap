@@ -18,7 +18,53 @@ def _as_text(value):
     return str(value) if value else ""
 
 
-def extract_device_facts(parsed) -> dict:
+_CHASSIS_NAMES = ("chassis", "switch 1", "switch1", "1")
+
+
+def _inventory_model(inventory):
+    """Chassis PID from show inventory: the chassis or first stack member,
+    then a stack entry, then the first entry that has a PID at all."""
+    rows = [_normalize_keys(r) for r in inventory or [] if isinstance(r, dict)]
+    rows = [r for r in rows if str(r.get("pid") or "").strip()]
+
+    def pid(row):
+        return str(row["pid"]).strip()
+
+    for row in rows:
+        name = str(row.get("name") or "").strip().lower()
+        if name in _CHASSIS_NAMES or name.startswith("chassis"):
+            return pid(row)
+    for row in rows:
+        name = str(row.get("name") or "").lower()
+        descr = str(row.get("descr") or row.get("description") or "").lower()
+        if "stack" in name or "chassis" in descr:
+            return pid(row)
+    return pid(rows[0]) if rows else ""
+
+
+def _platform_model(platform):
+    """Model from a CDP/LLDP platform string such as 'cisco WS-C2960X-48FPD-L'."""
+    text = _as_text(platform).strip()
+    if text.lower().startswith("cisco "):
+        text = text[6:].strip()
+    return text
+
+
+def extract_device_facts(parsed, platform_hint=None) -> dict:
+    """Serial, software version and model.
+
+    The model falls back from the show version template, to the collector's
+    own reading of show version (stack table, processor line, Model number),
+    to the show inventory chassis PID, to platform_hint: the CDP/LLDP
+    platform the device was discovered with.
+    """
+    facts = _extract_facts(parsed)
+    if not facts["model"] and platform_hint:
+        facts["model"] = _platform_model(platform_hint)
+    return facts
+
+
+def _extract_facts(parsed):
     facts = {"serial": "", "software_version": "", "model": ""}
     if not parsed or parsed.get("collector_failed"):
         return facts
@@ -40,6 +86,11 @@ def extract_device_facts(parsed) -> dict:
         if isinstance(inv_list, list) and inv_list:
             vi = _normalize_keys(inv_list[0])
             facts["serial"] = _as_text(vi.get("sn") or vi.get("serial_number"))
+
+    if not facts["model"]:
+        own = parsed.get("version_details") or {}
+        facts["model"] = (_as_text(own.get("model"))
+                          or _inventory_model(parsed.get("inventory")))
 
     return facts
 

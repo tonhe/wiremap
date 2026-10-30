@@ -15,7 +15,10 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from .base import BaseReport
-from .findings import CRITICAL, WARNING, INFO, make_finding, overfire_check
+from .findings import (
+    CRITICAL, WARNING, INFO, AGGREGATE_HEADERS, DETAIL_SHEET,
+    make_finding, overfire_check, aggregate_rows, summary_count_rows,
+)
 from .neighbor_lookup import neighbors_by_interface
 
 try:
@@ -671,39 +674,10 @@ def _build_summary_sheet(wb, analysis, inventory_data):
     device_count = len(inventory_data.get("devices", {}))
     vlan_count = len(analysis.get("vlans", {}))
 
-    # Categorize findings by severity
-    critical = 0
-    warning = 0
-    info = 0
-    for finding in analysis.get("findings", []):
-        sev = finding.get("severity", "")
-        if sev:
-            if sev == "Critical":
-                critical += 1
-            elif sev == "Warning":
-                warning += 1
-            else:
-                info += 1
-        else:
-            # Categorize by title keywords
-            title = finding.get("title", "").lower()
-            if "mismatch" in title:
-                critical += 1
-            elif any(kw in title for kw in [
-                "blk", "bkn", "default stp", "subnet",
-                "bpdu", "storm", "trunk", "topology",
-            ]):
-                warning += 1
-            else:
-                info += 1
-
     metrics = [
         ("Device Count", device_count),
         ("VLAN Count", vlan_count),
-        ("Critical Findings", critical),
-        ("Warning Findings", warning),
-        ("Info Findings", info),
-    ]
+    ] + [tuple(r) for r in summary_count_rows(analysis.get("findings", []))]
 
     row = 2
     for metric, value in metrics:
@@ -868,31 +842,43 @@ def _build_vlan_sheet(ws, analysis, inventory_data):
     ws.freeze_panes = "A2"
 
 
-def _build_findings_sheet(ws, analysis):
-    """Findings sheet -- Hostname, Site/Location, Port, Notes, Severity."""
-    findings = analysis["findings"]
+_FINDINGS_DETAIL_HEADERS = ["Hostname", "Site/Location", "Port", "Notes", "Severity"]
 
-    headers = ["Hostname", "Site/Location", "Port", "Notes", "Severity"]
+
+def _findings_detail_rows(findings):
+    if not findings:
+        return [["No findings detected.", "", "", "", ""]]
+    return [[f.get("hostname", ""), _derive_site(f.get("hostname", "")),
+             f["title"], f["description"], f.get("severity", "")]
+            for f in findings]
+
+
+def _write_findings_table(ws, table_name, headers, rows, wrap_col):
     _write_header_row(ws, headers, row=1)
-
+    if not rows:
+        rows = [["No findings detected."] + [""] * (len(headers) - 1)]
     row = 2
-    if findings:
-        for finding in findings:
-            hostname = finding.get("hostname", "")
-            ws.cell(row=row, column=1, value=hostname)
-            ws.cell(row=row, column=2, value=_derive_site(hostname))
-            ws.cell(row=row, column=3, value=finding["title"])
-            cell = ws.cell(row=row, column=4, value=finding["description"])
-            cell.alignment = _WRAP_ALIGN
-            ws.cell(row=row, column=5, value=finding.get("severity", ""))
-            row += 1
-    else:
-        ws.cell(row=row, column=1, value="No findings detected.")
+    for values in rows:
+        for col, value in enumerate(values, 1):
+            cell = ws.cell(row=row, column=col, value=value)
+            if col == wrap_col:
+                cell.alignment = _WRAP_ALIGN
         row += 1
-
-    _add_table(ws, "Findings", len(headers), row - 1)
+    _add_table(ws, table_name, len(headers), row - 1)
     _auto_width(ws)
     ws.freeze_panes = "A2"
+
+
+def _build_findings_sheet(ws, analysis):
+    """Findings sheet -- one row per distinct finding with its device count."""
+    _write_findings_table(ws, "Findings", AGGREGATE_HEADERS,
+                          aggregate_rows(analysis["findings"]), 3)
+
+
+def _build_findings_detail_sheet(ws, analysis):
+    """Findings (detail) -- Hostname, Site/Location, Port, Notes, Severity."""
+    _write_findings_table(ws, "FindingsDetail", _FINDINGS_DETAIL_HEADERS,
+                          _findings_detail_rows(analysis["findings"]), 4)
 
 
 def _build_root_bridge_sheet(ws, analysis):
@@ -1145,6 +1131,7 @@ class L2DiscoveryReport(BaseReport):
         # Sheet 3: Findings (always)
         ws3 = wb.create_sheet(title="Findings")
         _build_findings_sheet(ws3, analysis)
+        _build_findings_detail_sheet(wb.create_sheet(title=DETAIL_SHEET), analysis)
 
         # Sheet 4: Root Bridge IDs (always)
         ws4 = wb.create_sheet(title="Root Bridge IDs")
@@ -1174,38 +1161,11 @@ class L2DiscoveryReport(BaseReport):
         device_count = len(inventory_data.get("devices", {}))
         vlan_count = len(analysis.get("vlans", {}))
 
-        critical = 0
-        warning = 0
-        info = 0
-        for finding in analysis.get("findings", []):
-            sev = finding.get("severity", "")
-            if sev:
-                if sev == "Critical":
-                    critical += 1
-                elif sev == "Warning":
-                    warning += 1
-                else:
-                    info += 1
-            else:
-                title = finding.get("title", "").lower()
-                if "mismatch" in title:
-                    critical += 1
-                elif any(kw in title for kw in [
-                    "blk", "bkn", "default stp", "subnet",
-                    "bpdu", "storm", "trunk", "topology",
-                ]):
-                    warning += 1
-                else:
-                    info += 1
-
         summary_headers = ["Metric", "Value"]
         summary_rows = [
             ["Device Count", device_count],
             ["VLAN Count", vlan_count],
-            ["Critical Findings", critical],
-            ["Warning Findings", warning],
-            ["Info Findings", info],
-        ]
+        ] + summary_count_rows(analysis.get("findings", []))
         sheets["Summary"] = (summary_headers, summary_rows)
 
         # ---- VLAN Documentation sheet ----
@@ -1333,22 +1293,12 @@ class L2DiscoveryReport(BaseReport):
             ])
         sheets["VLAN Documentation"] = (vlan_headers, vlan_rows)
 
-        # ---- Findings sheet ----
-        findings_headers = ["Hostname", "Site/Location", "Port", "Notes", "Severity"]
-        findings_rows = []
-        if analysis["findings"]:
-            for finding in analysis["findings"]:
-                hostname = finding.get("hostname", "")
-                findings_rows.append([
-                    hostname,
-                    _derive_site(hostname),
-                    finding["title"],
-                    finding["description"],
-                    finding.get("severity", ""),
-                ])
-        else:
-            findings_rows.append(["No findings detected.", "", "", "", ""])
-        sheets["Findings"] = (findings_headers, findings_rows)
+        # ---- Findings (aggregated) and Findings (detail) sheets ----
+        sheets["Findings"] = (list(AGGREGATE_HEADERS),
+                              aggregate_rows(analysis["findings"])
+                              or [["No findings detected.", "", "", "", ""]])
+        sheets[DETAIL_SHEET] = (list(_FINDINGS_DETAIL_HEADERS),
+                                _findings_detail_rows(analysis["findings"]))
 
         # ---- Root Bridge IDs sheet ----
         rb_headers = ["Hostname", "Site/Location", "Root Bridge ID"]

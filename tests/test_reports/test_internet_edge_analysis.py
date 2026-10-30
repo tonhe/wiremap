@@ -266,3 +266,46 @@ def test_overfire_note_when_check_hits_most_devices():
     findings = _analyze_edge(_inv(*devices))["findings"]
     meta = [f for f in findings if f["type"] == OVERFIRE_TYPE]
     assert [m["about"] for m in meta] == ["Unreferenced ACL"]
+
+
+# --- aggregated findings (#26) ------------------------------------------
+
+def test_template_acl_unreferenced_everywhere_is_one_row():
+    devices = [_device(f"SW{i}", config="hostname x\n",
+                       acls=[_acl("ACL-TEMPLATE-REDIRECT")] * (1 + i % 2))
+               for i in range(1, 13)]
+    inv = _inv(*devices)
+    sheets = InternetEdgeReport().generate_tabular_data(inv)
+    headers, rows = sheets["Findings"]
+    assert headers == ["Severity", "Finding", "Details", "Device count", "Devices"]
+    unref = [r for r in rows if r[1] == "Unreferenced ACL"]
+    assert len(unref) == 1
+    assert unref[0][3] == 12
+    assert unref[0][4].endswith(", +2 more")
+    assert "ACL-TEMPLATE-REDIRECT" in unref[0][2]
+    # the over-fire note stays on the aggregated sheet
+    assert any(r[1].startswith("Check may be miscalibrated") for r in rows)
+    # per-device rows move to the detail sheet
+    dheaders, drows = sheets["Findings (detail)"]
+    assert dheaders == ["Device", "Site/Location", "Severity", "Finding", "Details"]
+    assert sum(1 for r in drows if r[3] == "Unreferenced ACL") >= 12
+    summary = dict(sheets["Summary"][1])
+    assert summary["Info Findings (distinct)"] == len(
+        [r for r in rows if r[0] == "Info"])
+
+
+def test_findings_xlsx_matches_tabular():
+    devices = [_device(f"SW{i}", config="hostname x\n",
+                       acls=[_acl("ACL-TEMPLATE-REDIRECT")])
+               for i in range(1, 5)]
+    inv = _inv(*devices)
+    report = InternetEdgeReport()
+    sheets = report.generate_tabular_data(inv)
+    wb = load_workbook(io.BytesIO(report.generate(inv)))
+    for name in ("Findings", "Findings (detail)"):
+        ws = wb[name]
+        headers, rows = sheets[name]
+        got = [["" if c.value is None else c.value for c in r]
+               for r in ws.iter_rows(min_row=1)]
+        assert got[0] == headers
+        assert got[1:] == rows

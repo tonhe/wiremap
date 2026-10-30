@@ -364,6 +364,31 @@ def test_targeted_scan_accepts_upload_alone(client, monkeypatch):
     assert scan.engine_kwargs["target_hosts"] == [("192.0.2.30", None)]
 
 
+def test_targeted_scan_records_uploaded_filename(client, monkeypatch):
+    import io
+    scan = _CapturedScan(monkeypatch)
+    resp = client.post("/scan/start", content_type="multipart/form-data", data=dict(
+        TARGETED, host_file=(io.BytesIO(b"192.0.2.31\n"), "site-a-hosts.txt")))
+    assert resp.status_code == 200
+    assert scan.engine_kwargs["target_resolution"]["targets_file"] == "site-a-hosts.txt"
+
+
+def test_pasted_target_list_has_no_targets_file(client, monkeypatch):
+    scan = _CapturedScan(monkeypatch)
+    resp = client.post("/scan/start", data=dict(TARGETED, host_list="192.0.2.32"))
+    assert resp.status_code == 200
+    assert scan.engine_kwargs["target_resolution"]["targets_file"] is None
+
+
+def test_expand_non_cdp_setting_reaches_the_engine(client, monkeypatch):
+    scan = _CapturedScan(monkeypatch)
+    monkeypatch.setattr(app_module, "get_discovery_settings",
+                        lambda: {"expand_non_cdp_neighbors": True})
+    resp = client.post("/scan/start", data=dict(TARGETED, host_list="192.0.2.33"))
+    assert resp.status_code == 200
+    assert scan.engine_kwargs["expand_non_cdp_neighbors"] is True
+
+
 def test_targeted_scan_upload_errors_name_the_file(client, monkeypatch):
     import io
     _CapturedScan(monkeypatch)
@@ -419,3 +444,55 @@ def test_settings_ui_has_login_rate_control(client):
     body = client.get('/').get_data(as_text=True)
     assert 'id="settings-max-logins"' in body
     assert "source_access_warning" in body
+
+
+def test_scan_source_ip_from_form_overrides_setting(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_module, 'DEFAULT_CONFIG_DIR', str(tmp_path))
+    settings_module.save_discovery_settings({"source_ip": "198.51.100.20"},
+                                            config_dir=str(tmp_path))
+    scan = _CapturedScan(monkeypatch)
+    resp = client.post("/scan/start", data=dict(TARGETED, host_list="192.0.2.1"))
+    assert resp.status_code == 200
+    assert scan.engine_kwargs["source_ip"] == "198.51.100.20"
+    resp = client.post("/scan/start", data=dict(
+        TARGETED, host_list="192.0.2.1", source_ip="192.0.2.50"))
+    assert resp.status_code == 200
+    assert scan.engine_kwargs["source_ip"] == "192.0.2.50"
+
+
+def test_scan_without_source_ip_leaves_it_to_the_seed(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_module, 'DEFAULT_CONFIG_DIR', str(tmp_path))
+    scan = _CapturedScan(monkeypatch)
+    resp = client.post("/scan/start", data=dict(TARGETED, host_list="192.0.2.1"))
+    assert resp.status_code == 200
+    assert scan.engine_kwargs["source_ip"] is None
+
+
+def test_scan_rejects_a_bad_source_ip(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_module, 'DEFAULT_CONFIG_DIR', str(tmp_path))
+    _CapturedScan(monkeypatch)
+    resp = client.post("/scan/start", data=dict(
+        TARGETED, host_list="192.0.2.1", source_ip="192.0.2.0/24"))
+    assert resp.status_code == 400
+    assert "Source IP" in resp.get_json()["error"]
+
+
+def test_source_ip_setting_saved_and_validated(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_module, 'DEFAULT_CONFIG_DIR', str(tmp_path))
+    assert client.get('/api/settings/discovery').get_json()["source_ip"] == ""
+    rv = client.post('/api/settings/discovery', json={"source_ip": " 192.0.2.50 "})
+    assert rv.get_json()["source_ip"] == "192.0.2.50"
+    rv = client.post('/api/settings/discovery', json={"source_ip": "not-an-ip"})
+    assert rv.status_code == 400
+    rv = client.post('/api/settings/discovery', json={"source_ip": ""})
+    assert rv.get_json()["source_ip"] == ""
+
+
+def test_ui_has_source_ip_fields_and_console_line(client):
+    _point_at_repo_templates()
+    body = client.get('/').get_data(as_text=True)
+    assert 'id="settings-source-ip"' in body
+    assert 'id="disc_source_ip"' in body
+    assert 'id="ts_source_ip"' in body
+    assert "addEventListener('source_access'" in body
+    assert "source_access_line" in body

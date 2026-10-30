@@ -10,7 +10,8 @@ def test_get_discovery_settings_defaults(tmp_path):
     assert settings == {"max_workers": 10, "disable_autodetect": False,
                         "site_rules": [], "redact_secrets": True,
                         "collect_controller_managed": False,
-                        "max_logins_per_minute": 0}
+                        "max_logins_per_minute": 0,
+                        "allow_telnet": False, "source_ip": "", "expand_non_cdp_neighbors": False}
 
 
 def test_save_and_load_discovery_settings(tmp_path):
@@ -38,7 +39,8 @@ def test_save_ignores_unknown_keys(tmp_path):
     assert settings == {"max_workers": 8, "disable_autodetect": False,
                         "site_rules": [], "redact_secrets": True,
                         "collect_controller_managed": False,
-                        "max_logins_per_minute": 0}
+                        "max_logins_per_minute": 0,
+                        "allow_telnet": False, "source_ip": "", "expand_non_cdp_neighbors": False}
 
 
 def test_disable_autodetect_default(tmp_path):
@@ -82,7 +84,8 @@ def test_partial_save_keeps_other_settings(tmp_path):
     assert settings == {"max_workers": 7, "disable_autodetect": True,
                         "redact_secrets": False, "site_rules": [],
                         "collect_controller_managed": False,
-                        "max_logins_per_minute": 0}
+                        "max_logins_per_minute": 0,
+                        "allow_telnet": False, "source_ip": "", "expand_non_cdp_neighbors": False}
 def test_collect_controller_managed_defaults_off(tmp_path):
     from app.settings import get_discovery_settings
     settings = get_discovery_settings(config_dir=str(tmp_path))

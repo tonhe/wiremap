@@ -225,7 +225,8 @@ def test_legacy_crypto_failure_skips_other_types_then_telnet(handler):
             raise ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")
         raise IncompatiblePeer("Incompatible ssh peer (no acceptable kex algorithm)")
     calls = handler(fn)
-    cm = ConnectionManager("192.0.2.10", "cisco_ios", "u", "p", protocol="auto")
+    cm = ConnectionManager("192.0.2.10", "cisco_ios", "u", "p", protocol="auto",
+                           allow_telnet=True)
     with pytest.raises(WiremapConnectionError) as exc:
         cm.connect()
     ssh_calls = [c for c in calls if not c["device_type"].endswith("_telnet")]
@@ -236,7 +237,8 @@ def test_legacy_crypto_failure_skips_other_types_then_telnet(handler):
 
 def test_refused_on_nxos_does_not_try_telnet(handler):
     calls = handler(lambda **p: (_ for _ in ()).throw(_refused()))
-    cm = ConnectionManager("192.0.2.10", "cisco_nxos", "u", "p", protocol="auto")
+    cm = ConnectionManager("192.0.2.10", "cisco_nxos", "u", "p", protocol="auto",
+                           allow_telnet=True)
     with pytest.raises(WiremapConnectionError) as exc:
         cm.connect()
     assert [c["device_type"] for c in calls] == ["cisco_nxos"]
@@ -248,7 +250,7 @@ def test_refused_on_nxos_does_not_try_telnet(handler):
 def test_refused_on_c9k_platform_does_not_try_telnet(handler):
     calls = handler(lambda **p: (_ for _ in ()).throw(_refused()))
     cm = ConnectionManager("192.0.2.10", "cisco_ios", "u", "p", protocol="auto",
-                           platform="cisco C9300-48P")
+                           platform="cisco C9300-48P", allow_telnet=True)
     with pytest.raises(WiremapConnectionError):
         cm.connect()
     assert all(not c["device_type"].endswith("_telnet") for c in calls)
@@ -257,7 +259,7 @@ def test_refused_on_c9k_platform_does_not_try_telnet(handler):
 def test_refused_on_classic_ios_still_tries_telnet(handler):
     calls = handler(lambda **p: (_ for _ in ()).throw(_refused()))
     cm = ConnectionManager("192.0.2.10", "cisco_ios", "u", "p", protocol="auto",
-                           platform="cisco WS-C2960X-48FPD-L")
+                           platform="cisco WS-C2960X-48FPD-L", allow_telnet=True)
     with pytest.raises(WiremapConnectionError) as exc:
         cm.connect()
     assert [c["device_type"] for c in calls] == ["cisco_ios", "cisco_ios_telnet"]
@@ -270,7 +272,8 @@ def test_telnet_auth_failure_reports_auth(handler):
             raise NetmikoAuthenticationException("bad login")
         raise NetmikoTimeoutException("timed out")
     handler(fn)
-    cm = ConnectionManager("192.0.2.10", "cisco_ios", "u", "p", protocol="auto")
+    cm = ConnectionManager("192.0.2.10", "cisco_ios", "u", "p", protocol="auto",
+                           allow_telnet=True)
     with pytest.raises(WiremapConnectionError) as exc:
         cm.connect()
     # telnet auth raises straight away with reason auth -- the device was

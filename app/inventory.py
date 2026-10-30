@@ -9,9 +9,9 @@ import threading
 from datetime import datetime, timezone
 
 try:
-    from app.failures import failure_record, reason_counts  # noqa: F401
+    from app.failures import failure_record, reason_counts, plain_failures  # noqa: F401
 except ImportError:
-    from failures import failure_record, reason_counts  # noqa: F401
+    from failures import failure_record, reason_counts, plain_failures  # noqa: F401
 
 
 class DiscoveryInventory:
@@ -62,10 +62,16 @@ class DiscoveryInventory:
         A continuation skips these and retries everything else, so devices
         that failed last time are attempted again without being asked for.
         """
-        return {
-            dev["mgmt_ip"] for dev in self._data.get("devices", {}).values()
-            if dev.get("login_succeeded") and dev.get("mgmt_ip")
-        }
+        # mgmt_ip may be a loopback chosen after the login, so the address
+        # actually logged into counts as collected too.
+        ips = set()
+        for dev in self._data.get("devices", {}).values():
+            if not dev.get("login_succeeded"):
+                continue
+            for field in ("mgmt_ip", "reached_ip"):
+                if dev.get(field):
+                    ips.add(dev[field])
+        return ips
 
     def collected_hostnames(self) -> set:
         try:
@@ -140,11 +146,14 @@ class DiscoveryInventory:
         failed maps IP -> failure record (see app.failures.failure_record;
         older scans hold a plain string). skipped maps IP -> controller-
         managed device not logged into on purpose, which is not a failure.
+        A failure record whose SNMP fallback answered stays in failed (it
+        says why there is no CLI data) but is not counted in failed_count.
         """
         skipped = skipped or {}
         self._data["scan_summary"] = {
             "elapsed": elapsed,
-            "failed_count": len(failed),
+            "failed_count": len(plain_failures(failed)),
+            "snmp_collected_count": len(failed) - len(plain_failures(failed)),
             "failed": failed,
             "failure_reasons": reason_counts(failed),
             "skipped_count": len(skipped),
@@ -174,6 +183,9 @@ class DiscoveryInventory:
             "skipped_count": stored.get("skipped_count",
                                         len(stored.get("skipped") or {})),
             "source_ip": stored.get("source_ip"),
+            "source_ip_method": stored.get("source_ip_method"),
+            "source_access": stored.get("source_access"),
+            "source_access_line": stored.get("source_access_line"),
             "source_access_warnings": list(
                 stored.get("source_access_warnings") or []),
             "refused_hint": stored.get("refused_hint"),
@@ -276,6 +288,66 @@ class DiscoveryInventory:
                 if value:
                     dev[field] = value
 
+    def set_collected_role(self, hostname, device_type=None,
+                           device_category=None):
+        """Overwrite type and category with what the device itself reported.
+
+        add_device only fills empty fields, so the first neighbour's guess
+        would otherwise outlive the login that proved it wrong.
+        """
+        with self._lock:
+            dev = self._data["devices"].get(hostname)
+            if dev is None:
+                return
+            if device_type:
+                dev["device_type"] = device_type
+            if device_category:
+                dev["device_category"] = device_category
+
+    def set_reached_ip(self, hostname, ip):
+        """Record the address a login actually succeeded on."""
+        with self._lock:
+            dev = self._data["devices"].get(hostname)
+            if dev is not None and ip:
+                dev["reached_ip"] = ip
+
+    def set_neighbour_serial(self, hostname, serial):
+        """Keep a serial a neighbour advertised in its CDP Device ID.
+
+        It fills serial only while that is empty; cdp_serial always holds
+        what was advertised, so a later collected serial never loses it.
+        """
+        if not serial:
+            return
+        with self._lock:
+            dev = self._data["devices"].get(hostname)
+            if dev is None:
+                return
+            dev["cdp_serial"] = serial
+            if not dev.get("serial"):
+                dev["serial"] = serial
+
+    def resolve_mgmt_ips(self):
+        """Settle every logged-in device's mgmt_ip by identity.resolve_mgmt_ip.
+
+        Run once neighbours have all been seen, since the advertised address
+        rule needs every sighting of the device, not only those made before
+        it was logged into.
+        """
+        try:
+            from app.identity import resolve_mgmt_ip
+        except ImportError:
+            from identity import resolve_mgmt_ip
+
+        with self._lock:
+            for dev in self._data["devices"].values():
+                if not dev.get("login_succeeded"):
+                    continue
+                ip, source = resolve_mgmt_ip(dev)
+                if ip:
+                    dev["mgmt_ip"] = ip
+                    dev["mgmt_ip_source"] = source
+
     def mark_login_failed(self, hostname, error):
         with self._lock:
             dev = self._data["devices"].get(hostname)
@@ -293,17 +365,25 @@ class DiscoveryInventory:
                     dev["login_error"] = error
                     return
 
-    def add_evidence(self, hostname, source, seen_from, remote_port=None):
-        """Record that seen_from saw this device via source."""
+    def add_evidence(self, hostname, source, seen_from, remote_port=None,
+                     mgmt_address=None):
+        """Record that seen_from saw this device via source.
+
+        mgmt_address is the management address the device advertised to
+        seen_from, when the protocol carried one.
+        """
         with self._lock:
             dev = self._data["devices"].get(hostname)
             if dev is None:
                 return
-            dev.setdefault("evidence", []).append({
+            entry = {
                 "source": source,
                 "seen_from": seen_from,
                 "remote_port": remote_port,
-            })
+            }
+            if mgmt_address:
+                entry["mgmt_address"] = mgmt_address
+            dev.setdefault("evidence", []).append(entry)
 
     def set_snmp_facts(self, hostname, record):
         """Record what SNMP could tell us about a device we could not log into.
@@ -371,9 +451,9 @@ class DiscoveryInventory:
         key takes precedence over the hostname key.
         """
         try:
-            from app.identity import normalize_hostname
+            from app.identity import normalize_hostname, collected_serial
         except ImportError:
-            from identity import normalize_hostname
+            from identity import normalize_hostname, collected_serial
 
         with self._lock:
             devices = self._data["devices"]
@@ -415,7 +495,7 @@ class DiscoveryInventory:
             for names in by_host.values():
                 if len(names) < 2:
                     continue
-                distinct = {(devices[n].get("serial") or "").strip()
+                distinct = {collected_serial(devices[n])
                             for n in names}
                 distinct.discard("")
                 if len(distinct) > 1:

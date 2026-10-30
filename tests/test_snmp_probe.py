@@ -142,7 +142,7 @@ def test_probe_fills_model_and_serial_from_entity_mib(monkeypatch):
     """PAN-OS leaves sysDescr uninformative; ENTITY-MIB carries the facts."""
     import app.snmp_probe as mod
     monkeypatch.setattr(mod, "_snmp_get", lambda *a, **k: {
-        SYS_OIDS["sysName"]: "pa-trmc-mdf-campus-fw01",
+        SYS_OIDS["sysName"]: "pa-mdf-campus-fw01",
         SYS_OIDS["sysDescr"]: "Palo Alto Networks",
     })
     monkeypatch.setattr(mod, "_snmp_walk_first", lambda host, creds, oid, t, p: {
@@ -194,3 +194,95 @@ def test_probe_keeps_sysdescr_version_when_entity_has_none(monkeypatch):
     monkeypatch.setattr(mod, "_snmp_walk_first", lambda *a, **k: None)
     r = probe("10.0.0.1", SnmpCredentials(version="v2c", community="public"))
     assert r["software_version"] == "15.0(2)SE11"
+
+
+# -- per-device outcome --------------------------------------------------
+
+_SYS = {SYS_OIDS["sysName"]: "SW9", SYS_OIDS["sysDescr"]: "Cisco IOS Software"}
+
+
+@pytest.mark.parametrize("creds, expected", [
+    (SnmpCredentials(version="v2c", community="example-ro"), "v2c ok"),
+    (SnmpCredentials(version="v3", username="netops"), "v3 ok"),
+])
+def test_probe_with_outcome_reports_version_on_success(monkeypatch, creds,
+                                                       expected):
+    import app.snmp_probe as mod
+    monkeypatch.setattr(mod, "_snmp_get", lambda *a, **k: dict(_SYS))
+    record, outcome = mod.probe_with_outcome("192.0.2.9", creds)
+    assert record["hostname"] == "SW9"
+    assert outcome == expected
+
+
+def test_probe_with_outcome_without_credentials():
+    import app.snmp_probe as mod
+    assert mod.probe_with_outcome("192.0.2.9", None) == (None, "no credentials")
+    assert mod.probe_with_outcome("192.0.2.9", SnmpCredentials()) == (
+        None, "no credentials")
+
+
+@pytest.mark.parametrize("outcome", ["timeout", "auth/community rejected"])
+def test_probe_with_outcome_passes_query_errors_through(monkeypatch, outcome):
+    import app.snmp_probe as mod
+
+    def fail(*a, **k):
+        raise mod.SnmpQueryError(outcome)
+
+    monkeypatch.setattr(mod, "_snmp_get", fail)
+    creds = SnmpCredentials(version="v3", username="netops")
+    assert mod.probe_with_outcome("192.0.2.9", creds) == (None, outcome)
+
+
+def test_probe_with_outcome_reports_unexpected_errors(monkeypatch):
+    import app.snmp_probe as mod
+
+    def boom(*a, **k):
+        raise OSError("no route to host")
+
+    monkeypatch.setattr(mod, "_snmp_get", boom)
+    creds = SnmpCredentials(version="v2c", community="example-ro")
+    record, outcome = mod.probe_with_outcome("192.0.2.9", creds)
+    assert record is None
+    assert outcome == "error: OSError: no route to host"
+
+
+def test_silent_device_is_a_timeout(monkeypatch):
+    import app.snmp_probe as mod
+    monkeypatch.setattr(mod, "_snmp_get", lambda *a, **k: {})
+    creds = SnmpCredentials(version="v2c", community="example-ro")
+    assert mod.probe_with_outcome("192.0.2.9", creds) == (None, "timeout")
+
+
+def test_classify_snmp_error():
+    from pysnmp.proto import errind
+    from app.snmp_probe import classify_snmp_error
+    assert classify_snmp_error(errind.RequestTimedOut()) == "timeout"
+    assert classify_snmp_error(errind.UnknownUserName()) ==         "auth/community rejected"
+    assert classify_snmp_error(errind.WrongDigest()) == "auth/community rejected"
+    assert classify_snmp_error(errind.DecryptionError()) ==         "auth/community rejected"
+    assert classify_snmp_error(None, "authorizationError") ==         "auth/community rejected"
+    assert classify_snmp_error(None, "genErr") == "error: genErr"
+    assert classify_snmp_error(errind.TooBig()).startswith("error: ")
+
+
+def test_get_raises_instead_of_hiding_why_it_failed(monkeypatch):
+    """An empty dict for every error made a v3 auth rejection look like a
+    dead host."""
+    import asyncio
+    import pysnmp.hlapi.v3arch.asyncio as hlapi
+    from pysnmp.proto import errind
+    import app.snmp_probe as mod
+
+    async def fake_get_cmd(*a, **k):
+        return errind.UnknownUserName(), 0, 0, []
+
+    async def fake_create(*a, **k):
+        return object()
+
+    monkeypatch.setattr(hlapi, "get_cmd", fake_get_cmd)
+    monkeypatch.setattr(hlapi.UdpTransportTarget, "create", fake_create)
+    creds = SnmpCredentials(version="v3", username="netops")
+    with pytest.raises(mod.SnmpQueryError) as exc:
+        asyncio.run(mod._get_async("192.0.2.9", creds,
+                                   [SYS_OIDS["sysName"]], 1, 161))
+    assert exc.value.outcome == "auth/community rejected"

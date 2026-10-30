@@ -18,9 +18,9 @@ import logging
 from datetime import datetime, timezone
 
 try:
-    from app.failures import reason_counts
+    from app.failures import reason_counts, plain_failures
 except ImportError:
-    from failures import reason_counts
+    from failures import reason_counts, plain_failures
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,15 @@ def _norm(hostname):
 
 def _serial(device):
     return (device.get("serial") or "").strip()
+
+
+def _trusted_serial(device):
+    """Serial usable as proof of a distinct chassis (see collected_serial)."""
+    try:
+        from app.identity import collected_serial
+    except ImportError:
+        from identity import collected_serial
+    return collected_serial(device)
 
 
 def _rank(device, timestamp):
@@ -139,6 +148,18 @@ def _merge_group(group):
         })
         _fold(winner, loser)
 
+    # The winner's mgmt_ip is whatever its own scan happened to see first.
+    # With every sighting folded in, choose it by rule instead.
+    if winner.get("login_succeeded"):
+        try:
+            from app.identity import resolve_mgmt_ip
+        except ImportError:
+            from identity import resolve_mgmt_ip
+        ip, source = resolve_mgmt_ip(winner)
+        if ip:
+            winner["mgmt_ip"] = ip
+            winner["mgmt_ip_source"] = source
+
     winner["hostname"] = winner_name
     return winner_name, winner, conflicts
 
@@ -181,7 +202,7 @@ def merge_inventories(inventories: list, filenames: list = None) -> dict:
 
     groups = []
     for host_records in by_host.values():
-        serials = {_serial(d) for _, d, _ in host_records}
+        serials = {_trusted_serial(d) for _, d, _ in host_records}
         serials.discard("")
         if len(serials) <= 1:
             groups.append(host_records)
@@ -190,7 +211,7 @@ def merge_inventories(inventories: list, filenames: list = None) -> dict:
         per_serial = {}
         unknown = []
         for record in host_records:
-            serial = _serial(record[1])
+            serial = _trusted_serial(record[1])
             if serial:
                 per_serial.setdefault(serial, []).append(record)
             else:
@@ -226,8 +247,9 @@ def merge_inventories(inventories: list, filenames: list = None) -> dict:
 
     # Failures carry over, except for devices that were reached somewhere.
     reached = {
-        dev.get("mgmt_ip") for dev in merged_devices.values()
-        if dev.get("login_succeeded") and dev.get("mgmt_ip")
+        dev.get(field) for dev in merged_devices.values()
+        for field in ("mgmt_ip", "reached_ip")
+        if dev.get("login_succeeded") and dev.get(field)
     }
     failed = {}
     skipped = {}
@@ -272,7 +294,7 @@ def merge_inventories(inventories: list, filenames: list = None) -> dict:
         "devices": merged_devices,
         "scan_summary": {
             "elapsed": round(elapsed, 1),
-            "failed_count": len(failed),
+            "failed_count": len(plain_failures(failed)),
             "failed": failed,
             "failure_reasons": reason_counts(failed),
             "skipped_count": len(skipped),

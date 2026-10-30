@@ -383,6 +383,7 @@ def test_public_next_hop_is_not_crawled():
         seed_ip="10.0.0.1", seed_device_type="cisco_ios",
         username="u", password="p", max_depth=1,
         neighbor_sources={"next_hop"},
+        expand_non_cdp_neighbors=True,
         filters={"include_routers": True, "include_switches": True},
     )
     inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
@@ -393,6 +394,7 @@ def test_public_next_hop_is_not_crawled():
     ]})
     next_layer = engine._extract_neighbors(inv, "EDGE1", "10.0.0.1",
                                            "cisco_ios", 0)
+    next_layer += engine._resolve_non_cdp(inv)
     queued = {ip for ip, _ in next_layer}
     assert "10.0.0.9" in queued
     assert "8.8.8.8" not in queued
@@ -407,6 +409,7 @@ def test_allow_list_scope_is_honoured():
         username="u", password="p", max_depth=1,
         neighbor_sources={"next_hop"},
         crawl_scope=CrawlScope(allow_cidrs=["10.1.0.0/16"]),
+        expand_non_cdp_neighbors=True,
         filters={"include_routers": True, "include_switches": True},
     )
     inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
@@ -415,8 +418,8 @@ def test_allow_list_scope_is_honoured():
         {"network": "a", "nexthop_ip": "10.1.2.3"},
         {"network": "b", "nexthop_ip": "10.9.9.9"},
     ]})
-    queued = {ip for ip, _ in engine._extract_neighbors(
-        inv, "EDGE1", "10.0.0.1", "cisco_ios", 0)}
+    engine._extract_neighbors(inv, "EDGE1", "10.0.0.1", "cisco_ios", 0)
+    queued = {ip for ip, _ in engine._resolve_non_cdp(inv)}
     assert queued == {"10.1.2.3"}
 
 
@@ -431,11 +434,15 @@ def test_routing_adjacency_feeds_the_crawl():
     inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
     inv.add_device("CORE1", mgmt_ip="10.0.0.1", discovery_source="login")
     inv.set_collector_data("CORE1", "l3_routing", {}, {"neighbors": [
-        {"remote_ip": "10.0.0.7", "protocol": "OSPF",
+        {"remote_ip": "10.0.0.7", "protocol": "OSPF", "state": "FULL/-",
          "remote_capabilities": "Router"},
     ]})
-    queued = {ip for ip, _ in engine._extract_neighbors(
-        inv, "CORE1", "10.0.0.1", "cisco_ios", 0)}
+    # The peer's ARP entry carries a Cisco OUI, which is what earns it a login.
+    inv.set_collector_data("CORE1", "arp", {}, {"entries": [
+        {"ip": "10.0.0.7", "mac": "00:00:0c:12:34:56", "incomplete": False},
+    ]})
+    engine._extract_neighbors(inv, "CORE1", "10.0.0.1", "cisco_ios", 0)
+    queued = {ip for ip, _ in engine._resolve_non_cdp(inv)}
     assert "10.0.0.7" in queued
 
 
@@ -445,12 +452,12 @@ def test_snmp_fallback_records_identified_device(monkeypatch):
     from app.snmp_probe import SnmpCredentials
     import app.discovery_engine as mod
 
-    monkeypatch.setattr(mod, "snmp_probe", lambda ip, creds: {
+    monkeypatch.setattr(mod, "snmp_probe_outcome", lambda ip, creds: ({
         "hostname": "SW-NOLOGIN", "mgmt_ip": ip, "device_type": "cisco_ios",
         "software_version": "15.0(2)SE11", "sys_descr": "Cisco IOS Software",
         "sys_object_id": "1.3.6.1.4.1.9.1.516", "sys_location": "IDF-3",
         "discovery_source": "snmp", "login_succeeded": False,
-    })
+    }, "v2c ok"))
 
     engine = DiscoveryEngine(
         seed_ip="10.0.0.1", seed_device_type="cisco_ios",
@@ -460,7 +467,7 @@ def test_snmp_fallback_records_identified_device(monkeypatch):
     inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
     ok = engine._snmp_fallback(inv, "10.0.0.50", "ssh/cisco_ios: timeout")
 
-    assert ok is True
+    assert ok == "v2c ok"
     dev = inv.devices["SW-NOLOGIN"]
     assert dev["discovery_source"] == "snmp"
     assert dev["login_succeeded"] is False
@@ -476,7 +483,7 @@ def test_snmp_fallback_noop_without_credentials():
         username="u", password="p", max_depth=0,
     )
     inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
-    assert engine._snmp_fallback(inv, "10.0.0.50", "err") is False
+    assert engine._snmp_fallback(inv, "10.0.0.50", "err") == "no credentials"
     assert inv.devices == {}
 
 
@@ -485,14 +492,15 @@ def test_snmp_fallback_noop_when_device_silent(monkeypatch):
     from app.snmp_probe import SnmpCredentials
     import app.discovery_engine as mod
 
-    monkeypatch.setattr(mod, "snmp_probe", lambda ip, creds: None)
+    monkeypatch.setattr(mod, "snmp_probe_outcome",
+                        lambda ip, creds: (None, "timeout"))
     engine = DiscoveryEngine(
         seed_ip="10.0.0.1", seed_device_type="cisco_ios",
         username="u", password="p", max_depth=0,
         snmp_credentials=SnmpCredentials(version="v2c", community="public"),
     )
     inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
-    assert engine._snmp_fallback(inv, "10.0.0.50", "err") is False
+    assert engine._snmp_fallback(inv, "10.0.0.50", "err") == "timeout"
 
 
 def test_server_nic_is_categorised_not_counted_as_device():
@@ -639,21 +647,21 @@ def test_snmp_fallback_collects_standard_mib_tables(monkeypatch):
     from app.snmp_probe import SnmpCredentials
     import app.discovery_engine as mod
 
-    monkeypatch.setattr(mod, "snmp_probe", lambda ip, creds: {
-        "hostname": "TRMCDVCP-C1", "mgmt_ip": ip,
+    monkeypatch.setattr(mod, "snmp_probe_outcome", lambda ip, creds: ({
+        "hostname": "FW-EDGE-1", "mgmt_ip": ip,
         "device_type": "watchguard_fireware", "software_version": "12.10",
         "model": "M5800", "serial": "ABC123", "sys_descr": "WatchGuard Fireware",
         "sys_object_id": "1.3.6.1.4.1.3097", "sys_location": "DC",
         "discovery_source": "snmp", "login_succeeded": False,
-    })
+    }, "v2c ok"))
     monkeypatch.setattr(mod, "snmp_make_walker", lambda ip, creds: (lambda oid: {}))
     monkeypatch.setattr(mod, "snmp_collect_all", lambda walker: {
         "interfaces": {"interfaces_status": [{"port": "External", "status": "up"}],
                        "ip_interfaces": [{"intf": "External",
-                                          "ipaddr": "12.202.247.129"}],
+                                          "ipaddr": "203.0.113.129"}],
                        "collected_via": "snmp"},
         "l3_routing": {"routes": [{"network": "0.0.0.0",
-                                   "nexthop_ip": "12.202.247.130"}],
+                                   "nexthop_ip": "203.0.113.130"}],
                        "collected_via": "snmp"},
     })
 
@@ -663,14 +671,14 @@ def test_snmp_fallback_collects_standard_mib_tables(monkeypatch):
         snmp_credentials=SnmpCredentials(version="v2c", community="public"),
     )
     inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
-    assert engine._snmp_fallback(inv, "10.254.254.1", "no ssh listener") is True
+    assert engine._snmp_fallback(inv, "192.0.2.254", "no ssh listener") == "v2c ok"
 
-    dev = inv.devices["TRMCDVCP-C1"]
+    dev = inv.devices["FW-EDGE-1"]
     assert dev["login_succeeded"] is False
     assert dev["model"] == "M5800"
     cd = dev["collector_data"]
     assert cd["interfaces"]["parsed"]["interfaces_status"][0]["port"] == "External"
-    assert cd["l3_routing"]["parsed"]["routes"][0]["nexthop_ip"] == "12.202.247.130"
+    assert cd["l3_routing"]["parsed"]["routes"][0]["nexthop_ip"] == "203.0.113.130"
 
 
 def test_snmp_table_failure_keeps_the_identification(monkeypatch):
@@ -679,10 +687,10 @@ def test_snmp_table_failure_keeps_the_identification(monkeypatch):
     from app.snmp_probe import SnmpCredentials
     import app.discovery_engine as mod
 
-    monkeypatch.setattr(mod, "snmp_probe", lambda ip, creds: {
+    monkeypatch.setattr(mod, "snmp_probe_outcome", lambda ip, creds: ({
         "hostname": "FW1", "mgmt_ip": ip, "device_type": "watchguard_fireware",
         "discovery_source": "snmp", "login_succeeded": False,
-    })
+    }, "v2c ok"))
 
     def boom(*a, **k):
         raise OSError("timeout")
@@ -695,7 +703,7 @@ def test_snmp_table_failure_keeps_the_identification(monkeypatch):
         snmp_credentials=SnmpCredentials(version="v2c", community="public"),
     )
     inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
-    assert engine._snmp_fallback(inv, "10.254.254.1", "no ssh") is True
+    assert engine._snmp_fallback(inv, "192.0.2.254", "no ssh") == "v2c ok"
     assert "FW1" in inv.devices
 
 
@@ -759,6 +767,10 @@ def test_target_resolution_recorded_in_scan_summary():
     )
     inv = engine.discover()
     summary = inv.to_dict()["scan_summary"]
-    assert summary["targets"] == resolution["targets"]
+    by_input = {t["input"]: t for t in summary["targets"]}
+    assert by_input["sw1.example.com"]["resolved_ip"] == "192.168.1.1"
+    assert by_input["sw1.example.com"]["outcome"] in ("collected", "failed")
+    assert by_input["gone.example.com"]["outcome"] == "unresolved"
+    assert by_input["gone.example.com"]["reason"] == "not found"
     assert summary["unresolved"] == resolution["unresolved"]
     assert "failed" in summary

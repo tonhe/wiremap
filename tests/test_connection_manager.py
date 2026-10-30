@@ -122,7 +122,7 @@ def test_connect_reports_every_attempt(monkeypatch):
     monkeypatch.setattr(cmod, "_connect_handler", fake_handler)
 
     cm = ConnectionManager("10.0.0.1", "cisco_ios", "u", "p",
-                           protocol="auto", allow_fallback=False)
+                           protocol="auto", allow_fallback=False, allow_telnet=True)
     with pytest.raises(WiremapConnectionError) as exc:
         cm.connect()
 
@@ -145,7 +145,7 @@ def test_connect_records_unsupported_telnet(monkeypatch):
     monkeypatch.setattr(cmod, "_connect_handler", fake_handler)
 
     cm = ConnectionManager("10.0.0.1", "cisco_nxos", "u", "p",
-                           protocol="auto", allow_fallback=False)
+                           protocol="auto", allow_fallback=False, allow_telnet=True)
     with pytest.raises(WiremapConnectionError) as exc:
         cm.connect()
 
@@ -191,7 +191,7 @@ def test_cisco_ios_fallback_never_raises_platform_dump(monkeypatch):
     monkeypatch.setattr(cmod, "_connect_handler", fake_handler)
 
     cm = ConnectionManager("172.21.0.42", "cisco_ios", "u", "p",
-                           protocol="auto", allow_fallback=True)
+                           protocol="auto", allow_fallback=True, allow_telnet=True)
     with pytest.raises(WiremapConnectionError) as exc:
         cm.connect()
 

@@ -6,9 +6,42 @@ and parsing their output.
 from abc import ABC, abstractmethod
 
 try:
-    from app.collectors.errors import error_reason
+    from app.collectors.errors import (
+        error_reason, error_kind, send_failure_output, NOT_APPLICABLE, FAILED)
 except ImportError:
-    from collectors.errors import error_reason
+    from collectors.errors import (
+        error_reason, error_kind, send_failure_output, NOT_APPLICABLE, FAILED)
+
+
+def command_error_kinds(parsed):
+    """Map each rejected command to not_applicable, unauthorized or failed.
+
+    Scans saved before the kinds were recorded are classified again from the
+    stored error line, which is the device's own text.
+    """
+    parsed = parsed or {}
+    kinds = parsed.get("command_error_kinds")
+    if isinstance(kinds, dict):
+        return dict(kinds)
+    return {cmd: error_kind(reason) or FAILED
+            for cmd, reason in (parsed.get("command_errors") or {}).items()}
+
+
+def collector_has_failures(parsed):
+    """True when a collector lost data it should have had.
+
+    A command the platform does not support is not a failure; a timeout, an
+    AAA refusal or a collector that failed without saying why is.
+    """
+    parsed = parsed or {}
+    kinds = command_error_kinds(parsed)
+    if any(kind != NOT_APPLICABLE for kind in kinds.values()):
+        return True
+    if not parsed.get("collector_failed") or kinds:
+        return False
+    # Older scans kept only the first error line of a wholly rejected
+    # collector; a syntax rejection there was never a real failure.
+    return error_kind(parsed.get("collector_error") or "") != NOT_APPLICABLE
 
 
 def split_command_errors(raw_outputs):
@@ -72,8 +105,12 @@ class BaseCollector(ABC):
     # on routers while the rest of the collector still runs.
     switching_commands = frozenset()
 
+    # Routing collectors. Skipped on analog voice gateways, which run IOS
+    # and answer the commands but have no routing worth collecting.
+    routing_only = False
+
     def parse_collected(self, raw_outputs, device_type):
-        """Parse raw outputs, treating CLI error responses as failures.
+        """Parse raw outputs, never parsing a CLI error response as data.
 
         Shared by collect() and the engine's batch path so a rejected
         command is never parsed as data, whichever way it was run.
@@ -82,13 +119,27 @@ class BaseCollector(ABC):
         # Parsing it produces rows like Area="Invalid", Interface="%".
         for_parse, command_errors = split_command_errors(raw_outputs)
         failed = [c for c in raw_outputs if c in command_errors]
+        kinds = {c: error_kind(raw_outputs[c]) for c in failed}
+        detail = {
+            "failed_commands": failed,
+            "command_errors": command_errors,
+            "command_error_kinds": kinds,
+        }
 
         if failed and len(failed) == len(raw_outputs):
+            real = [c for c in failed if kinds[c] != NOT_APPLICABLE]
+            if not real:
+                # Every command was rejected as syntax: the platform simply
+                # does not have this feature, e.g. show ip vrf on LAN Base.
+                return {
+                    "not_applicable": True,
+                    "reason": f"{self.name}: {command_errors[failed[0]]}",
+                    **detail,
+                }
             return {
                 "collector_failed": True,
-                "collector_error": command_errors[failed[0]],
-                "failed_commands": failed,
-                "command_errors": command_errors,
+                "collector_error": command_errors[real[0]],
+                **detail,
             }
 
         # Rejected commands are blanked so a partially successful collector
@@ -96,8 +147,7 @@ class BaseCollector(ABC):
         # so the failure stays diagnosable.
         parsed = self.parse(for_parse, device_type)
         if failed:
-            parsed["failed_commands"] = failed
-            parsed["command_errors"] = command_errors
+            parsed.update(detail)
         return parsed
 
     def collect(self, connection, device_type: str) -> dict:
@@ -120,8 +170,8 @@ class BaseCollector(ABC):
         for cmd in cmds:
             try:
                 raw_outputs[cmd] = connection.send_command(cmd)
-            except Exception:
-                raw_outputs[cmd] = ""
+            except Exception as e:
+                raw_outputs[cmd] = send_failure_output(e)
 
         return {"raw": raw_outputs,
                 "parsed": self.parse_collected(raw_outputs, device_type)}

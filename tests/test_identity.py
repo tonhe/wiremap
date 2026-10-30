@@ -63,28 +63,28 @@ def test_platform_string_is_not_a_mac():
 
 def test_nexus_hostname_pair_normalizes_equal():
     """The 28 duplicate pairs were hostname vs hostname(SERIAL)."""
-    assert normalize_hostname("TRMH-DR-Top-Core2") == \
-        normalize_hostname("TRMH-DR-Top-Core2(FOC1948R0MB)")
+    assert normalize_hostname("CORE-SW-02") == \
+        normalize_hostname("CORE-SW-02(FOC0000X00X)")
 
 
 def test_serial_suffix_before_domain():
     """NX-OS CDP reports device IDs as hostname(serial).domain. Stripping the
     suffix only at end-of-string left it attached, so the CDP sighting never
     grouped with the login record and survived merge as a duplicate."""
-    assert normalize_hostname("DCN5K-5A(SSI16421TNJ).trmc.us") == "dcn5k-5a"
+    assert normalize_hostname("MDS-A(JPG00000000).example.com") == "mds-a"
 
 
 def test_serial_suffix_after_domain():
-    assert normalize_hostname("DCN5K-5A.trmc.us(SSI16421TNJ)") == "dcn5k-5a"
+    assert normalize_hostname("MDS-A.example.com(JPG00000000)") == "mds-a"
 
 
 def test_all_nexus_cdp_forms_agree():
     forms = [
-        "DCN5K-5A",
-        "DCN5K-5A.trmc.us",
-        "DCN5K-5A(SSI16421TNJ)",
-        "DCN5K-5A(SSI16421TNJ).trmc.us",
-        "DCN5K-5A.trmc.us(SSI16421TNJ)",
+        "MDS-A",
+        "MDS-A.example.com",
+        "MDS-A(JPG00000000)",
+        "MDS-A(JPG00000000).example.com",
+        "MDS-A.example.com(JPG00000000)",
     ]
     assert len({normalize_hostname(f) for f in forms}) == 1
 
@@ -116,13 +116,13 @@ def test_detects_intel_and_mellanox_nics():
 def test_real_switches_are_not_flagged():
     from app.identity import looks_like_host_nic
     for name in [
-        "DCN5K-5A",
+        "MDS-A",
         "Cisco Nexus9000 N9K-C93180YC-EX",
         "cisco WS-C3850-48P",
         "Arista DCS-7280SR-48C6",
         "Palo Alto Networks PA-3220",
-        "ANES-Cart-SW25",
-        "AP-1-DC-Row2",
+        "CART-SW25",
+        "AP-1-ROW2",
     ]:
         assert looks_like_host_nic(name) is False, name
 
@@ -147,15 +147,15 @@ def test_parse_prompt_plain_cisco():
 def test_parse_prompt_panos_active():
     """PAN-OS prompts are user@host(state). All three parts matter."""
     from app.identity import parse_device_prompt
-    got = parse_device_prompt("admin@pa-as18-ex-fw01(active)>")
-    assert got["hostname"] == "pa-as18-ex-fw01"
+    got = parse_device_prompt("admin@pa-site1-fw01(active)>")
+    assert got["hostname"] == "pa-site1-fw01"
     assert got["ha_state"] == "active"
 
 
 def test_parse_prompt_panos_passive():
     from app.identity import parse_device_prompt
-    got = parse_device_prompt("admin@pa-as09-ex-fw02(passive)>")
-    assert got["hostname"] == "pa-as09-ex-fw02"
+    got = parse_device_prompt("admin@pa-site2-fw02(passive)>")
+    assert got["hostname"] == "pa-site2-fw02"
     assert got["ha_state"] == "passive"
 
 

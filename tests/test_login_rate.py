@@ -110,7 +110,7 @@ def test_connection_manager_waits_before_every_attempt(monkeypatch):
     monkeypatch.setattr(cmod, "_connect_handler", fail)
     recorder = _Recorder()
     cm = ConnectionManager("192.0.2.10", "cisco_ios", "u", "p",
-                           protocol="auto", allow_fallback=False,
+                           protocol="auto", allow_fallback=False, allow_telnet=True,
                            login_limiter=recorder)
     with pytest.raises(WiremapConnectionError) as exc:
         cm.connect()

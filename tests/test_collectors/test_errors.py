@@ -57,3 +57,17 @@ def test_error_after_echoed_command():
 def test_ospf_topology_symptom():
     """The exact output that produced Area=Invalid, Interface=%, Cost=command."""
     assert is_error_output("% Invalid input detected at '^' marker.") is True
+
+
+def test_long_whitespace_runs_stay_linear():
+    """Every show output passes through the detector; padded tables and
+    blank runs must not make it backtrack quadratically."""
+    import time
+    text = (" " * 50000 + "x\n") + ("\n" * 50000) + ("\t" * 50000 + "y\n")
+    started = time.perf_counter()
+    assert is_error_output(text) is False
+    assert time.perf_counter() - started < 0.5
+
+
+def test_error_on_indented_line_still_detected():
+    assert is_error_output("show ip vrf\n   % Invalid input detected\n") is True

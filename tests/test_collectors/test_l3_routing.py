@@ -99,3 +99,16 @@ def test_parse_protocols_stored_raw(collector):
     raw["show ip protocols"] = "Routing Protocol is ospf 1"
     result = collector.parse(raw, "cisco_ios")
     assert result["ip_protocols_raw"] == "Routing Protocol is ospf 1"
+
+
+def test_ospf_point_to_point_neighbours_are_kept():
+    """Regression: "FULL/  -" split into two columns and the row was lost."""
+    from app.parsers import parse_ospf_neighbors
+    output = (
+        "Neighbor ID     Pri   State           Dead Time   Address         Interface\n"
+        "10.255.0.2        0   FULL/  -        00:00:37    10.0.12.2       GigabitEthernet0/1\n"
+        "10.255.0.3        1   FULL/DR         00:00:39    10.0.13.3       GigabitEthernet0/2\n"
+    )
+    neighbors = parse_ospf_neighbors(output)
+    assert [(n["remote_ip"], n["state"]) for n in neighbors] == [
+        ("10.0.12.2", "FULL/-"), ("10.0.13.3", "FULL/DR")]

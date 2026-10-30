@@ -10,7 +10,7 @@
 
 ### Discovery
 - **SSH, Telnet, or Auto-detect** -- Tries SSH first, falls back to Telnet automatically
-- **Recursive BFS Crawling** -- Discovers neighbors hop-by-hop from a seed device with configurable depth (1-5)
+- **Recursive BFS Crawling** -- Discovers neighbors hop-by-hop from a seed device with configurable depth (0-10, including crawl from targets)
 - **Multi-threaded** -- Parallel device collection with configurable concurrent workers (1-20, default 10), persisted in Settings
 - **Async with Live Progress** -- Scans run in the background with real-time Server-Sent Events (SSE) streaming authentication, fallback, data collection, neighbor discovery, and completion status to a live console panel
 - **Cancellable Scans** -- Cancel a running scan gracefully; in-progress devices finish and partial results are saved
@@ -20,7 +20,7 @@
 - **Loop Prevention** -- Tracks visited devices and enforces depth limits
 - **Multiple Neighbour Sources** -- Crawls from CDP/LLDP, routing adjacencies (OSPF, EIGRP, BGP, IS-IS), HSRP/VRRP peers, and optionally routing next-hops. A device seen by several sources is merged into one record that keeps every sighting
 - **Crawl Boundaries** -- Private address space only by default, with CIDR allow/deny lists and a device ceiling, so next-hop crawling cannot wander into transit or ISP space. Addresses skipped by a boundary are reported, never silently dropped
-- **SNMP Fallback** -- When SSH and Telnet both fail, SNMP v2c or v3 identifies the device and collects interfaces, addressing, routes, ARP and neighbours from the standard MIBs. Reaches gear that never accepts a CLI session, such as firewalls shipped with SSH disabled
+- **SNMP Fallback** -- When a login fails (auth, refused, timeout), SNMP v2c or v3 identifies the device and collects interfaces, addressing, routes, ARP and neighbours from the standard MIBs. Reaches gear that never accepts a CLI session, such as firewalls shipped with SSH disabled
 - **Add to a Previous Scan** -- Continue an earlier scan instead of starting over. Devices already collected are skipped, ones that failed are retried, and results merge into a new scan. The original is never modified
 - **Device Provenance** -- Every device records how it was found (`login`, `cdp_lldp`, `routing_adjacency`, `snmp`, ...), whether login succeeded, and why it failed. A device seen only in a neighbour table is never mistaken for one that was fully collected
 - **Failure Classification** -- Every failed login is classified as timeout, refused, auth, legacy crypto, no telnet driver, or other, with a remediation hint. Reasons show in the scan console and in a Failed Devices sheet. SSH negotiation failures are retried once with legacy key exchange and cipher algorithms
@@ -68,7 +68,7 @@ A dedicated **Reports** tab serves as the single destination for all report gene
 | Report | Formats | Description |
 |--------|---------|-------------|
 | Topology Map | HTML | Interactive D3.js network diagram with color-coded device types |
-| Device Inventory | XLSX, JSON, CSV, XML | Device summary with provenance (discovered via, collection status, failure reason), redundancy (stack, StackWise Virtual, VSS, vPC), uptime, last reload reason, image, license, stack members, modules and line cards. Licenses and Failed Devices sheets |
+| Device Inventory | XLSX, JSON, CSV, XML | Device summary with provenance (discovered via, collection status, failure reason), redundancy (stack, StackWise Virtual, VSS, vPC), uptime, last reload reason, image, license, stack members, modules and line cards. Licenses, Failed Devices (by category, with likely cause) and Not Collected (controller-managed, not attempted) sheets |
 | Link Inventory | XLSX, JSON, CSV, XML | All discovered neighbor links (CDP/LLDP + L3) |
 | L2/L3 Diagram Data | XLSX, JSON, CSV, XML | Node and edge lists for drawing diagrams: device details, deduplicated L2 links, L3 adjacencies, subnets |
 | Interface Summary | XLSX, JSON, CSV, XML | Port status, descriptions, IP assignments |
@@ -188,6 +188,23 @@ modified. What it came from is recorded at three levels:
   every input and, for each device seen in more than one scan, which record was
   kept and why
 
+Scans that never went through this instance (copied off another host, or run
+from different boxes at one site) can be merged from the command line:
+
+```bash
+python app/merge_scans.py scan-a.json scan-b.json -o merged.json
+python app/merge_scans.py ./inventories/ -o ./inventories/   # every .json in it
+
+# or inside the container
+docker compose exec wiremap python merge_scans.py \
+    /app/inventories/a.json /app/inventories/b.json -o /app/inventories
+```
+
+Configs in the output are redacted unless you pass `--no-redact`. Older scans
+predate collection-time redaction, and the merged file is usually the one that
+gets passed around. Drop the result into `inventories/` and it shows up in
+**Saved Scans** like any other.
+
 ### Add to a Previous Scan
 
 Both scan forms offer **Add results to a previous scan**. Pick a saved scan and
@@ -207,10 +224,13 @@ a vty `access-class` and SNMP community ACLs. If the host running wiremap isn't
 in that subnet, devices refuse the connection and the scan fills up with
 "Connection refused" failures.
 
-After the seed is collected, wiremap checks the address it used to reach the
-seed against the seed's vty and SNMP ACLs. If either denies it, the console
-warns straight away, since the rest of the network usually shares the seed's
-management ACL. When three or more devices refuse the connection during a
+After the seed is collected, wiremap checks the address the seed sees it as
+against the seed's vty and SNMP ACLs. That address comes from the `source_ip`
+setting if set, otherwise from the seed's own `show users` / `show tcp brief`.
+Inside Docker the local socket address is the bridge address, so it's only
+used as a last resort and flagged as such. The console reports SSH and SNMP
+separately and warns when either is blocked, since the rest of the network
+usually shares the seed's management ACL. When three or more devices refuse the connection during a
 scan, the console points at the vty ACLs again. The fix is to run wiremap from
 a permitted management host or add its address to the ACL.
 
@@ -255,6 +275,9 @@ Set from the **Settings** tab under **Discovery Settings**. Values are persisted
 | `redact_secrets` | on | Replace secrets in collected configs with `<REDACTED>` before they are stored |
 | `collect_controller_managed` | off | Log into ACI fabric nodes and UCS Fabric Interconnects anyway instead of skipping them |
 | `max_logins_per_minute` | 0 | Cap on login attempts per minute across all workers (SSH, Telnet and the legacy SSH retry), so a large run doesn't trip TACACS+/ISE throttling. 0 means no limit, max 600 |
+| `allow_telnet` | off | Fall back to Telnet when SSH fails on an auto-protocol login. Off because most networks only accept SSH and each try costs a timeout and a failed login. A scan with the Telnet protocol selected always uses Telnet |
+| `expand_non_cdp_neighbors` | off | Crawl routing peers, next-hops and HSRP/VRRP addresses even when CDP/LLDP never saw them. Off, they're crawled only when CDP/LLDP sees them or an ARP entry shows a network-vendor MAC, and the rest are listed as not attempted |
+| `source_ip` | blank | The address devices see this host as, used for the management ACL check. Blank learns it from the seed's own session list. Can also be set per scan |
 
 **Site mapping.** Every report has a Site/Location column. By default the site is the first hyphen-delimited token of the short hostname (`AB001-IDF-SWA-01` maps to `AB001`). When a naming convention doesn't fit that, enter one `regex => SITE` rule per line. Rules are matched in order, case-insensitive, against the hostname as collected (FQDN included), and the site can use group references:
 
@@ -269,9 +292,11 @@ Lines starting with `#` are comments. A hostname that matches no rule falls back
 
 SNMP credentials are entered per scan on both the discovery and targeted forms, alongside the login credentials. Both v2c (community string) and v3 (auth and privacy) are supported.
 
-SNMP runs only after SSH and Telnet have both failed. It identifies the device and collects what the standard MIBs expose -- IF-MIB, IP-MIB, IP-FORWARD-MIB, LLDP-MIB, ENTITY-MIB, and CISCO-CDP-MIB where present. Because these are IETF standards rather than vendor commands, one implementation covers every supported platform.
+SNMP runs whenever a login fails -- rejected credentials, a refused port, a timeout or a failed SSH negotiation. It identifies the device and collects what the standard MIBs expose -- IF-MIB, IP-MIB, IP-FORWARD-MIB, LLDP-MIB, ENTITY-MIB, and CISCO-CDP-MIB where present. Because these are IETF standards rather than vendor commands, one implementation covers every supported platform.
 
 A device reached this way is recorded with `discovery_source = snmp` and `login_succeeded = false`. SNMP identifies a device; it does not collect one, and the reports keep that distinction visible.
+
+Every failure record carries an `snmp` field with the fallback's outcome: `v2c ok`, `v3 ok`, `timeout`, `auth/community rejected`, `no credentials` or `error: ...`. A v2c agent silently drops a wrong community, so for v2c a bad community reads as `timeout`; only v3 rejects credentials out loud. A device SNMP answered keeps its failure record (it explains the missing CLI data) but is not counted in the failed total. The scan log ends with a line such as `SNMP fallback: 12 tried, 9 answered (v2c 9, v3 0), 3 no response`.
 
 ### Environment Variables
 

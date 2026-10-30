@@ -286,6 +286,7 @@ class L3RoutingCollector(BaseCollector):
     label = "L3 Routing Neighbors"
     description = "Discover neighbors via OSPF, EIGRP, BGP, IS-IS and collect route tables"
     enabled_by_default = True
+    routing_only = True
 
     def get_commands(self, device_type: str) -> list[str]:
         neighbor_cmds = _L3_NEIGHBOR_COMMANDS.get(

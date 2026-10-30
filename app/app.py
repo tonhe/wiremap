@@ -19,6 +19,7 @@ from snmp_probe import SnmpCredentials
 from scan_manager import ScanManager
 from plugins import get_plugin_config, save_plugin_config, get_plugin_status, list_plugins
 from settings import get_discovery_settings, save_discovery_settings
+from source_access import clean_source_ip
 from target_list import WARN_TARGET_COUNT, parse_targets, resolve_targets
 try:
     from app.collectors import get_registry as get_collector_registry
@@ -113,6 +114,13 @@ def scan_start():
     collect_controller_managed = bool(
         disc_settings.get("collect_controller_managed", False))
     max_logins_per_minute = int(disc_settings.get("max_logins_per_minute") or 0)
+    allow_telnet = bool(disc_settings.get("allow_telnet", False))
+    # Per-scan source address overrides the saved one; blank learns it.
+    try:
+        source_ip = (clean_source_ip(request.form.get('source_ip', ''))
+                     or clean_source_ip(disc_settings.get('source_ip') or ''))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
     if not username or not password:
         return jsonify({"error": "Username and password are required"}), 400
@@ -202,11 +210,15 @@ def scan_start():
             crawl_from_targets=crawl_from_targets,
             neighbor_sources=neighbor_sources,
             crawl_scope=crawl_scope,
+            expand_non_cdp_neighbors=bool(
+                disc_settings.get("expand_non_cdp_neighbors", False)),
             snmp_credentials=snmp_credentials,
             base_inventory=base_inventory,
             target_resolution=target_resolution,
             collect_controller_managed=collect_controller_managed,
             max_logins_per_minute=max_logins_per_minute,
+            allow_telnet=allow_telnet,
+            source_ip=source_ip or None,
         )
         inventory = engine.discover()
         inventory.save(INVENTORY_DIR)
@@ -597,6 +609,8 @@ def _build_target_hosts(form, files, valid_types):
     hosts, targets, unresolved = resolve_targets(entries)
     resolution = {"targets": targets, "unresolved": unresolved,
                   "warnings": []}
+    # Recorded in the scan params so a report says which list it ran from.
+    resolution["targets_file"] = os.path.basename(filename) if filename else None
     if len(hosts) > WARN_TARGET_COUNT:
         resolution["warnings"].append(
             f"{len(hosts)} targets is more than {WARN_TARGET_COUNT}; "

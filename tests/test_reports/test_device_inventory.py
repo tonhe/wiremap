@@ -197,15 +197,15 @@ def test_merge_conflicts_get_their_own_sheet():
         "merged_from": [{"discovery_id": "scan-a", "filename": "a.json",
                          "seed_ip": "", "timestamp": "", "device_count": 1}],
         "merge_conflicts": [
-            {"hostname": "DCN5K-5A", "also_named": "DCN5K-5A(SSI1).trmc.us",
+            {"hostname": "N5K-A", "also_named": "N5K-A(SSI1).example.net",
              "kept_from": "scan-a", "discarded_from": "scan-b",
              "reason": "logged-in record preferred over a neighbour sighting"},
         ],
     }
     data = DeviceInventoryReport().generate_tabular_data(inventory)
     headers, rows = data["Merge Conflicts"]
-    assert rows[0][headers.index("Device")] == "DCN5K-5A"
-    assert rows[0][headers.index("Also Seen As")] == "DCN5K-5A(SSI1).trmc.us"
+    assert rows[0][headers.index("Device")] == "N5K-A"
+    assert rows[0][headers.index("Also Seen As")] == "N5K-A(SSI1).example.net"
     assert "neighbour" in rows[0][headers.index("Why")]
 
 

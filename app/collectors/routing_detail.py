@@ -565,6 +565,7 @@ class RoutingDetailCollector(BaseCollector):
     label = "Routing Detail"
     description = "Collect route summaries, OSPF process details, OSPF interfaces, and BGP summaries"
     enabled_by_default = True
+    routing_only = True
     # A WLC does not participate in routing protocols.
     unsupported_platforms = frozenset({"cisco_wlc"})
 

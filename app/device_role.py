@@ -55,6 +55,65 @@ def is_router_model(model):
     return bool(_ROUTER_MODEL_RE.match(model))
 
 
+# Analog voice gateways (VG202/204/224, VG310/320/350, VG400/450) run IOS and
+# advertise themselves as routers, but they have neither a switching plane
+# nor a routing table worth collecting.
+_VOICE_GATEWAY_RE = re.compile(r"^VG[234]\d\d", re.I)
+
+_SWITCH_MODEL_RE = re.compile(
+    r"^(?:"
+    r"WS-C"                          # Catalyst 2960 / 3560 / 3750 / 3850 ...
+    r"|C9[2-6]\d\d"                  # Catalyst 9200 - 9600
+    r"|C[1-3]\d00-\d"                # Catalyst 1000 / 1200 / 1300 / 2960-L
+    r"|IE-?\d"                       # Industrial Ethernet
+    r"|N\dK"                         # Nexus N3K / N5K / N7K / N9K
+    r"|NEXUS"
+    r"|DS-C9"                        # MDS
+    r")",
+    re.I,
+)
+
+
+def is_voice_gateway_model(model):
+    return bool(_VOICE_GATEWAY_RE.match(_clean_model(model)))
+
+
+def is_switch_model(model):
+    model = _clean_model(model)
+    if not model:
+        return False
+    if _INTEGRATED_SWITCH_RE.match(model):
+        return False
+    return bool(_SWITCH_MODEL_RE.match(model))
+
+
+def category_for_model(model):
+    """Device category implied by a hardware model, or None if unknown.
+
+    A neighbour's CDP capabilities decide the category before login, and an
+    ISR4351 doing CUBE advertises Switch alongside Router. The model is
+    what the device actually is.
+    """
+    model = _clean_model(model)
+    if not model:
+        return None
+    if is_voice_gateway_model(model):
+        return "voice-gateway"
+    if is_router_model(model):
+        return "router"
+    if is_switch_model(model):
+        return "switch"
+    return None
+
+
+def _first_model(show_version, model, platform):
+    for candidate in (model_from_show_version(show_version), model, platform):
+        candidate = _clean_model(candidate)
+        if candidate:
+            return candidate
+    return ""
+
+
 def is_switchless_router(show_version="", model="", platform="", category=""):
     """True when switching commands should not be sent to this device.
 
@@ -64,8 +123,47 @@ def is_switchless_router(show_version="", model="", platform="", category=""):
     is known the answer is False: running the commands and letting error
     detection discard rejections is safer than missing a switch's data.
     """
-    for candidate in (model_from_show_version(show_version), model, platform):
-        candidate = _clean_model(candidate)
-        if candidate:
-            return is_router_model(candidate)
-    return category == "router"
+    candidate = _first_model(show_version, model, platform)
+    if candidate:
+        return is_router_model(candidate) or is_voice_gateway_model(candidate)
+    return category in ("router", "voice-gateway")
+
+
+def skips_routing(show_version="", model="", platform="", category=""):
+    """True when routing collectors should not be sent to this device."""
+    candidate = _first_model(show_version, model, platform)
+    if candidate:
+        return is_voice_gateway_model(candidate)
+    return category == "voice-gateway"
+
+
+# Ordered: IOS-XE show version also carries a "Cisco IOS Software" line.
+_OS_FAMILIES = (
+    (re.compile(r"Cisco IOS[ -]XE Software|\bIOS-XE\b", re.I), "cisco_xe"),
+    (re.compile(r"Cisco IOS XR Software", re.I), None),
+    (re.compile(r"Cisco Nexus Operating System|\bNX-OS\b", re.I), "cisco_nxos"),
+    (re.compile(r"Cisco IOS Software|IOS \(tm\)", re.I), "cisco_ios"),
+)
+
+# Types whose commands differ only by which Cisco OS answers. The netmiko
+# cisco_ios driver logs into all of them, so whichever a neighbour guessed
+# is no evidence of what the device runs.
+CISCO_FAMILY_TYPES = frozenset({"cisco_ios", "cisco_xe", "cisco_nxos"})
+
+
+def device_type_from_show_version(show_version, current=None):
+    """The device type show version proves, else current.
+
+    Two identical routers were recorded as cisco_ios and cisco_xe because each
+    kept whatever its first neighbour's platform string suggested. Only the
+    Cisco IOS family is refined; any other type was chosen for a reason this
+    output cannot overrule.
+    """
+    if current and current not in CISCO_FAMILY_TYPES:
+        return current
+    if not show_version:
+        return current
+    for pattern, device_type in _OS_FAMILIES:
+        if pattern.search(show_version):
+            return device_type or current
+    return current

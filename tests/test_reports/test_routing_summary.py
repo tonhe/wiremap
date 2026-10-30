@@ -82,7 +82,8 @@ def test_collect_collector_errors_finds_failures():
         }
     }
     errors = _collect_collector_errors(inventory)
-    assert ("SW1", "routing_detail", "% Invalid input detected") in errors
+    assert ("SW1", "routing_detail", "not applicable",
+            "% Invalid input detected") in errors
     assert len(errors) == 1
 
 
@@ -100,7 +101,7 @@ def test_failed_collector_produces_no_ospf_rows():
     wb.remove(wb.active)
     inventory = {
         "devices": {
-            "TRMH-DR-Top-Core2": {
+            "CORE-DR-02": {
                 "collector_data": {
                     "routing_detail": {
                         "parsed": {
@@ -183,3 +184,36 @@ def test_l3_overfire_note():
     meta = [f for f in _analyze_l3(inv)["findings"] if f["type"] == OVERFIRE_TYPE]
     assert len(meta) == 1
     assert meta[0]["about"] == "BGP peer not Established"
+
+
+def _static_and_ospf(hostname, statics):
+    return {"hostname": hostname, "collector_data": {
+        "routing_detail": {"raw": {}, "parsed": {"route_summary": [
+            {"source": "ospf 1", "count": 10},
+            {"source": "static", "count": statics},
+        ]}},
+    }}
+
+
+def test_findings_aggregate_static_routes_across_devices():
+    inv = {"devices": {h: _static_and_ospf(h, n)
+                       for h, n in (("SW1", 2), ("SW2", 7), ("SW3", 3))}}
+    r = RoutingSummaryReport()
+    sheets = r.generate_tabular_data(inv)
+    headers, rows = sheets["Findings"]
+    assert headers[:2] == ["Severity", "Finding"]
+    static = [row for row in rows
+              if row[1] == "Static routes alongside dynamic protocol"]
+    assert len(static) == 1
+    assert static[0][3:] == [3, "SW1, SW2, SW3"]
+    _dh, drows = sheets["Findings (detail)"]
+    assert [row[0] for row in drows
+            if row[3] == "Static routes alongside dynamic protocol"] == ["SW1", "SW2", "SW3"]
+    summary = dict(sheets["Summary"][1])
+    assert summary["Warning Findings"] == 3
+    assert summary["Warning Findings (distinct)"] == 1
+
+    wb = load_workbook(io.BytesIO(r.generate(inv)))
+    assert wb.sheetnames.index("Findings (detail)") == wb.sheetnames.index("Findings") + 1
+    ws = wb["Findings"]
+    assert ws.cell(row=2, column=4).value == 3

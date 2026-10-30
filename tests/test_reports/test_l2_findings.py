@@ -84,7 +84,18 @@ def test_findings_sheets_show_severity(sample_inventory):
     from openpyxl import load_workbook
     from app.reports.l2_discovery import L2DiscoveryReport
     report = L2DiscoveryReport()
-    headers, _rows = report.generate_tabular_data(sample_inventory)["Findings"]
-    assert headers[4] == "Severity"
+    sheets = report.generate_tabular_data(sample_inventory)
+    assert sheets["Findings"][0][0] == "Severity"
+    assert sheets["Findings (detail)"][0][4] == "Severity"
     wb = load_workbook(io.BytesIO(report.generate(sample_inventory)))
-    assert wb["Findings"].cell(row=1, column=5).value == "Severity"
+    assert wb["Findings"].cell(row=1, column=1).value == "Severity"
+    assert wb["Findings (detail)"].cell(row=1, column=5).value == "Severity"
+
+
+def test_l2_findings_sheet_is_aggregated(sample_inventory):
+    from app.reports.l2_discovery import L2DiscoveryReport
+    sheets = L2DiscoveryReport().generate_tabular_data(sample_inventory)
+    headers, _rows = sheets["Findings"]
+    assert headers == ["Severity", "Finding", "Details", "Device count", "Devices"]
+    dheaders, _drows = sheets["Findings (detail)"]
+    assert dheaders == ["Hostname", "Site/Location", "Port", "Notes", "Severity"]

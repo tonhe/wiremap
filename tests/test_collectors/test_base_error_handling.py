@@ -36,8 +36,8 @@ def test_error_output_is_not_parsed():
     collector = _Fake()
     result = collector.collect(_Conn("% Invalid input detected at '^' marker."),
                                "cisco_ios")
-    assert result["parsed"]["collector_failed"] is True
-    assert "Invalid input" in result["parsed"]["collector_error"]
+    assert result["parsed"]["not_applicable"] is True
+    assert "Invalid input" in result["parsed"]["reason"]
     assert result["parsed"].get("rows") in (None, [])
 
 

@@ -8,10 +8,10 @@ import re
 from typing import List, Dict, Optional
 
 try:
-    from app.identity import looks_like_mac, normalize_hostname
+    from app.identity import looks_like_mac, normalize_hostname, split_device_id
     from app.ifname import canonical_ifname
 except ImportError:
-    from identity import looks_like_mac, normalize_hostname
+    from identity import looks_like_mac, normalize_hostname, split_device_id
     from ifname import canonical_ifname
 
 logger = logging.getLogger(__name__)
@@ -31,29 +31,46 @@ def parse_cdp_neighbors_detail(output: str) -> List[Dict[str, str]]:
     """
     neighbors = []
     current = {}
-    
+    in_mgmt = False
+
     for line in output.splitlines():
         line_stripped = line.strip()
-        
+
         # New neighbor entry
         if line_stripped.startswith("Device ID:"):
             if current:
                 neighbors.append(current)
                 current = {}
+            in_mgmt = False
             device_id = line_stripped.split("Device ID:")[1].strip()
+            # NX-OS and MDS report NAME(SERIAL); keep the serial apart so the
+            # name matches the device's own prompt.
+            device_id, serial = split_device_id(device_id)
             # Sometimes includes domain, strip it
             current["remote_device"] = device_id.split('.')[0]
-        
+            if serial:
+                current["remote_serial"] = serial
+
+        # IOS lists "Management address(es):", NX-OS "Mgmt address(es):".
+        elif line_stripped.lower().startswith(("management address",
+                                               "mgmt address")):
+            in_mgmt = True
+        elif line_stripped.lower().startswith(("entry address", "interface",
+                                               "platform:")):
+            in_mgmt = False
+
         # IP address (multiple formats: "IP address:", "IPv4 Address:", etc.)
-        elif "IP address:" in line_stripped or "IPv4 Address:" in line_stripped:
+        if "IP address:" in line_stripped or "IPv4 Address:" in line_stripped:
             # Handle both "IP address: X.X.X.X" and "IPv4 Address: X.X.X.X"
             if "IPv4 Address:" in line_stripped:
                 ip = line_stripped.split("IPv4 Address:")[1].strip()
             else:
                 ip = line_stripped.split("IP address:")[1].strip()
-            
+
             if ip and not ip.startswith("("):  # Skip "(not available)" or similar
                 current["remote_ip"] = ip
+                if in_mgmt:
+                    current.setdefault("remote_mgmt_ip", ip)
         
         # Platform and capabilities
         elif line_stripped.startswith("Platform:"):
@@ -209,8 +226,11 @@ def _parse_lldp_record(lines):
         elif label == "Port id":
             fields["remote_intf"] = value
         elif label == "System Name":
+            name, serial = split_device_id(value)
             # Strip domain if present
-            fields["remote_device"] = value.split('.')[0]
+            fields["remote_device"] = name.split('.')[0] if name else name
+            if serial:
+                fields["remote_serial"] = serial
         elif label == "System Description":
             description = [value] if value else []
             in_description = True
@@ -225,6 +245,9 @@ def _parse_lldp_record(lines):
 
     if description is not None:
         fields["system_description"] = " ".join(description)
+    # LLDP only ever carries a management address, never a link address.
+    if fields.get("remote_ip"):
+        fields["remote_mgmt_ip"] = fields["remote_ip"]
     return fields
 
 
@@ -273,6 +296,9 @@ def parse_ospf_neighbors(output: str) -> List[Dict]:
         if not line or line.startswith('Neighbor') or line.startswith('OSPF') or line.startswith('Total'):
             continue
         # Tabular line: neighbor-id  pri  state  dead-time  address  interface
+        # Point-to-point neighbours print as "FULL/  -"; rejoin the state so
+        # the columns line up.
+        line = re.sub(r'/\s+-(?=\s)', '/-', line)
         parts = line.split()
         if len(parts) < 6:
             continue

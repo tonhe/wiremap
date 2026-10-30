@@ -4,6 +4,7 @@ Dumb pipe: connects, runs commands, returns raw output. No parsing.
 """
 import logging
 import re
+import socket
 import time
 from collections import namedtuple
 
@@ -17,6 +18,33 @@ logger = logging.getLogger(__name__)
 _TELNET_SUFFIX = "_telnet"
 
 _PORTS = {"ssh": 22, "telnet": 23}
+
+# A bare TCP connect before netmiko. A filtered address otherwise costs a
+# full netmiko timeout per protocol; the probe answers in this long at most
+# and never counts against the login rate limit.
+TCP_PROBE_TIMEOUT = 1.5
+PROBE_NOTE = "tcp probe"
+
+
+def _tcp_probe(host, port, timeout=TCP_PROBE_TIMEOUT):
+    """Open and close a TCP connection. Returns None when the port accepted,
+    else (reason, exception_class, message). Failures that are neither a
+    timeout nor a refusal return None too, so netmiko reports them itself."""
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+    except Exception as e:
+        reason = failures.classify_exception(e)
+        if reason == failures.REFUSED:
+            return reason, type(e).__name__, f"{PROBE_NOTE}: port {port} refused"
+        if reason == failures.TIMEOUT:
+            return (reason, type(e).__name__,
+                    f"{PROBE_NOTE}: no answer on port {port} within {timeout:g}s")
+        return None
+    try:
+        sock.close()
+    except OSError:
+        pass
+    return None
 
 # Failures where the device type is not the problem. Retrying the same host
 # with three other netmiko drivers only triples the wait and the AAA noise.
@@ -167,8 +195,12 @@ class ConnectionManager:
     def __init__(self, host: str, device_type: str, username: str,
                  password: str, protocol: str = "ssh",
                  allow_fallback: bool = True, platform: str = None,
-                 login_limiter=None):
+                 login_limiter=None, allow_telnet: bool = False):
         self.host = host
+        # protocol="auto" stays on SSH unless telnet is allowed: most sites
+        # run "transport input ssh", so a telnet try only adds a timeout and
+        # an AAA failure. An explicit protocol="telnet" is always honoured.
+        self.allow_telnet = allow_telnet
         # Shared across workers; spaces logins so AAA servers do not throttle.
         self.login_limiter = login_limiter
         self.login_wait_ms = 0
@@ -254,7 +286,13 @@ class ConnectionManager:
                                             self.username, self.password)
             return ConnectionResult(connection=mock_conn, protocol_used="mock", fallback_occurred=False)
 
-        protocols_to_try = ["ssh", "telnet"] if self.protocol == "auto" else [self.protocol]
+        if self.protocol != "auto":
+            protocols_to_try = [self.protocol]
+        elif self.allow_telnet:
+            protocols_to_try = ["ssh", "telnet"]
+        else:
+            protocols_to_try = ["ssh"]
+            logger.debug(f"Telnet to {self.host} not allowed: allow_telnet is off")
         attempts = []
         fallback_occurred = False
 
@@ -268,6 +306,9 @@ class ConnectionManager:
                 continue
             if proto == "telnet" and attempts:
                 fallback_occurred = True
+
+            if not self._port_open(proto, attempts):
+                continue
 
             for dt in self._types_to_try():
                 if proto == "telnet":
@@ -336,6 +377,25 @@ class ConnectionManager:
         logger.info(f"Connected to {self.host} ({device_type} via {proto})")
         return conn, None
 
+    def _port_open(self, proto, attempts):
+        """TCP-probe the protocol's port. A timeout or refusal is recorded
+        as that protocol's attempt, so netmiko is not run against it."""
+        port = _PORTS.get(proto)
+        if port is None:
+            return True
+        started = time.monotonic()
+        result = _tcp_probe(self.host, port)
+        if result is None:
+            return True
+        reason, exception_class, message = result
+        record = _attempt(proto, self.device_type, reason, exception_class,
+                          message, int((time.monotonic() - started) * 1000))
+        record["note"] = PROBE_NOTE
+        attempts.append(record)
+        logger.warning(f"Not trying {proto} to {self.host} ({reason}): "
+                       f"{message}")
+        return False
+
     def _telnet_pointless(self, attempts) -> bool:
         """True when SSH was refused on a platform that refuses telnet too."""
         ssh_reasons = {a["reason"] for a in attempts if a["protocol"] == "ssh"}
@@ -374,9 +434,16 @@ class ConnectionManager:
                      read_timeout: int = 30, timings=None) -> dict[str, str]:
         """Run a list of commands and return dict of command -> raw output.
 
-        Commands that fail are logged and stored with empty string output.
-        When timings is a dict, each command's wall time in ms is put in it.
+        A command whose send raised (timeout, prompt desync, dropped session)
+        is logged and stored as a failure marker, so it is not mistaken for
+        a command that printed nothing. When timings is a dict, each
+        command's wall time in ms is put in it.
         """
+        try:
+            from app.collectors.errors import send_failure_output
+        except ImportError:
+            from collectors.errors import send_failure_output
+
         results = {}
         for cmd in commands:
             started = time.monotonic()
@@ -385,7 +452,7 @@ class ConnectionManager:
                 results[cmd] = output
             except Exception as e:
                 logger.warning(f"Command failed '{cmd}': {e}")
-                results[cmd] = ""
+                results[cmd] = send_failure_output(e)
             if timings is not None:
                 timings[cmd] = int((time.monotonic() - started) * 1000)
         return results

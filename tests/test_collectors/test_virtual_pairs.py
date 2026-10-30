@@ -316,6 +316,19 @@ def test_vss_pair_populates_both_chassis():
     assert result["vss"]["domain"] == "100"
 
 
+def test_vss_pair_found_when_typed_ios_xe():
+    """A 4500-X VSS on IOS-XE 3.x is typed cisco_xe; SVL commands reject."""
+    c = DeviceInventoryCollector()
+    raw = {cmd: INVALID for cmd in c.get_commands("cisco_xe")}
+    raw["show version"] = ""
+    raw["show inventory"] = VSS_INVENTORY
+    raw["show switch virtual"] = VSS_SWITCH_VIRTUAL
+    raw["show switch virtual link"] = VSS_LINK
+    result = c.parse(raw, "cisco_xe")
+    assert result["vss"]["domain"] == "100"
+    assert len(result["stack_members"]) == 2
+
+
 def test_parse_vpc():
     vpc = _parse_vpc(VPC)
     assert vpc["domain"] == "20"

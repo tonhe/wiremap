@@ -125,8 +125,9 @@ def test_udp_entries_do_not_apply_to_vty():
 def test_check_warns_for_denied_vty_and_snmp():
     warnings = sa.check_source_access(IOS_CONFIG, "198.51.100.50", "lab-core1")
     kinds = {(w["kind"], w["acl"]) for w in warnings}
-    # SNMP-RW is named but never defined, so it is not judged.
-    assert kinds == {("vty", "MGMT-VTY"), ("snmp", "15")}
+    # SNMP-RW is named but never defined, which permits all, so the second
+    # community answers and SNMP as a service is not blocked.
+    assert kinds == {("vty", "MGMT-VTY")}
     vty = [w for w in warnings if w["kind"] == "vty"][0]
     assert vty["message"] == (
         "This host (198.51.100.50) is not permitted by vty access-class "

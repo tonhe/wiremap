@@ -62,12 +62,14 @@ def test_findings_single_homed_bgp(sample_inventory):
     data = r.generate(sample_inventory)
     wb = load_workbook(io.BytesIO(data))
     ws = wb["Findings"]
-    found = False
-    for row in range(2, ws.max_row + 1):
-        if ws.cell(row=row, column=4).value and "Single-homed" in str(ws.cell(row=row, column=4).value):
-            found = True
-            break
-    assert found, "Expected single-homed BGP finding"
+    assert ws.cell(row=1, column=2).value == "Finding"
+    titles = [ws.cell(row=r, column=2).value for r in range(2, ws.max_row + 1)]
+    assert any("Single-homed" in str(t) for t in titles)
+    detail = wb["Findings (detail)"]
+    assert detail.cell(row=1, column=4).value == "Finding"
+    rows = [(detail.cell(row=r, column=1).value, detail.cell(row=r, column=4).value)
+            for r in range(2, detail.max_row + 1)]
+    assert ("SW1", "Single-homed BGP") in rows
 
 
 def test_generate_json(sample_inventory):

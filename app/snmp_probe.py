@@ -1,7 +1,8 @@
 """SNMP fallback probe.
 
-Runs only when SSH and telnet have both failed. A device that will not accept
-a login is not necessarily unreachable -- sysDescr alone tells us the platform,
+Runs whenever a login fails (auth, refused, timeout, SSH negotiation) and SNMP
+credentials were supplied. A device that will not accept a login is not
+necessarily unreachable -- sysDescr alone tells us the platform,
 the software version and the real hostname, which is enough to stop the device
 being an anonymous failure in the report.
 
@@ -46,6 +47,47 @@ VENDOR_OIDS = {
 VENDOR_OIDS["paloalto"] = VENDOR_OIDS["paloalto_panos"]
 
 _VALID_VERSIONS = ("v2c", "v3")
+
+# Per-device outcome of the fallback, recorded on the failure record so the
+# report says whether a device that refused a login answered SNMP at all.
+# A v2c agent silently drops a wrong community, so for v2c a bad community
+# is indistinguishable from no agent: both read as TIMEOUT. Only v3 rejects
+# out loud (unknown user, wrong digest, decryption error).
+OUTCOME_OK = {"v2c": "v2c ok", "v3": "v3 ok"}
+OUTCOME_TIMEOUT = "timeout"
+OUTCOME_REJECTED = "auth/community rejected"
+OUTCOME_NO_CREDENTIALS = "no credentials"
+OUTCOME_ERROR_PREFIX = "error: "
+
+_REJECTED_INDICATIONS = {
+    "UnknownUserName", "WrongDigest", "DecryptionError",
+    "AuthenticationFailure", "AuthenticationError", "UnknownSecurityName",
+    "UnsupportedSecurityLevel", "NoAuthentication",
+}
+_REJECTED_STATUSES = {"authorizationerror", "noaccess"}
+
+
+class SnmpQueryError(Exception):
+    """A query the agent answered with an error, or never answered."""
+    def __init__(self, outcome, detail=""):
+        super().__init__(detail or outcome)
+        self.outcome = outcome
+
+
+def classify_snmp_error(error_indication=None, error_status=None):
+    """Map a pysnmp error indication or PDU error status to an outcome."""
+    if error_indication:
+        name = type(error_indication).__name__
+        text = str(error_indication)
+        if name == "RequestTimedOut" or "timeout" in text.lower():
+            return OUTCOME_TIMEOUT
+        if name in _REJECTED_INDICATIONS:
+            return OUTCOME_REJECTED
+        return OUTCOME_ERROR_PREFIX + (text or name)
+    status = str(error_status or "")
+    if status.lower() in _REJECTED_STATUSES:
+        return OUTCOME_REJECTED
+    return OUTCOME_ERROR_PREFIX + (status or "unknown")
 
 # sysDescr is the only universally implemented identity string, so platform
 # detection keys off it. Ordered -- NX-OS also says "Cisco".
@@ -166,7 +208,9 @@ async def _get_async(host, creds, oids, timeout, port):
 
     if error_indication or error_status:
         logger.debug(f"SNMP probe {host}: {error_indication or error_status}")
-        return {}
+        raise SnmpQueryError(
+            classify_snmp_error(error_indication, error_status),
+            str(error_indication or error_status))
 
     results = {}
     for var_bind in var_binds:
@@ -276,17 +320,29 @@ def probe(host, creds: SnmpCredentials, timeout: int = 3, port: int = 161):
     Never raises: a failed SNMP probe is a fallback that did not help, not an
     error worth aborting discovery over.
     """
+    record, _ = probe_with_outcome(host, creds, timeout=timeout, port=port)
+    return record
+
+
+def probe_with_outcome(host, creds: SnmpCredentials, timeout: int = 3,
+                       port: int = 161):
+    """(record or None, outcome) -- outcome is one of the OUTCOME_* values,
+    or OUTCOME_ERROR_PREFIX followed by what went wrong. Never raises."""
     if not creds or not creds.is_configured():
-        return None
+        return None, OUTCOME_NO_CREDENTIALS
 
     try:
         values = _snmp_get(host, creds, list(SYS_OIDS.values()), timeout, port)
+    except SnmpQueryError as e:
+        logger.debug(f"SNMP probe failed for {host}: {e.outcome}")
+        return None, e.outcome
     except Exception as e:
         logger.debug(f"SNMP probe failed for {host}: {type(e).__name__}: {e}")
-        return None
+        return None, f"{OUTCOME_ERROR_PREFIX}{type(e).__name__}: {e}"
 
     if not values:
-        return None
+        # Answered with nothing usable, or a seam reporting silence.
+        return None, OUTCOME_TIMEOUT
 
     sys_name = values.get(SYS_OIDS["sysName"], "")
     sys_descr = values.get(SYS_OIDS["sysDescr"], "")
@@ -326,7 +382,7 @@ def probe(host, creds: SnmpCredentials, timeout: int = 3, port: int = 161):
         except Exception as e:
             logger.debug(f"SNMP vendor probe failed for {host}: {type(e).__name__}: {e}")
 
-    return {
+    record = {
         "hostname": hostname,
         "mgmt_ip": host,
         "device_type": facts["device_type"],
@@ -339,3 +395,4 @@ def probe(host, creds: SnmpCredentials, timeout: int = 3, port: int = 161):
         "discovery_source": "snmp",
         "login_succeeded": False,
     }
+    return record, OUTCOME_OK[creds.version]

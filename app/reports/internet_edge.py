@@ -11,12 +11,12 @@ from openpyxl import Workbook
 from .base import BaseReport
 from .acl_usage import classify_acls, UNKNOWN, UNREFERENCED, COUNTED, FILTERING
 from .findings import (
-    CRITICAL, WARNING, INFO, make_finding, overfire_check, count_by_severity,
+    CRITICAL, WARNING, INFO, make_finding, overfire_check, summary_count_rows,
 )
 from .l2_discovery import _derive_site, _has_collector_data, _extract_ip_interfaces
 from .routing_summary import (
     HEADER_BG, _write_header_row, _write_row, _finalize,
-    _CRITICAL_FONT, _CRITICAL_FILL, _WARNING_FONT, _WARNING_FILL,
+    write_findings_sheets, findings_tabular_sheets,
 )
 
 
@@ -266,6 +266,7 @@ def _analyze_edge(inventory_data):
                 (f"Only 1 BGP peer ({bp.get('neighbor', '?')} "
                  f"AS {bp.get('asn', '?')}, VRF {_peer_vrf(bp)}) "
                  f"across all VRFs -- no redundancy"),
+                aggregate_key="Only 1 BGP peer across all VRFs -- no redundancy",
             ))
 
         # --- NAT pool utilization ---
@@ -299,6 +300,8 @@ def _analyze_edge(inventory_data):
                     hostname, INFO, "Unreferenced ACL",
                     (f"ACL '{name}' ({len(entries)} rules) is not referenced "
                      f"anywhere in the running-config -- cleanup candidate"),
+                    aggregate_key=(f"ACL '{name}' is unreferenced in the "
+                                   f"running-config -- cleanup candidate"),
                 ))
                 continue
             if not entries:
@@ -308,6 +311,7 @@ def _analyze_edge(inventory_data):
                 findings.append(make_finding(
                     hostname, INFO, "Dead ACL (all zero hits)",
                     f"ACL '{name}' has {len(entries)} rules, all with zero hits",
+                    aggregate_key=f"ACL '{name}': every rule has zero hits",
                 ))
             if cats & FILTERING and any(_is_permit_any(e) for e in entries):
                 findings.append(make_finding(
@@ -363,17 +367,13 @@ def _summary_rows(analysis, inventory_data):
             nat_devices += 1
             nat_active += (es.get("nat_statistics") or {}).get("active_translations", 0)
 
-    counts = count_by_severity(analysis["findings"])
     return [
         ["Total Devices", len(devices)],
         ["Edge Devices", len(analysis["edge"])],
         ["BGP Peers (all VRFs)", bgp_peer_count],
         ["BGP VRFs", len(bgp_vrfs)],
         ["Active NAT Translations", nat_active if nat_devices else NAT_NOT_CONFIGURED],
-        ["Critical Findings", counts[CRITICAL]],
-        ["Warning Findings", counts[WARNING]],
-        ["Info Findings", counts[INFO]],
-    ]
+    ] + summary_count_rows(analysis["findings"])
 
 
 _EDGE_HEADERS = ["Device", "Site/Location", "Edge Basis"]
@@ -567,35 +567,7 @@ def _build_edge_interfaces_sheet(wb, inventory_data):
 
 
 def _build_findings_sheet(wb, analysis):
-    ws = wb.create_sheet(title="Findings")
-    headers = ["Device", "Site/Location", "Severity", "Finding", "Details"]
-    _write_header_row(ws, headers)
-    row = 2
-    for finding in analysis["findings"]:
-        hostname = finding.get("hostname", "")
-        severity = finding.get("severity", "Info")
-        _write_row(ws, row, [
-            hostname,
-            _derive_site(hostname),
-            severity,
-            finding["title"],
-            finding["description"],
-        ])
-        if severity == "Critical":
-            for col in range(1, len(headers) + 1):
-                cell = ws.cell(row=row, column=col)
-                cell.font = _CRITICAL_FONT
-                cell.fill = _CRITICAL_FILL
-        elif severity == "Warning":
-            for col in range(1, len(headers) + 1):
-                cell = ws.cell(row=row, column=col)
-                cell.font = _WARNING_FONT
-                cell.fill = _WARNING_FILL
-        row += 1
-    if not analysis["findings"]:
-        ws.cell(row=2, column=1, value="No findings detected.")
-        row = 3
-    _finalize(ws, "EdgeFindings", len(headers), row - 1)
+    write_findings_sheets(wb, analysis["findings"], "EdgeFindings")
 
 
 # ---------------------------------------------------------------------------
@@ -681,15 +653,6 @@ class InternetEdgeReport(BaseReport):
 
         sheets["Public Addresses"] = (list(_PUBLIC_HEADERS), _public_rows(inventory_data))
 
-        # Findings
-        findings_headers = ["Device", "Site/Location", "Severity", "Finding", "Details"]
-        findings_rows = []
-        for f in analysis["findings"]:
-            hostname = f.get("hostname", "")
-            findings_rows.append([
-                hostname, _derive_site(hostname),
-                f.get("severity", "Info"), f["title"], f["description"],
-            ])
-        sheets["Findings"] = (findings_headers, findings_rows)
+        findings_tabular_sheets(sheets, analysis["findings"])
 
         return sheets

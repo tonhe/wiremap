@@ -44,7 +44,7 @@ HINTS = {
     LEGACY_CRYPTO: ("SSH negotiation failed even with legacy algorithms "
                     "enabled (no common key exchange, cipher or host key); "
                     "regenerate the device's RSA key (2048 bit) and enable "
-                    "SSH v2, or allow telnet"),
+                    "SSH v2, or turn on 'Allow telnet' in Settings"),
     NO_TELNET_DRIVER: ("SSH failed and there is no telnet driver for this "
                        "platform; fix SSH access to collect it"),
     OTHER: "Unexpected error; see the attempt detail for the exception",
@@ -152,13 +152,18 @@ def failure_record(value, hostname=None):
     """
     if isinstance(value, dict):
         reason = value.get("reason") or classify_message(value.get("message"))
-        return {
+        record = {
             "hostname": value.get("hostname") or hostname,
             "reason": reason,
             "hint": value.get("hint") or hint_for(reason),
             "message": value.get("message") or "",
             "attempts": list(value.get("attempts") or []),
         }
+        # Outcome of the SNMP fallback (app.snmp_probe OUTCOME_*), when one
+        # was recorded. Absent on scans from before it was tracked.
+        if value.get("snmp"):
+            record["snmp"] = value["snmp"]
+        return record
     message = "" if value is None else str(value)
     reason = classify_message(message)
     return {
@@ -170,10 +175,33 @@ def failure_record(value, hostname=None):
     }
 
 
+# Matches app.snmp_probe.OUTCOME_OK; repeated so this module keeps no app
+# imports.
+SNMP_ANSWERED = ("v2c ok", "v3 ok")
+
+
+def snmp_answered(value):
+    """True when the login failed but the SNMP fallback collected the device."""
+    return isinstance(value, dict) and value.get("snmp") in SNMP_ANSWERED
+
+
+def plain_failures(failed):
+    """The failed map minus devices SNMP collected instead.
+
+    Those keep their failure record, since it explains why there is no CLI
+    data, but they were collected and do not count as failed devices.
+    """
+    return {ip: value for ip, value in (failed or {}).items()
+            if not snmp_answered(value)}
+
+
 def reason_counts(failed):
-    """[{reason, label, count, hint}] for a failed map, most common first."""
+    """[{reason, label, count, hint}] for a failed map, most common first.
+
+    Devices the SNMP fallback collected are not counted.
+    """
     counts = {}
-    for value in (failed or {}).values():
+    for value in plain_failures(failed).values():
         reason = failure_record(value)["reason"]
         counts[reason] = counts.get(reason, 0) + 1
     order = {r: i for i, r in enumerate(REASON_PRIORITY)}

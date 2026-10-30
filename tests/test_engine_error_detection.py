@@ -48,12 +48,49 @@ def _switchport_rejected(cmd, **kwargs):
     return ""
 
 
-def test_batch_path_marks_wholly_rejected_collector_failed():
+def test_batch_path_marks_wholly_rejected_collector_not_applicable():
+    """A router rejecting show interfaces switchport has no switchports;
+    nothing was lost, so the collector is not applicable, not failed."""
     inventory = _discover(lambda cmd, **kw: INVALID)
     parsed = inventory.devices["RTR-A"]["collector_data"]["switchport"]["parsed"]
-    assert parsed["collector_failed"] is True
-    assert "Invalid input" in parsed["collector_error"]
+    assert parsed.get("collector_failed") is not True
+    assert parsed["not_applicable"] is True
     assert "show interfaces switchport" in parsed["failed_commands"]
+    assert parsed["command_error_kinds"]["show interfaces switchport"] == \
+        "not_applicable"
+
+
+def test_batch_path_records_send_timeout_as_failed():
+    """A command whose send raised lost data and must not read as empty."""
+    def send(cmd, **kw):
+        if cmd == "show interfaces switchport":
+            raise TimeoutError("Pattern not detected in output")
+        return ""
+    inventory = _discover(send)
+    cdata = inventory.devices["RTR-A"]["collector_data"]["switchport"]
+    assert cdata["parsed"]["command_error_kinds"] == {
+        "show interfaces switchport": "failed"}
+    assert "TimeoutError" in cdata["raw"]["show interfaces switchport"]
+
+
+def test_device_status_collected_when_only_not_applicable():
+    from app.reports.device_inventory import _collection_status
+    inventory = _discover(lambda cmd, **kw: INVALID)
+    data = inventory.to_dict()
+    assert _collection_status(data["devices"]["RTR-A"], data) == "collected"
+
+
+def test_device_status_partial_on_send_timeout():
+    from app.reports.device_inventory import _collection_status
+
+    def send(cmd, **kw):
+        if cmd == "show interfaces switchport":
+            raise TimeoutError("timed out")
+        return ""
+    inventory = _discover(send)
+    data = inventory.to_dict()
+    assert _collection_status(data["devices"]["RTR-A"], data) == \
+        "partial:switchport"
 
 
 def test_batch_path_does_not_parse_error_caret_as_interface():
@@ -76,8 +113,9 @@ def test_collection_errors_sheet_populated_from_scan():
     ws = wb["Collection Errors"]
     rows = [[c.value for c in r] for r in ws.iter_rows(min_row=2)]
     assert any(r[0] == "RTR-A" and r[2] == "switchport"
-               and "show interfaces switchport" in r[3]
-               and "Invalid input" in r[3] for r in rows)
+               and r[3] == "not applicable"
+               and "show interfaces switchport" in r[4]
+               and "Invalid input" in r[4] for r in rows)
 
 
 class _Conn:
@@ -91,7 +129,9 @@ class _Conn:
 def test_vrf_collect_does_not_turn_error_into_vrfs():
     conn = _Conn({"show ip vrf": INVALID, "show ip vrf interfaces": INVALID})
     result = VrfCollector().collect(conn, "cisco_xe")
-    assert result["parsed"]["collector_failed"] is True
+    # 2960-X LAN Base has no show ip vrf: not applicable, not a failure
+    assert result["parsed"]["not_applicable"] is True
+    assert result["parsed"].get("collector_failed") is not True
     # No phase-2 commands were invented from the error text
     assert set(result["raw"]) == {"show ip vrf", "show ip vrf interfaces"}
 

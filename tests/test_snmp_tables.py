@@ -33,29 +33,29 @@ WALK_DATA = {
     "1.3.6.1.2.1.31.1.1.1.18.1": "WAN uplink",
     "1.3.6.1.2.1.31.1.1.1.15.1": "1000",
     # ipAddrTable
-    "1.3.6.1.2.1.4.20.1.1.12.202.247.129": "12.202.247.129",
-    "1.3.6.1.2.1.4.20.1.2.12.202.247.129": "1",
-    "1.3.6.1.2.1.4.20.1.3.12.202.247.129": "255.255.255.252",
-    "1.3.6.1.2.1.4.20.1.1.10.254.254.1": "10.254.254.1",
-    "1.3.6.1.2.1.4.20.1.2.10.254.254.1": "2",
-    "1.3.6.1.2.1.4.20.1.3.10.254.254.1": "255.255.255.0",
+    "1.3.6.1.2.1.4.20.1.1.203.0.113.129": "203.0.113.129",
+    "1.3.6.1.2.1.4.20.1.2.203.0.113.129": "1",
+    "1.3.6.1.2.1.4.20.1.3.203.0.113.129": "255.255.255.252",
+    "1.3.6.1.2.1.4.20.1.1.192.0.2.254": "192.0.2.254",
+    "1.3.6.1.2.1.4.20.1.2.192.0.2.254": "2",
+    "1.3.6.1.2.1.4.20.1.3.192.0.2.254": "255.255.255.0",
     # ipCidrRouteTable -- default route plus a connected
     "1.3.6.1.2.1.4.24.4.1.1.0.0.0.0.0": "0.0.0.0",
     "1.3.6.1.2.1.4.24.4.1.2.0.0.0.0.0": "0.0.0.0",
-    "1.3.6.1.2.1.4.24.4.1.4.0.0.0.0.0": "12.202.247.130",
+    "1.3.6.1.2.1.4.24.4.1.4.0.0.0.0.0": "203.0.113.130",
     "1.3.6.1.2.1.4.24.4.1.5.0.0.0.0.0": "1",
     "1.3.6.1.2.1.4.24.4.1.7.0.0.0.0.0": "2",
     "1.3.6.1.2.1.4.24.4.1.11.0.0.0.0.0": "1",
-    "1.3.6.1.2.1.4.24.4.1.1.10.254.254.0.1": "10.254.254.0",
-    "1.3.6.1.2.1.4.24.4.1.2.10.254.254.0.1": "255.255.255.0",
-    "1.3.6.1.2.1.4.24.4.1.4.10.254.254.0.1": "0.0.0.0",
-    "1.3.6.1.2.1.4.24.4.1.5.10.254.254.0.1": "2",
-    "1.3.6.1.2.1.4.24.4.1.7.10.254.254.0.1": "2",
+    "1.3.6.1.2.1.4.24.4.1.1.198.51.100.0.1": "198.51.100.0",
+    "1.3.6.1.2.1.4.24.4.1.2.198.51.100.0.1": "255.255.255.0",
+    "1.3.6.1.2.1.4.24.4.1.4.198.51.100.0.1": "0.0.0.0",
+    "1.3.6.1.2.1.4.24.4.1.5.198.51.100.0.1": "2",
+    "1.3.6.1.2.1.4.24.4.1.7.198.51.100.0.1": "2",
     # ipNetToMediaTable
-    "1.3.6.1.2.1.4.22.1.2.2.10.254.254.5": "00:1b:17:aa:bb:cc",
-    "1.3.6.1.2.1.4.22.1.3.2.10.254.254.5": "10.254.254.5",
+    "1.3.6.1.2.1.4.22.1.2.2.198.51.100.5": "00:1b:17:aa:bb:cc",
+    "1.3.6.1.2.1.4.22.1.3.2.198.51.100.5": "198.51.100.5",
     # lldpRemTable -- index is timeMark.localPortNum.remIndex
-    "1.0.8802.1.1.2.1.4.1.1.9.0.2.1": "DCN5K-8A",
+    "1.0.8802.1.1.2.1.4.1.1.9.0.2.1": "N5K-8A",
     "1.0.8802.1.1.2.1.4.1.1.7.0.2.1": "Eth1/20",
     "1.0.8802.1.1.2.1.4.1.1.8.0.2.1": "Ethernet1/20",
     "1.0.8802.1.1.2.1.4.1.1.5.0.2.1": "00:1b:17:dd:ee:ff",
@@ -127,36 +127,36 @@ def test_ip_addresses_resolve_interface_names():
     names = {i["if_index"]: i["port"] for i in interfaces}
     addresses = collect_ip_addresses(walk, names)
     by_ip = {a["ipaddr"]: a for a in addresses}
-    assert by_ip["12.202.247.129"]["intf"] == "External"
-    assert by_ip["10.254.254.1"]["intf"] == "Trusted"
+    assert by_ip["203.0.113.129"]["intf"] == "External"
+    assert by_ip["192.0.2.254"]["intf"] == "Trusted"
 
 
 def test_netmask_converted_to_prefix_length():
     addresses = collect_ip_addresses(walk)
     by_ip = {a["ipaddr"]: a for a in addresses}
-    assert by_ip["12.202.247.129"]["prefix_length"] == "30"
-    assert by_ip["10.254.254.1"]["prefix_length"] == "24"
+    assert by_ip["203.0.113.129"]["prefix_length"] == "30"
+    assert by_ip["192.0.2.254"]["prefix_length"] == "24"
 
 
 def test_default_route_identifies_the_circuit():
     """Which circuit a site actually uses is the point of collecting routes."""
     routes = collect_routes(walk, {"1": "External", "2": "Trusted"})
     default = [r for r in routes if r["network"] == "0.0.0.0"][0]
-    assert default["nexthop_ip"] == "12.202.247.130"
+    assert default["nexthop_ip"] == "203.0.113.130"
     assert default["interface"] == "External"
     assert default["protocol"] == "local"
 
 
 def test_connected_route_has_no_nexthop():
     routes = collect_routes(walk)
-    connected = [r for r in routes if r["network"] == "10.254.254.0"][0]
+    connected = [r for r in routes if r["network"] == "198.51.100.0"][0]
     assert connected["nexthop_ip"] == ""
 
 
 def test_arp_entries_collected():
     entries = collect_arp(walk, {"2": "Trusted"})
     assert len(entries) == 1
-    assert entries[0]["ip"] == "10.254.254.5"
+    assert entries[0]["ip"] == "198.51.100.5"
     assert entries[0]["mac"] == "00:1b:17:aa:bb:cc"
     assert entries[0]["interface"] == "Trusted"
 
@@ -167,7 +167,7 @@ def test_lldp_gives_a_port_name_at_both_ends():
     assert len(neighbors) == 1
     n = neighbors[0]
     assert n["local_intf"] == "Trusted interface"
-    assert n["remote_device"] == "DCN5K-8A"
+    assert n["remote_device"] == "N5K-8A"
     assert n["remote_intf"] == "Ethernet1/20"
     assert n["source"] == "snmp"
 

@@ -292,6 +292,6 @@ def test_collected_ips_lists_only_successful_logins():
 
 def test_collected_hostnames_are_normalized():
     inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
-    inv.add_device("DCN5K-5A(SSI1).trmc.us", mgmt_ip="10.0.0.1")
-    inv.mark_login_succeeded("DCN5K-5A(SSI1).trmc.us")
-    assert inv.collected_hostnames() == {"dcn5k-5a"}
+    inv.add_device("N5K-A(SSI1).example.net", mgmt_ip="10.0.0.1")
+    inv.mark_login_succeeded("N5K-A(SSI1).example.net")
+    assert inv.collected_hostnames() == {"n5k-a"}

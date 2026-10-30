@@ -19,7 +19,8 @@ _NTC_PLATFORM_MAP = {
 _COMMANDS = {
     # VSS (6500/4500) answers "show switch virtual"; StackWise Virtual (C9k)
     # answers "show stackwise-virtual". Everything else rejects them, which
-    # means "not a virtual pair", not a collection failure.
+    # means "not a virtual pair", not a collection failure. A 4500-X VSS on
+    # IOS-XE 3.x is typed cisco_xe from show version, so cisco_xe asks both.
     # Licensing and call-home: IOS-XE boxes are often typed cisco_ios by
     # autodetect, so both get the IOS-XE commands. Classic IOS rejects them,
     # which the parsers treat as "no licensing data".
@@ -30,6 +31,7 @@ _COMMANDS = {
     "cisco_xe": ["show version", "show inventory", "show switch detail", "show module",
                  "show stackwise-virtual", "show stackwise-virtual link",
                  "show stackwise-virtual dual-active-detection",
+                 "show switch virtual", "show switch virtual link",
                  "show license summary", "show license status",
                  "show call-home", "show call-home profile all"],
     "cisco_nxos": ["show version", "show inventory", "show module", "show vpc",
@@ -258,21 +260,68 @@ def _parse_vpc(raw):
     }
 
 
-def _parse_version_switch_table(raw):
-    """Per-member rows from the C9k/3850 show version switch table.
+_SWITCH_TABLE_HEAD_RE = re.compile(r"^[ \t]*Switch[ \t]+Ports[ \t]+Model\b", re.M)
+# IOS-XE adds a Mode column (INSTALL/BUNDLE); classic IOS (2960-X, 3750-X)
+# stops at SW Image.
+_SWITCH_ROW_RE = re.compile(
+    r"^[ \t]*(?:(\*)[ \t]*)?(\d+)[ \t]+\d+[ \t]+(\S+)[ \t]+(\S+)[ \t]+(\S+)"
+    r"(?:[ \t]+(\S+))?[ \t]*$")
 
-    The '*' marks the member that owns the console, which on a two-member
-    StackWise Virtual pair is the active.
+
+def _parse_version_switch_table(raw):
+    """Per-member rows from the stack show version switch table.
+
+    The '*' marks the member that owns the console: the active of a stack,
+    and of a two-member StackWise Virtual pair. Only the lines under the
+    table header are read, line by line, so a long stack output costs one
+    pass and no other numeric line is mistaken for a member.
     """
     rows = []
-    for m in re.finditer(
-        r"^\s*(\*?)\s*(\d+)\s+\d+\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*$",
-        raw or "", re.M,
-    ):
+    head = _SWITCH_TABLE_HEAD_RE.search(raw or "")
+    if not head:
+        return rows
+    for line in raw[head.end():].splitlines()[1:]:
+        if not line.strip():
+            if rows:
+                break
+            continue
+        if line.lstrip().startswith("-"):
+            continue
+        m = _SWITCH_ROW_RE.match(line)
+        if not m:
+            if rows:
+                break
+            continue
         rows.append({"switch": m.group(2), "local": bool(m.group(1)),
                      "model": m.group(3), "sw_version": m.group(4),
                      "sw_image": m.group(5)})
     return rows
+
+
+# IOS 15:     cisco WS-C2960X-48FPD-L (APM86XXX) processor (revision B0) ...
+# IOS-XE:     cisco C9200L-48P-4X (ARM64) processor with 600133K/3071K ...
+_PROCESSOR_MODEL_RE = re.compile(
+    r"^[ \t]*cisco[ \t]+(\S+)[ \t]+\([^)\n]*\)[ \t]+processor", re.I | re.M)
+# "Model number : WS-C2960X-48FPD-L" (IOS) / "Model Number : C9300-48P" (XE)
+_MODEL_NUMBER_RE = re.compile(r"^[ \t]*Model[ \t]+number[ \t]*:[ \t]*(\S+)",
+                              re.I | re.M)
+
+
+def _version_model(raw, switches):
+    """Chassis model from show version text.
+
+    A stack's active member (the '*' row) first, then the processor line,
+    then the first Model number line, which a stack may print only in the
+    per-member blocks.
+    """
+    if switches:
+        active = next((s for s in switches if s["local"]), switches[0])
+        return active["model"]
+    for pattern in (_PROCESSOR_MODEL_RE, _MODEL_NUMBER_RE):
+        m = pattern.search(raw)
+        if m:
+            return m.group(1)
+    return ""
 
 
 _LICENSE_LEVEL_RE = re.compile(r"^\s*License\s+Level\s*:\s*(\S+)", re.I | re.M)
@@ -337,6 +386,9 @@ def _parse_version_details(raw):
     switches = _parse_version_switch_table(raw)
     if switches:
         details["switches"] = switches
+    model = _version_model(raw, switches)
+    if model:
+        details["model"] = model
     return details
 
 

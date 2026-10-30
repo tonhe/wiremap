@@ -117,13 +117,13 @@ def test_duplicate_evidence_is_not_repeated():
 
 def test_hostname_variants_are_merged():
     """The NX-OS hostname(serial).domain form must fold into one device."""
-    a = _inv("a", [_device(hostname="DCN5K-5A", mgmt_ip="172.21.0.27",
+    a = _inv("a", [_device(hostname="N5K-A", mgmt_ip="172.21.0.27",
                            login_succeeded=True, serial="FOC1")])
-    b = _inv("b", [_device(hostname="DCN5K-5A(SSI1).trmc.us",
+    b = _inv("b", [_device(hostname="N5K-A(SSI1).example.net",
                            discovery_source="cdp_lldp")])
     merged = merge_inventories([a, b])
     assert len(merged["devices"]) == 1
-    assert merged["devices"]["DCN5K-5A"]["login_succeeded"] is True
+    assert merged["devices"]["N5K-A"]["login_succeeded"] is True
 
 
 def test_different_serials_are_different_devices():

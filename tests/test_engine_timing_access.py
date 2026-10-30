@@ -116,7 +116,9 @@ def test_seed_vty_acl_denying_source_is_warned(monkeypatch, tmp_path):
 
     expected = ("This host (198.51.100.50) is not permitted by vty "
                 "access-class MGMT-VTY on lab-core1; expect connection "
-                "refused on devices sharing that ACL")
+                "refused on devices sharing that ACL (address taken from the "
+                "local socket; set Source IP if devices see this host under "
+                "a different address)")
     warnings = inv.to_dict()["scan_summary"]["source_access_warnings"]
     assert [w["message"] for w in warnings] == [expected]
     live = [e for e in events if e["event"] == "source_access_warning"]

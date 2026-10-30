@@ -6,6 +6,7 @@ SECURITY: SNMP community strings are NEVER stored — only boolean flags.
 import re
 
 from .base import BaseCollector
+from .errors import send_failure_output
 
 _COMMANDS = {
     "cisco_ios": [
@@ -305,8 +306,8 @@ class NtpLoggingCollector(BaseCollector):
         for cmd in cmds:
             try:
                 raw_outputs[cmd] = connection.send_command(cmd)
-            except Exception:
-                raw_outputs[cmd] = ""
+            except Exception as e:
+                raw_outputs[cmd] = send_failure_output(e)
 
         parsed = self.parse_collected(raw_outputs, device_type)
 

@@ -606,7 +606,7 @@
                             <select id="protocol" name="protocol">
                                 <option value="ssh">SSH</option>
                                 <option value="telnet">Telnet</option>
-                                <option value="auto" selected>Auto (SSH, fallback Telnet)</option>
+                                <option value="auto" selected>Auto (SSH; Telnet if allowed in Settings)</option>
                             </select>
                         </div>
 
@@ -782,6 +782,17 @@
 
 
                     <div class="form-group">
+                        <label for="disc_source_ip">Source IP (optional)</label>
+                        <input type="text" name="source_ip" id="disc_source_ip"
+                               class="mono" placeholder="learned from the seed session"
+                               autocomplete="off">
+                        <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 0;">
+                            The address devices see this host as, used to check the seed's vty and SNMP ACLs.
+                            Blank uses the Settings value, else asks the seed which address our session came from.
+                        </p>
+                    </div>
+
+                    <div class="form-group">
                         <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
                             <input type="checkbox" id="disc_continue_toggle" value="true"
                                    class="continue-toggle" data-prefix="disc"
@@ -877,6 +888,13 @@ fw1.example.com paloalto_panos"></textarea>
                                 <option value="1" selected>1 hop</option>
                                 <option value="2">2 hops</option>
                                 <option value="3">3 hops</option>
+                                <option value="4">4 hops</option>
+                                <option value="5">5 hops</option>
+                                <option value="6">6 hops</option>
+                                <option value="7">7 hops</option>
+                                <option value="8">8 hops</option>
+                                <option value="9">9 hops</option>
+                                <option value="10">10 hops</option>
                             </select>
                         </div>
                         <div class="form-group">
@@ -959,6 +977,17 @@ fw1.example.com paloalto_panos"></textarea>
                         </div>
                     </div>
 
+
+                    <div class="form-group">
+                        <label for="ts_source_ip">Source IP (optional)</label>
+                        <input type="text" name="source_ip" id="ts_source_ip"
+                               class="mono" placeholder="learned from the seed session"
+                               autocomplete="off">
+                        <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 0;">
+                            The address devices see this host as, used to check the seed's vty and SNMP ACLs.
+                            Blank uses the Settings value, else asks the seed which address our session came from.
+                        </p>
+                    </div>
 
                     <div class="form-group">
                         <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
@@ -1071,6 +1100,11 @@ fw1.example.com paloalto_panos"></textarea>
                         <input type="number" id="settings-max-logins" min="0" max="600" step="1" value="0">
                     </div>
                     <div class="form-group">
+                        <label for="settings-source-ip">Source IP</label>
+                        <p class="helper-text">The address devices see wiremap as, for the vty and SNMP ACL check on the seed. Set it when wiremap sits behind NAT or in a container. Blank = learn it from the seed session (<span class="mono">show users</span> / <span class="mono">show tcp brief</span>). A scan form value overrides this.</p>
+                        <input type="text" id="settings-source-ip" class="mono" placeholder="learned from the seed session" autocomplete="off">
+                    </div>
+                    <div class="form-group">
                         <label for="settings-site-rules">Site Mapping Rules</label>
                         <p class="helper-text">One rule per line: <span class="mono">regex =&gt; SITE</span>. Checked in order against the hostname (case-insensitive); the first match wins and <span class="mono">\1</span> inserts a captured group. Unmatched names use the first hyphen-delimited token of the short hostname.</p>
                         <textarea id="settings-site-rules" rows="5"
@@ -1096,6 +1130,20 @@ fw1.example.com paloalto_panos"></textarea>
                             Collect controller-managed devices
                         </label>
                         <p class="helper-text">ACI leaf/spine switches and UCS Fabric Interconnects take their CLI accounts from APIC or UCS Manager, so they are recorded from neighbour data but not logged into. Enable to try the network credential on them anyway.</p>
+                    </div>
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" id="settings-allow-telnet" style="width: auto; margin-right: 8px; accent-color: var(--accent);">
+                            Allow telnet fallback
+                        </label>
+                        <p class="helper-text">Try telnet on discovered devices when SSH fails. Off by default: most networks only accept SSH, and each telnet try adds a timeout and a failed login. Scans with the Telnet protocol selected always use telnet.</p>
+                    </div>
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" id="settings-expand-non-cdp" style="width: auto; margin-right: 8px; accent-color: var(--accent);">
+                            Crawl neighbours not seen by CDP/LLDP
+                        </label>
+                        <p class="helper-text">Addresses from routing adjacencies, next-hops and HSRP/VRRP are crawled only when CDP/LLDP also sees them or an ARP entry shows a network-vendor MAC. BGP peers and OSPF neighbours on shared segments always need CDP/LLDP. Enable to attempt all of them; skipped addresses are listed as not attempted.</p>
                     </div>
                     <div class="plugin-actions">
                         <button type="button" class="btn-primary" onclick="saveDiscoverySettings()">Save</button>
@@ -1284,8 +1332,17 @@ fw1.example.com paloalto_panos"></textarea>
         _eventSource.addEventListener('scan_started', function(e) {
             var d = JSON.parse(e.data);
             logEvent('Scan started', 'muted');
-            if (d.source_ip) logEvent('Source address: ' + d.source_ip, 'muted');
+            if (d.source_ip) logEvent('Source address: ' + d.source_ip +
+                (d.source_ip_method ? ' (' + d.source_ip_method + ')' : ''), 'muted');
             if (d.max_logins_per_minute) logEvent('Login rate limited to ' + d.max_logins_per_minute + '/min', 'muted');
+        });
+        _eventSource.addEventListener('source_ip_learned', function(e) {
+            var d = JSON.parse(e.data);
+            logEvent('Source address learned from ' + d.ip + ': ' + d.source_ip, 'muted');
+        });
+        _eventSource.addEventListener('source_access', function(e) {
+            var d = JSON.parse(e.data);
+            logEvent(d.message, 'muted');
         });
         _eventSource.addEventListener('source_access_warning', function(e) {
             var d = JSON.parse(e.data);
@@ -1331,7 +1388,16 @@ fw1.example.com paloalto_panos"></textarea>
             document.getElementById('prog-failed').textContent = _failedCount;
             var who = d.hostname ? d.hostname + ' (' + d.ip + ')' : d.ip;
             var why = d.reason ? '[' + d.reason + '] ' : '';
-            logEvent(who + ' \u2717 ' + why + d.error, 'fail');
+            var snmp = (d.snmp && d.snmp !== 'no credentials') ? ' (SNMP: ' + d.snmp + ')' : '';
+            logEvent(who + ' \u2717 ' + why + d.error + snmp, 'fail');
+        });
+        _eventSource.addEventListener('device_snmp_identified', function(e) {
+            var d = JSON.parse(e.data);
+            logEvent(d.hostname + ' (' + d.ip + ') login failed, collected via SNMP' +
+                     (d.snmp ? ' (' + d.snmp + ')' : ''), 'warn');
+        });
+        _eventSource.addEventListener('snmp_fallback_summary', function(e) {
+            logEvent(JSON.parse(e.data).message, 'muted');
         });
         _eventSource.addEventListener('device_skipped', function(e) {
             var d = JSON.parse(e.data);
@@ -1413,6 +1479,7 @@ fw1.example.com paloalto_panos"></textarea>
     }
 
     function logSourceAccess(data) {
+        if (data.source_access_line) logEvent(data.source_access_line, 'muted');
         (data.source_access_warnings || []).forEach(function(w) {
             logEvent('WARNING: ' + w.message, 'warn');
         });
@@ -1427,7 +1494,9 @@ fw1.example.com paloalto_panos"></textarea>
         document.getElementById('cancel-btn').style.display = 'none';
         var line = title + ' \u2014 ' + (data.total_devices || 0) + ' devices, ' + (data.failed_count || 0) + ' failed';
         if (data.skipped_count) line += ', ' + data.skipped_count + ' controller-managed not logged into';
+        if (data.not_attempted_count) line += ', ' + data.not_attempted_count + ' non-CDP neighbour address(es) not attempted';
         logEvent(line, 'muted');
+        if (data.target_summary) logEvent(data.target_summary, 'muted');
         logFailureReasons(data.failure_reasons);
         logSourceAccess(data);
         logSlowest(data.slowest);
@@ -1556,6 +1625,15 @@ fw1.example.com paloalto_panos"></textarea>
             contentEl.appendChild(accessEl);
         }
 
+        /* Source address and what the seed's ACLs make of it */
+        if (s.source_access_line) {
+            var sourceEl = document.createElement('div');
+            sourceEl.className = 'helper-text';
+            sourceEl.style.marginBottom = '12px';
+            sourceEl.textContent = s.source_access_line;
+            contentEl.appendChild(sourceEl);
+        }
+
         /* Slowest devices, so a long run can be explained */
         var slowDevs = (s.slowest && s.slowest.devices) || [];
         if (slowDevs.length) {
@@ -1565,7 +1643,7 @@ fw1.example.com paloalto_panos"></textarea>
             slowEl.textContent = 'Slowest: ' + slowDevs.map(function(d) {
                 return d.hostname + ' ' + fmtMs(d.total_ms || 0);
             }).join(', ');
-            if (s.source_ip) slowEl.textContent += '  \u00b7  source ' + s.source_ip;
+            if (s.source_ip && !s.source_access_line) slowEl.textContent += '  \u00b7  source ' + s.source_ip;
             contentEl.appendChild(slowEl);
         }
 
@@ -1990,8 +2068,14 @@ fw1.example.com paloalto_panos"></textarea>
                     settings.redact_secrets !== false;
                 document.getElementById('settings-collect-controller-managed').checked =
                     !!settings.collect_controller_managed;
+                document.getElementById('settings-expand-non-cdp').checked =
+                    !!settings.expand_non_cdp_neighbors;
                 document.getElementById('settings-max-logins').value =
                     settings.max_logins_per_minute || 0;
+                document.getElementById('settings-allow-telnet').checked =
+                    !!settings.allow_telnet;
+                document.getElementById('settings-source-ip').value =
+                    settings.source_ip || '';
             })
             .catch(function() {});
     }
@@ -2006,7 +2090,10 @@ fw1.example.com paloalto_panos"></textarea>
                 site_rules: document.getElementById('settings-site-rules').value,
                 redact_secrets: document.getElementById('settings-redact-secrets').checked,
                 collect_controller_managed: document.getElementById('settings-collect-controller-managed').checked,
-                max_logins_per_minute: parseInt(document.getElementById('settings-max-logins').value || '0', 10)
+                expand_non_cdp_neighbors: document.getElementById('settings-expand-non-cdp').checked,
+                max_logins_per_minute: parseInt(document.getElementById('settings-max-logins').value || '0', 10),
+                allow_telnet: document.getElementById('settings-allow-telnet').checked,
+                source_ip: document.getElementById('settings-source-ip').value.trim()
             })
         })
         .then(function(r) { return r.json(); })

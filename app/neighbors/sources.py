@@ -1,6 +1,11 @@
 """The neighbour sources discovery can crawl from."""
 from .base import NeighborSource
 
+try:
+    from app.identity import split_device_id
+except ImportError:
+    from identity import split_device_id
+
 
 class CdpLldpSource(NeighborSource):
     name = "cdp_lldp"
@@ -13,6 +18,12 @@ class CdpLldpSource(NeighborSource):
         for n in self.parsed_for(device).get("neighbors", []):
             ref = dict(n)
             ref["source"] = self.name
+            # Scans parsed before the serial was split off still hold
+            # NAME(SERIAL) in remote_device.
+            name, serial = split_device_id(ref.get("remote_device"))
+            if serial:
+                ref["remote_device"] = name.split(".")[0]
+                ref.setdefault("remote_serial", serial)
             refs.append(ref)
         return refs
 

@@ -306,47 +306,446 @@ def evaluate(acl, source_ip, service=VTY):
     return DENY, None
 
 
-def check_source_access(config, source_ip, device, acl_output=""):
-    """Warnings for each vty/SNMP ACL on device that denies source_ip.
+def vty_blocks(config):
+    """[(label, acl name or None)] for each 'line vty' block.
 
-    An ACL named but not defined anywhere is skipped: IOS treats an undefined
-    access-class as permit-all.
+    'access-class NAME in vrf-also' counts; 'ipv6 access-class' does not,
+    since only IPv4 sources are judged.
+    """
+    blocks = []
+    current = None
+    for raw in (config or "").splitlines():
+        if not raw.strip():
+            continue
+        if not raw[:1].isspace():
+            current = None
+            stripped = raw.strip()
+            if _LINE_VTY_RE.match(stripped):
+                current = [stripped, None]
+                blocks.append(current)
+            continue
+        if current is not None and current[1] is None:
+            m = _ACCESS_CLASS_RE.match(raw)
+            if m:
+                current[1] = m.group(1)
+    return [tuple(b) for b in blocks]
+
+
+def _community_acl(tokens):
+    """ACL named on one 'snmp-server community' line (tokens after the
+    community string), or None."""
+    name = None
+    i = 0
+    while i < len(tokens):
+        low = tokens[i].lower()
+        if low in ("use-acl", "use-ipv4acl") and i + 1 < len(tokens):
+            return tokens[i + 1]
+        if low in ("view", "ipv6", "group", "use-ipv6acl"):
+            i += 2
+            continue
+        if low in ("ro", "rw"):
+            i += 1
+            continue
+        name = tokens[i]
+        i += 1
+    return name
+
+
+def _group_acl(tokens):
+    """IPv4 ACL after 'access' on an 'snmp-server group' line, or None."""
+    for i, tok in enumerate(tokens):
+        if tok.lower() != "access":
+            continue
+        rest = tokens[i + 1:]
+        if rest[:1] and rest[0].lower() == "ipv6":
+            rest = rest[2:]
+        return rest[0] if rest else None
+    return None
+
+
+def snmp_sources(config):
+    """[(label, acl name or None)] for every community and v3 group.
+
+    NX-OS puts a community's group and its ACL on separate lines; the group
+    line alone does not mean the community is open.
+    """
+    sources = []
+    community_acls = {}
+    group_only = []
+    for raw in (config or "").splitlines():
+        line = raw.strip()
+        tokens = line.split()
+        low = line.lower()
+        if low.startswith("snmp-server community ") and len(tokens) >= 3:
+            community = tokens[2]
+            acl = _community_acl(tokens[3:])
+            if acl is None and "group" in (t.lower() for t in tokens[3:]):
+                group_only.append(community)
+                continue
+            community_acls.setdefault(community, acl)
+            if acl and community_acls[community] is None:
+                community_acls[community] = acl
+            sources.append(("community", acl))
+        elif low.startswith("snmp-server group ") and len(tokens) >= 3:
+            sources.append((f"group {tokens[2]}", _group_acl(tokens[3:])))
+    for community in group_only:
+        if community not in community_acls:
+            sources.append(("community", None))
+    return sources
+
+
+def interface_access_groups(config):
+    """[(interface, acl name)] for inbound IPv4 interface ACLs."""
+    found = []
+    interface = None
+    for raw in (config or "").splitlines():
+        if not raw.strip():
+            continue
+        if not raw[:1].isspace():
+            stripped = raw.strip()
+            interface = (stripped.split(None, 1)[1]
+                         if stripped.lower().startswith("interface ")
+                         and len(stripped.split()) > 1 else None)
+            continue
+        if interface is None:
+            continue
+        m = re.match(r"^\s*ip\s+access-group\s+(\S+)\s+in\b", raw, re.I)
+        if m:
+            found.append((interface, m.group(1)))
+    return found
+
+
+def acl_label(name):
+    """'ACL 99' for a numbered ACL, the bare name for a named one."""
+    return f"ACL {name}" if str(name).isdigit() else str(name)
+
+
+def _judge(acls, name, source_ip, service):
+    """(PERMIT|DENY|UNKNOWN, matched entry) for one ACL reference.
+
+    No ACL, or an ACL named but not defined anywhere, permits: IOS treats
+    an undefined access-class or community ACL as permit-all.
+    """
+    if not name:
+        return PERMIT, None
+    acl = acls.get(name)
+    if not acl:
+        return PERMIT, "not defined"
+    return evaluate(acl, source_ip, service)
+
+
+def _service_result(results, any_permit_wins):
+    """Fold per-reference results into (permitted, deciding results)."""
+    permits = [r for r in results if r[1] == PERMIT]
+    denies = [r for r in results if r[1] == DENY]
+    unknown = [r for r in results if r[1] == UNKNOWN]
+    if any_permit_wins:
+        if permits:
+            return True, permits
+        if unknown:
+            return None, unknown
+        return False, denies
+    if not permits and not unknown:
+        return False, denies
+    if not denies and not unknown:
+        return True, permits
+    return None, unknown or denies
+
+
+def _describe(results):
+    parts = []
+    for label, result, name, entry in results:
+        what = acl_label(name) if name else "no ACL"
+        if entry == "not defined":
+            what += " (not defined, permits all)"
+        elif entry:
+            what += f" ({entry})"
+        elif name and result == DENY:
+            what += " (implicit deny)"
+        parts.append(f"{label}: {result} by {what}")
+    return "; ".join(parts)
+
+
+def assess_source_access(config, source_ip, acl_output=""):
+    """Per-service verdict for source_ip against the device's own config.
+
+    Returns {"ssh": {...}, "snmp": {...}}; each holds "permitted" (True,
+    False or None when it cannot be judged), "acl" (the deciding ACL name
+    or None), "detail" and "matched_entry". SSH also lists inbound
+    interface ACLs and whether each lets SSH from source_ip through; that
+    is informational only, since which interface the traffic arrives on
+    is not known. None when source_ip is not an IPv4 address.
     """
     try:
         if not source_ip or ipaddress.ip_address(source_ip).version != 4:
-            return []
+            return None
     except ValueError:
-        return []
+        return None
     acls = parse_show_access_lists(acl_output)
     acls.update(parse_acls(config))
 
-    warnings = []
-    checks = [(VTY, name) for name in vty_access_classes(config)]
-    checks += [(SNMP, name) for name in snmp_community_acls(config)]
-    for service, name in checks:
+    blocks = vty_blocks(config)
+    if blocks:
+        results = []
+        for label, name in blocks:
+            result, entry = _judge(acls, name, source_ip, VTY)
+            results.append((label, result, name, entry))
+        permitted, deciding = _service_result(results, any_permit_wins=False)
+        names = [r[2] for r in deciding if r[2]]
+        ssh = {
+            "permitted": permitted,
+            "acl": names[0] if names else None,
+            "matched_entry": (deciding[0][3] if deciding else None),
+            "detail": _describe(results),
+        }
+    else:
+        ssh = {"permitted": True, "acl": None, "matched_entry": None,
+               "detail": "no line vty block in config"}
+    interface_acls = []
+    for interface, name in interface_access_groups(config):
         acl = acls.get(name)
         if not acl:
             continue
-        result, entry = evaluate(acl, source_ip, service)
-        if result != DENY:
+        result, entry = evaluate(acl, source_ip, VTY)
+        interface_acls.append({
+            "interface": interface, "acl": name,
+            "permitted": {PERMIT: True, DENY: False}.get(result),
+            "matched_entry": entry or "implicit deny",
+        })
+    ssh["interface_acls"] = interface_acls
+
+    sources = snmp_sources(config)
+    if sources:
+        results = []
+        for label, name in sources:
+            result, entry = _judge(acls, name, source_ip, SNMP)
+            results.append((label, result, name, entry))
+        permitted, deciding = _service_result(results, any_permit_wins=True)
+        names = [r[2] for r in deciding if r[2]]
+        snmp = {
+            "permitted": permitted,
+            "acl": names[0] if names else None,
+            "matched_entry": (deciding[0][3] if deciding else None),
+            "detail": _describe(results),
+        }
+    else:
+        snmp = {"permitted": None, "acl": None, "matched_entry": None,
+                "configured": False,
+                "detail": "no SNMP community or group in config"}
+    return {"ssh": ssh, "snmp": snmp}
+
+
+_SERVICE_NAMES = {"ssh": "SSH", "snmp": "SNMP"}
+
+
+def service_phrase(service, verdict):
+    """'SSH permitted by VTY-IN', 'SNMP blocked by ACL 99', ..."""
+    label = _SERVICE_NAMES[service]
+    if verdict is None:
+        return f"{label} not checked"
+    if verdict.get("configured") is False:
+        return f"{label} not configured"
+    acl = verdict.get("acl")
+    permitted = verdict.get("permitted")
+    if permitted is True:
+        if acl:
+            return f"{label} permitted by {acl_label(acl)}"
+        if service == "ssh":
+            return f"{label} permitted (no vty access-class)"
+        return f"{label} permitted (no ACL)"
+    if permitted is False:
+        return f"{label} blocked by {acl_label(acl)}" if acl \
+            else f"{label} blocked"
+    if acl:
+        return f"{label} unknown ({acl_label(acl)} could not be evaluated)"
+    return f"{label} unknown"
+
+
+def access_warnings(assessment, source_ip, device, method=None):
+    """Warning records for services that are blocked or cannot be judged.
+
+    An unconfigured service never warns.
+    """
+    warnings = []
+    if not assessment:
+        return warnings
+    nat_note = ""
+    if method == SOURCE_LOCAL_SOCKET:
+        nat_note = (" (address taken from the local socket; set Source IP "
+                    "if devices see this host under a different address)")
+    for service, kind in (("ssh", VTY), ("snmp", SNMP)):
+        verdict = assessment.get(service) or {}
+        permitted = verdict.get("permitted")
+        if permitted is True or verdict.get("configured") is False:
             continue
-        if service == VTY:
-            message = (f"This host ({source_ip}) is not permitted by vty "
-                       f"access-class {name} on {device}; expect connection "
-                       f"refused on devices sharing that ACL")
+        acl = verdict.get("acl")
+        what = (f"vty access-class {acl}" if service == "ssh"
+                else f"SNMP ACL {acl}") if acl else (
+            "the vty access-class" if service == "ssh" else "the SNMP ACLs")
+        if permitted is False:
+            consequence = ("expect connection refused on devices sharing "
+                           "that ACL" if service == "ssh" else
+                           "SNMP fallback will not answer on devices "
+                           "sharing that ACL")
+            message = (f"This host ({source_ip}) is not permitted by {what} "
+                       f"on {device}; {consequence}{nat_note}")
         else:
-            message = (f"This host ({source_ip}) is not permitted by SNMP "
-                       f"community ACL {name} on {device}; SNMP fallback will "
-                       f"not answer on devices sharing that ACL")
+            message = (f"Could not tell whether this host ({source_ip}) is "
+                       f"permitted by {what} on {device}: "
+                       f"{verdict.get('detail')}")
         warnings.append({
-            "kind": service,
-            "acl": name,
+            "kind": kind,
+            "service": service,
+            "permitted": permitted,
+            "acl": acl,
             "device": device,
             "source_ip": source_ip,
-            "matched_entry": entry or "implicit deny",
+            "matched_entry": verdict.get("matched_entry") or "implicit deny",
             "message": message,
         })
     return warnings
+
+
+def check_source_access(config, source_ip, device, acl_output=""):
+    """Warnings for each service on device that does not permit source_ip."""
+    return access_warnings(
+        assess_source_access(config, source_ip, acl_output=acl_output),
+        source_ip, device)
+
+
+# --- Source address -------------------------------------------------------
+
+SOURCE_CONFIGURED = "configured"
+SOURCE_SHOW_USERS = "seed-session (show users)"
+SOURCE_TCP_BRIEF = "seed-session (show tcp brief)"
+SOURCE_LOCAL_SOCKET = "local-socket (may be NATed/container address)"
+
+_METHOD_LABELS = {
+    SOURCE_CONFIGURED: "configured",
+    SOURCE_SHOW_USERS: "learned from seed session",
+    SOURCE_TCP_BRIEF: "learned from seed session",
+    SOURCE_LOCAL_SOCKET: "local socket, may be a NAT or container address",
+}
+
+_IPV4_RE = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d])")
+_TCP_ADDR_RE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3})[.:](\d+)$")
+# Platforms whose 'show users' marks the caller's own session.
+_SHOW_USERS_PLATFORMS = ("cisco_ios", "cisco_xe", "cisco_nxos")
+_TCP_BRIEF_PLATFORMS = ("cisco_ios", "cisco_xe")
+
+
+def clean_source_ip(value):
+    """A stated source address as a string, '' when blank.
+
+    Raises ValueError for anything that is not a single IPv4 address.
+    """
+    value = (value or "").strip()
+    if not value:
+        return ""
+    try:
+        addr = ipaddress.IPv4Address(value)
+    except ValueError:
+        raise ValueError(f"Source IP must be an IPv4 address, not {value!r}")
+    return str(addr)
+
+
+def _ipv4(text):
+    try:
+        return str(ipaddress.IPv4Address(text))
+    except ValueError:
+        return None
+
+
+def parse_show_users(output, username=None):
+    """The peer address of our own session in 'show users' output, or None.
+
+    IOS and IOS-XE mark the caller's line with a leading '*'; NX-OS marks it
+    with a trailing '*'. Without a marker, the last session line naming
+    username is taken as the most recent.
+    """
+    marked = None
+    by_user = None
+    for raw in (output or "").splitlines():
+        tokens = raw.split()
+        if not tokens:
+            continue
+        addrs = [a for a in (_ipv4(m) for m in _IPV4_RE.findall(raw)) if a]
+        is_ours = tokens[0].startswith("*") or tokens[-1] == "*"
+        if is_ours:
+            marked = addrs[-1] if addrs else None
+            break
+        if username and username in tokens and addrs:
+            by_user = addrs[-1]
+    return marked or by_user
+
+
+def parse_tcp_brief(output, local_ip=None, port=22):
+    """The foreign address of the established session to local port, or None.
+
+    When local_ip is given only connections to that address count. Several
+    different peers on the port leave the answer ambiguous, so None.
+    """
+    peers = []
+    for raw in (output or "").splitlines():
+        tokens = raw.split()
+        if len(tokens) < 3:
+            continue
+        if not any(t.upper().startswith("ESTAB") for t in tokens):
+            continue
+        addrs = [_TCP_ADDR_RE.match(t) for t in tokens]
+        addrs = [m for m in addrs if m]
+        if len(addrs) < 2:
+            continue
+        local, foreign = addrs[0], addrs[1]
+        if local.group(2) != str(port):
+            continue
+        if local_ip and local.group(1) != local_ip:
+            continue
+        peer = _ipv4(foreign.group(1))
+        if peer and peer not in peers:
+            peers.append(peer)
+    return peers[0] if len(peers) == 1 else None
+
+
+def learn_source_ip(conn, device_type, username=None, local_ip=None,
+                    protocol="ssh"):
+    """(address, method) of this host as the device sees it, or (None, None).
+
+    Asks the device who is logged in. Runs on the live session before any
+    collector, with plain send_command, so collected output is untouched.
+    """
+    platform = (device_type or "").lower()
+    port = 23 if (protocol or "").lower() == "telnet" else 22
+
+    def run(cmd):
+        try:
+            return conn.send_command(cmd, read_timeout=15)
+        except Exception:
+            return ""
+
+    if platform.startswith(_SHOW_USERS_PLATFORMS):
+        addr = parse_show_users(run("show users"), username=username)
+        if addr:
+            return addr, SOURCE_SHOW_USERS
+    if platform.startswith(_TCP_BRIEF_PLATFORMS):
+        addr = parse_tcp_brief(run("show tcp brief"), local_ip=local_ip,
+                               port=port)
+        if addr:
+            return addr, SOURCE_TCP_BRIEF
+    return None, None
+
+
+def summary_line(source_ip, method, assessment):
+    """'Scanning from 192.0.2.50 (learned from seed session) -- SSH
+    permitted by VTY-IN, SNMP blocked by ACL 99'."""
+    if not source_ip:
+        return None
+    label = _METHOD_LABELS.get(method, method or "unknown")
+    line = f"Scanning from {source_ip} ({label})"
+    if assessment:
+        line += " — " + ", ".join(
+            service_phrase(s, assessment.get(s)) for s in ("ssh", "snmp"))
+    return line
 
 
 def refused_hint(failed, source_ip, threshold=3):

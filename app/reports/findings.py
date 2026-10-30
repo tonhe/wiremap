@@ -17,7 +17,21 @@ Every finding is a dict with hostname, severity, title, description and
 type. ``type`` is a stable key for the kind of check (titles can embed
 per-instance detail such as a VLAN id), and is what the over-firing check
 groups on.
+
+Aggregation: a check that fires on hundreds of devices with the same
+detail (one template ACL left unreferenced everywhere) is one problem, not
+hundreds. ``aggregate_findings`` collapses findings that share type,
+severity and normalized details into one row with a device count; the
+per-device rows still go to a ``Findings (detail)`` sheet. A finding can
+pin its grouping by passing ``aggregate_key`` (the details text shown on
+the aggregated row) when its description carries per-device specifics
+such as rule counts or peer addresses.
+
+Summary counts: the ``<Severity> Findings`` metrics count per-device
+instances (rows on the detail sheet); the ``(distinct)`` metrics count
+aggregated rows (rows on the Findings sheet).
 """
+import re
 from collections import defaultdict
 
 CRITICAL = "Critical"
@@ -87,3 +101,103 @@ def overfire_check(findings, device_count, threshold=0.5, min_devices=4):
                 about=ftype,
             ))
     return findings
+
+
+# ---------------------------------------------------------------------------
+# Aggregation
+# ---------------------------------------------------------------------------
+
+AGGREGATE_HEADERS = ["Severity", "Finding", "Details", "Device count", "Devices"]
+DETAIL_SHEET = "Findings (detail)"
+DEVICE_LIST_LIMIT = 10
+
+_SEVERITY_ORDER = {sev: i for i, sev in enumerate(SEVERITIES)}
+
+
+def default_aggregate_key(finding):
+    """Details text a finding groups on: its explicit ``aggregate_key``, or
+    the description with the device's own hostname replaced and whitespace
+    collapsed."""
+    key = finding.get("aggregate_key")
+    if key:
+        return key
+    text = str(finding.get("description", ""))
+    hostname = finding.get("hostname") or ""
+    if hostname:
+        text = re.sub(re.escape(hostname), "<device>", text, flags=re.IGNORECASE)
+    return " ".join(text.split())
+
+
+def format_device_list(hosts, limit=DEVICE_LIST_LIMIT):
+    hosts = sorted(hosts)
+    shown = ", ".join(hosts[:limit])
+    if len(hosts) > limit:
+        shown += f", +{len(hosts) - limit} more"
+    return shown
+
+
+def aggregate_findings(findings, key_fn=None):
+    """Collapse findings identical in (type, severity, normalized details).
+
+    Returns a list of dicts (severity, title, type, details, device_count,
+    devices, findings) sorted Critical, Warning, Info, then by device count
+    descending. ``title`` is the shared title, or the type when titles
+    differ within the group. Findings with no hostname (fabric-wide ones,
+    over-fire notes) contribute no devices.
+    """
+    key_fn = key_fn or default_aggregate_key
+    groups = {}
+    order = []
+    for f in findings:
+        severity = f.get("severity", INFO)
+        ftype = f.get("type") or f.get("title", "")
+        details = key_fn(f)
+        k = (ftype, severity, details)
+        group = groups.get(k)
+        if group is None:
+            group = groups[k] = {
+                "severity": severity, "type": ftype, "details": details,
+                "titles": [], "hosts": set(), "findings": [],
+            }
+            order.append(k)
+        group["findings"].append(f)
+        title = f.get("title", "")
+        if title not in group["titles"]:
+            group["titles"].append(title)
+        if f.get("hostname"):
+            group["hosts"].add(f["hostname"])
+
+    result = []
+    for k in order:
+        g = groups[k]
+        result.append({
+            "severity": g["severity"],
+            "type": g["type"],
+            "title": g["titles"][0] if len(g["titles"]) == 1 else g["type"],
+            "details": g["details"],
+            "device_count": len(g["hosts"]),
+            "devices": sorted(g["hosts"]),
+            "findings": g["findings"],
+        })
+    result.sort(key=lambda a: (_SEVERITY_ORDER.get(a["severity"], len(SEVERITIES)),
+                               -a["device_count"], a["title"], a["details"]))
+    return result
+
+
+def aggregate_rows(findings, key_fn=None):
+    """Aggregated Findings sheet rows, matching AGGREGATE_HEADERS."""
+    return [
+        [a["severity"], a["title"], a["details"], a["device_count"],
+         format_device_list(a["devices"])]
+        for a in aggregate_findings(findings, key_fn)
+    ]
+
+
+def summary_count_rows(findings):
+    """Summary-sheet metrics: per-device instance counts by severity, then
+    distinct (aggregated) counts by severity."""
+    raw = count_by_severity(findings)
+    distinct = count_by_severity(aggregate_findings(findings))
+    rows = [[f"{sev} Findings", raw[sev]] for sev in SEVERITIES]
+    rows += [[f"{sev} Findings (distinct)", distinct[sev]] for sev in SEVERITIES]
+    return rows

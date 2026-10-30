@@ -26,7 +26,10 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from .base import BaseReport
-from .findings import CRITICAL, WARNING, INFO, make_finding, overfire_check
+from .findings import (
+    CRITICAL, WARNING, INFO, AGGREGATE_HEADERS, DETAIL_SHEET,
+    make_finding, overfire_check, aggregate_rows, summary_count_rows,
+)
 from .l2_discovery import (
     _extract_ip_interfaces,
     _get_interface_description,
@@ -197,6 +200,8 @@ def _analyze_l3(inventory_data):
                     f"{static_count} static route(s) present despite dynamic "
                     f"routing protocol(s) -- potential oversight"
                 ),
+                aggregate_key=("Static routes present despite dynamic routing "
+                               "protocol(s) -- potential oversight"),
             ))
 
         # --- /32 host route leak check ---
@@ -213,6 +218,7 @@ def _analyze_l3(inventory_data):
                     f"{host_routes} host routes detected -- "
                     f"possible redistribution leak"
                 ),
+                aggregate_key="More than 20 host routes -- possible redistribution leak",
             ))
 
         # --- BGP peer state check ---
@@ -344,18 +350,11 @@ def _build_summary_sheet(wb, analysis, inventory_data):
         total_routes += len(l3.get("routes", []))
 
     # Finding counts
-    critical = sum(1 for f in analysis["findings"] if f.get("severity") == "Critical")
-    warning = sum(1 for f in analysis["findings"] if f.get("severity") == "Warning")
-    info = sum(1 for f in analysis["findings"] if f.get("severity") == "Info")
-
     metrics = [
         ("Total Devices", device_count),
         ("Routed Devices", routed_count),
         ("Total Routes", total_routes),
-        ("Critical Findings", critical),
-        ("Warning Findings", warning),
-        ("Info Findings", info),
-    ]
+    ] + [tuple(r) for r in summary_count_rows(analysis["findings"])]
 
     row = 2
     for metric, value in metrics:
@@ -972,23 +971,43 @@ def _build_fhrp_sheet(wb, inventory_data):
 
 
 def _collect_collector_errors(inventory_data):
-    """Return (hostname, collector, error) for every collector that failed.
+    """Return (hostname, collector, kind, error) for every rejected command.
 
     A device that rejected a command produces no rows in the data sheets,
     which is indistinguishable from a device that simply had nothing to
-    report. This makes the difference visible.
+    report. This makes the difference visible. Kind separates commands the
+    platform does not have (not applicable) from ones that should have
+    worked (failed, unauthorized); real failures sort first.
     """
+    try:
+        from app.collectors.base import command_error_kinds
+        from app.collectors.errors import (
+            KIND_LABELS, FAILED, NOT_APPLICABLE, error_kind)
+    except ImportError:
+        from collectors.base import command_error_kinds
+        from collectors.errors import (
+            KIND_LABELS, FAILED, NOT_APPLICABLE, error_kind)
+
     rows = []
     for hostname, device in sorted(inventory_data.get("devices", {}).items()):
         for cname, cdata in sorted(device.get("collector_data", {}).items()):
-            parsed = cdata.get("parsed", {})
-            if parsed.get("collector_failed"):
-                rows.append((hostname, cname, parsed.get("collector_error", "")))
+            parsed = cdata.get("parsed", {}) or {}
+            errors = parsed.get("command_errors") or {}
+            kinds = command_error_kinds(parsed)
+            if parsed.get("collector_failed") and not errors:
+                # Older scans: only the first error line was kept.
+                error = parsed.get("collector_error", "")
+                kind = error_kind(error) or FAILED
+                rows.append((hostname, cname, KIND_LABELS[kind], error))
                 continue
             # A partially failed collector still produced data, but the
             # rejected commands' sheets are silently short.
-            for cmd, reason in (parsed.get("command_errors") or {}).items():
-                rows.append((hostname, cname, f"{cmd}: {reason}"))
+            for cmd, reason in errors.items():
+                kind = kinds.get(cmd) or FAILED
+                rows.append((hostname, cname, KIND_LABELS.get(kind, kind),
+                             f"{cmd}: {reason}"))
+    na_label = KIND_LABELS[NOT_APPLICABLE]
+    rows.sort(key=lambda r: r[2] == na_label)
     return rows
 
 
@@ -997,47 +1016,59 @@ def _build_collection_errors_sheet(wb, inventory_data):
     if not rows:
         return
     ws = wb.create_sheet(title="Collection Errors")
-    headers = ["Device", "Site/Location", "Collector", "Error"]
+    headers = ["Device", "Site/Location", "Collector", "Kind", "Error"]
     _write_header_row(ws, headers)
-    for idx, (hostname, cname, error) in enumerate(rows, start=2):
-        _write_row(ws, idx, [hostname, _derive_site(hostname), cname, error])
+    for idx, (hostname, cname, kind, error) in enumerate(rows, start=2):
+        _write_row(ws, idx, [hostname, _derive_site(hostname), cname, kind,
+                             error])
     _finalize(ws, "CollectionErrors", len(headers), len(rows) + 1)
 
 
-def _build_findings_sheet(wb, analysis):
-    ws = wb.create_sheet(title="Findings")
-    headers = ["Device", "Site/Location", "Severity", "Finding", "Details"]
+FINDINGS_DETAIL_HEADERS = ["Device", "Site/Location", "Severity", "Finding", "Details"]
+
+
+def findings_detail_rows(findings):
+    return [[f.get("hostname", ""), _derive_site(f.get("hostname", "")),
+             f.get("severity", "Info"), f["title"], f["description"]]
+            for f in findings]
+
+
+def _write_severity_sheet(wb, title, table_name, headers, rows, sev_col):
+    ws = wb.create_sheet(title=title)
     _write_header_row(ws, headers)
-
     row = 2
-    for finding in analysis["findings"]:
-        hostname = finding.get("hostname", "")
-        severity = finding.get("severity", "Info")
-        _write_row(ws, row, [
-            hostname,
-            _derive_site(hostname),
-            severity,
-            finding["title"],
-            finding["description"],
-        ])
-        # Color-code by severity
-        if severity == "Critical":
+    for values in rows:
+        _write_row(ws, row, values)
+        severity = values[sev_col]
+        style = {"Critical": (_CRITICAL_FONT, _CRITICAL_FILL),
+                 "Warning": (_WARNING_FONT, _WARNING_FILL)}.get(severity)
+        if style:
             for col in range(1, len(headers) + 1):
                 cell = ws.cell(row=row, column=col)
-                cell.font = _CRITICAL_FONT
-                cell.fill = _CRITICAL_FILL
-        elif severity == "Warning":
-            for col in range(1, len(headers) + 1):
-                cell = ws.cell(row=row, column=col)
-                cell.font = _WARNING_FONT
-                cell.fill = _WARNING_FILL
+                cell.font, cell.fill = style
         row += 1
-
-    if not analysis["findings"]:
+    if not rows:
         ws.cell(row=2, column=1, value="No findings detected.")
         row = 3
+    _finalize(ws, table_name, len(headers), row - 1)
+    return ws
 
-    _finalize(ws, "L3Findings", len(headers), row - 1)
+
+def write_findings_sheets(wb, findings, table_prefix):
+    """Aggregated Findings sheet plus the per-device Findings (detail) sheet."""
+    _write_severity_sheet(wb, "Findings", table_prefix, AGGREGATE_HEADERS,
+                          aggregate_rows(findings), 0)
+    _write_severity_sheet(wb, DETAIL_SHEET, table_prefix + "Detail",
+                          FINDINGS_DETAIL_HEADERS, findings_detail_rows(findings), 2)
+
+
+def findings_tabular_sheets(sheets, findings):
+    sheets["Findings"] = (list(AGGREGATE_HEADERS), aggregate_rows(findings))
+    sheets[DETAIL_SHEET] = (list(FINDINGS_DETAIL_HEADERS), findings_detail_rows(findings))
+
+
+def _build_findings_sheet(wb, analysis):
+    write_findings_sheets(wb, analysis["findings"], "L3Findings")
 
 
 # ---------------------------------------------------------------------------
@@ -1136,20 +1167,13 @@ class RoutingSummaryReport(BaseReport):
                 routed_count += 1
             total_routes += len(l3.get("routes", []))
 
-        critical = sum(1 for f in analysis["findings"] if f.get("severity") == "Critical")
-        warning = sum(1 for f in analysis["findings"] if f.get("severity") == "Warning")
-        info = sum(1 for f in analysis["findings"] if f.get("severity") == "Info")
-
         sheets["Summary"] = (
             ["Metric", "Value"],
             [
                 ["Total Devices", len(devices)],
                 ["Routed Devices", routed_count],
                 ["Total Routes", total_routes],
-                ["Critical Findings", critical],
-                ["Warning Findings", warning],
-                ["Info Findings", info],
-            ],
+            ] + summary_count_rows(analysis["findings"]),
         )
 
         # --- Protocol Neighbors ---
@@ -1411,18 +1435,7 @@ class RoutingSummaryReport(BaseReport):
                     ])
             sheets["FHRP Status"] = (fhrp_headers, fhrp_rows)
 
-        # --- Findings ---
-        findings_headers = ["Device", "Site/Location", "Severity", "Finding", "Details"]
-        findings_rows = []
-        for finding in analysis["findings"]:
-            hostname = finding.get("hostname", "")
-            findings_rows.append([
-                hostname,
-                _derive_site(hostname),
-                finding.get("severity", "Info"),
-                finding["title"],
-                finding["description"],
-            ])
-        sheets["Findings"] = (findings_headers, findings_rows)
+        # --- Findings (aggregated) and Findings (detail) ---
+        findings_tabular_sheets(sheets, analysis["findings"])
 
         return sheets

@@ -1,7 +1,7 @@
 """
 Device Inventory report -- hostname, IP, platform, version, serial.
 Sheets: Devices, Stack Members, Modules / Line Cards, Failed Devices,
-and Skipped (Controller-Managed) when any device was skipped.
+and Not Collected when any device was controller-managed or not attempted.
 """
 import io
 import re
@@ -15,9 +15,13 @@ try:
 except ImportError:
     from device_facts import extract_device_facts, extract_version_details
 try:
-    from app.failures import failure_record, REASON_LABELS, SKIP_HINTS
+    from app.failures import (failure_record, REASON_LABELS, SKIP_HINTS,
+                              AUTH, REFUSED, TIMEOUT, LEGACY_CRYPTO,
+                              NO_TELNET_DRIVER, OTHER)
 except ImportError:
-    from failures import failure_record, REASON_LABELS, SKIP_HINTS
+    from failures import (failure_record, REASON_LABELS, SKIP_HINTS,
+                          AUTH, REFUSED, TIMEOUT, LEGACY_CRYPTO,
+                          NO_TELNET_DRIVER, OTHER)
 
 
 def _normalize_keys(d: dict) -> dict:
@@ -262,6 +266,9 @@ def _neighbour_protocols(hostname, device, inventory_data):
 
 def _discovered_via(hostname, device, inventory_data):
     """seed, target-list, cdp, lldp, snmp, ... -- how the device was found."""
+    # Newer scans record this per device; older ones are inferred below.
+    if device.get("discovered_via"):
+        return device["discovered_via"]
     source = device.get("discovery_source") or ""
     ip = device.get("mgmt_ip")
     if source in ("", "login"):
@@ -302,14 +309,24 @@ def _failure_reason(entry):
 
 
 def _collection_status(device, inventory_data):
-    """collected, partial:<collectors>, failed:<reason> or skipped:<reason>."""
+    """collected, partial:<collectors>, failed:<reason> or skipped:<reason>.
+
+    partial lists only collectors that lost data they should have had. A
+    command the platform does not support (show ip vrf on a LAN Base switch)
+    is not applicable and leaves the device collected.
+    """
+    try:
+        from app.collectors.base import collector_has_failures
+    except ImportError:
+        from collectors.base import collector_has_failures
+
     summary = inventory_data.get("scan_summary") or {}
     ip = device.get("mgmt_ip")
 
     if device.get("login_succeeded"):
         failed = sorted(
             name for name, data in (device.get("collector_data") or {}).items()
-            if ((data or {}).get("parsed") or {}).get("collector_failed"))
+            if collector_has_failures((data or {}).get("parsed")))
         return "partial:" + ",".join(failed) if failed else "collected"
 
     skipped = (summary.get("skipped") or {}).get(ip) if ip else None
@@ -348,6 +365,7 @@ class DeviceInventoryReport(BaseReport):
             self._build_modules_sheet(wb, inventory_data)
             self._build_licenses_sheet(wb, inventory_data)
             build_failed_devices_sheets(wb, inventory_data)
+            build_targets_sheet(wb, inventory_data)
 
             buf = io.BytesIO()
             wb.save(buf)
@@ -363,10 +381,10 @@ class DeviceInventoryReport(BaseReport):
         licenses = self._extract_licenses_data(inventory_data)
         if licenses[1]:
             result["Licenses"] = licenses
-        result["Failed Devices"] = extract_failed_devices_data(inventory_data)
-        skipped = extract_skipped_devices_data(inventory_data)
-        if skipped:
-            result["Skipped (Controller-Managed)"] = skipped
+        result.update(failed_devices_tabular(inventory_data))
+        targets = extract_targets_data(inventory_data)
+        if targets:
+            result["Targets"] = targets
         sources = self._extract_merge_sources(inventory_data)
         if sources:
             result["Merge Sources"] = sources
@@ -724,68 +742,199 @@ def _ip_sort_key(ip):
     return (1, str(ip))
 
 
+# Failure categories, in the order the Failed Devices sheet lists them.
+# The reader is usually someone fixing access, so each category maps to one
+# kind of fix: credentials, vty ACL, reachability, SSH keys, DNS.
+CATEGORY_LABELS = {
+    AUTH: "Auth rejected",
+    REFUSED: "Port refused",
+    TIMEOUT: "No response",
+    LEGACY_CRYPTO: "Legacy crypto",
+    NO_TELNET_DRIVER: "No telnet driver",
+    "dns": "DNS failure",
+    OTHER: "Other",
+}
+_CATEGORY_ORDER = {label: i for i, label in enumerate(CATEGORY_LABELS.values())}
+
+CONTROLLER_MANAGED = "Controller-managed"
+NOT_ATTEMPTED = "Not attempted"
+_NOT_COLLECTED_ORDER = {CONTROLLER_MANAGED: 0, NOT_ATTEMPTED: 1}
+
+DNS_HINT = ("Target name did not resolve from the wiremap host; check the "
+            "spelling or DNS, or list the management IP instead")
+NOT_ATTEMPTED_HINT = ("Discovered but never logged into: the scan ended "
+                      "(stopped, or a device or time limit was reached) "
+                      "before this host was reached")
+
+
 def _format_attempt(attempt):
+    """One attempt as 'ssh/22 (cisco_ios): Connection refused, 12ms'."""
     proto = attempt.get("protocol") or ""
     port = attempt.get("port")
     where = f"{proto}/{port}" if port else proto
+    if attempt.get("device_type"):
+        where += f" ({attempt['device_type']})"
+    reason = attempt.get("reason")
+    what = (REASON_LABELS.get(reason) if reason else None) \
+        or attempt.get("exception_class") or attempt.get("message") or "failed"
     elapsed = attempt.get("elapsed_ms")
-    took = f" {elapsed}ms" if elapsed else ""
-    return (f"{where} {attempt.get('device_type') or ''} "
-            f"{attempt.get('exception_class') or ''}{took}: "
-            f"{attempt.get('message') or ''}").strip()
+    took = f", {elapsed}ms" if elapsed else ""
+    return f"{where.strip()}: {what}{took}".strip()
+
+
+def _failed_sort_key(row):
+    return (_CATEGORY_ORDER.get(row[0], len(_CATEGORY_ORDER)),
+            _ip_sort_key(row[1]) if row[1] else (2, str(row[2])))
 
 
 def extract_failed_devices_data(inventory_data):
-    """(headers, rows) for hosts that could not be logged into."""
+    """(headers, rows) for hosts that could not be logged into, plus
+    target-list names that never resolved. Sorted by category then IP."""
     summary = inventory_data.get("scan_summary") or {}
-    headers = ["Mgmt IP", "Hostname", "Platform", "Reason", "Hint",
-               "Attempts", "Error"]
+    headers = ["Category", "Mgmt IP", "Hostname", "Platform",
+               "Likely cause", "Attempts", "Error"]
     rows = []
-    for ip in sorted((summary.get("failed") or {}), key=_ip_sort_key):
-        record = failure_record(summary["failed"][ip])
+    for ip, value in (summary.get("failed") or {}).items():
+        record = failure_record(value)
         device = _neighbour_record(inventory_data, ip, record["hostname"])
         rows.append([
+            CATEGORY_LABELS.get(record["reason"], CATEGORY_LABELS[OTHER]),
             ip,
             record["hostname"] or device.get("hostname") or "",
             device.get("platform") or "",
-            REASON_LABELS.get(record["reason"], record["reason"]),
             record["hint"],
-            "\n".join(_format_attempt(a) for a in record["attempts"]),
+            "; ".join(_format_attempt(a) for a in record["attempts"]),
             record["message"],
         ])
+    for entry in summary.get("unresolved") or []:
+        if isinstance(entry, dict):
+            name, error = entry.get("input") or "", entry.get("error") or ""
+        else:
+            name, error = str(entry), ""
+        rows.append([CATEGORY_LABELS["dns"], "", name, "", DNS_HINT, "", error])
+    rows.sort(key=_failed_sort_key)
     return headers, rows
 
 
+def _not_attempted_entries(summary):
+    """(ip, entry dict) pairs from scan_summary['not_attempted'], which may
+    be a map keyed by IP or a list of IPs or records."""
+    value = summary.get("not_attempted") or {}
+    if isinstance(value, dict):
+        items = value.items()
+    else:
+        items = []
+        for entry in value:
+            if isinstance(entry, dict):
+                items.append((entry.get("ip") or entry.get("mgmt_ip") or "", entry))
+            else:
+                items.append((str(entry), {}))
+    out = []
+    for ip, entry in items:
+        if not isinstance(entry, dict):
+            entry = {"reason": str(entry)} if entry else {}
+        out.append((ip, entry))
+    return out
+
+
 def extract_skipped_devices_data(inventory_data):
-    """(headers, rows) for controller-managed hosts deliberately not logged
-    into. None when there are none, so ordinary scans get no empty sheet."""
-    skipped = (inventory_data.get("scan_summary") or {}).get("skipped") or {}
-    if not skipped:
-        return None
-    headers = ["Mgmt IP", "Hostname", "Platform", "Managed By", "Note"]
+    """(headers, rows) for hosts deliberately or never logged into --
+    controller-managed and not-attempted. These are coverage gaps, not
+    failures, so they get their own sheet. None when there are none, so
+    ordinary scans get no empty sheet."""
+    summary = inventory_data.get("scan_summary") or {}
+    headers = ["Category", "Mgmt IP", "Hostname", "Platform", "Managed By",
+               "Likely cause"]
     rows = []
-    for ip in sorted(skipped, key=_ip_sort_key):
-        entry = skipped[ip] or {}
+    for ip, entry in (summary.get("skipped") or {}).items():
+        entry = entry if isinstance(entry, dict) else {"reason": entry}
         device = _neighbour_record(inventory_data, ip, entry.get("hostname"))
         managed_by = entry.get("managed_by") or device.get("managed_by") or ""
         rows.append([
+            CONTROLLER_MANAGED,
             ip,
             entry.get("hostname") or device.get("hostname") or "",
             entry.get("platform") or device.get("platform") or "",
             _MANAGED_BY_LABELS.get(managed_by, managed_by),
             SKIP_HINTS.get(managed_by, ""),
         ])
+    for ip, entry in _not_attempted_entries(summary):
+        device = _neighbour_record(inventory_data, ip, entry.get("hostname"))
+        reason = entry.get("hint") or entry.get("reason") or ""
+        rows.append([
+            NOT_ATTEMPTED,
+            ip,
+            entry.get("hostname") or device.get("hostname") or "",
+            entry.get("platform") or device.get("platform") or "",
+            "",
+            f"{NOT_ATTEMPTED_HINT} ({reason})" if reason else NOT_ATTEMPTED_HINT,
+        ])
+    if not rows:
+        return None
+    rows.sort(key=lambda r: (_NOT_COLLECTED_ORDER.get(r[0], 9), _ip_sort_key(r[1])))
     return headers, rows
 
 
 _MANAGED_BY_LABELS = {"aci": "ACI (APIC)", "ucsm": "UCS Manager"}
 
+NOT_COLLECTED_SHEET = "Not Collected"
 
-def build_failed_devices_sheets(wb, inventory_data):
-    """Append the Failed Devices sheet, and a Controller-Managed sheet when
-    any device was skipped for that reason."""
-    headers, rows = extract_failed_devices_data(inventory_data)
-    create_sheet(wb, "Failed Devices", headers, rows)
+
+def failed_devices_tabular(inventory_data):
+    """OrderedDict of the Failed Devices sheet and, when any host was
+    skipped or not attempted, the Not Collected sheet."""
+    sheets = OrderedDict()
+    sheets["Failed Devices"] = extract_failed_devices_data(inventory_data)
     skipped = extract_skipped_devices_data(inventory_data)
     if skipped:
-        create_sheet(wb, "Skipped (Controller-Managed)", *skipped)
+        sheets[NOT_COLLECTED_SHEET] = skipped
+    return sheets
+
+
+def build_failed_devices_sheets(wb, inventory_data):
+    """Append the Failed Devices sheet, and a Not Collected sheet for
+    controller-managed and not-attempted hosts."""
+    for title, (headers, rows) in failed_devices_tabular(inventory_data).items():
+        create_sheet(wb, title, headers, rows)
+
+
+# --- Targets ----------------------------------------------------------------
+# What became of each host in a targeted scan's list, so a target that was
+# folded into another device or never reached still has a row.
+
+_TARGET_OUTCOME_LABELS = {
+    "collected": "Collected",
+    "merged_into": "Merged into another device",
+    "failed": "Failed",
+    "skipped": "Skipped",
+    "unresolved": "Unresolved",
+    "not_attempted": "Not attempted",
+}
+
+
+def extract_targets_data(inventory_data):
+    """(headers, rows) for scan_summary targets, or None for a scan
+    without a target list or from before targets carried an outcome."""
+    targets = (inventory_data.get("scan_summary") or {}).get("targets") or []
+    if not any(t.get("outcome") for t in targets):
+        return None
+    headers = ["Target", "Resolved IP", "Outcome", "Hostname", "Reason"]
+    rows = []
+    for t in targets:
+        reason = t.get("reason") or ""
+        if t.get("outcome") == "failed":
+            reason = REASON_LABELS.get(reason, reason)
+        rows.append([
+            t.get("input") or "",
+            t.get("resolved_ip") or "",
+            _TARGET_OUTCOME_LABELS.get(t.get("outcome"), t.get("outcome") or ""),
+            t.get("hostname") or "",
+            reason,
+        ])
+    return headers, rows
+
+
+def build_targets_sheet(wb, inventory_data):
+    data = extract_targets_data(inventory_data)
+    if data:
+        create_sheet(wb, "Targets", *data)

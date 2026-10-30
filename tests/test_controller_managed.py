@@ -100,18 +100,19 @@ def test_controller_managed_neighbours_kept_but_not_queued():
     queued = eng._extract_neighbors(inv, "core1", "192.0.2.1", "cisco_nxos", 0)
     assert queued == []
 
-    leaf = inv.devices["leaf101(FDO12345ABC)"]
+    leaf = inv.devices["leaf101"]
     assert leaf["managed_by"] == "aci"
+    assert leaf["serial"] == "FDO12345ABC"
     assert leaf["device_category"] == "switch"
     assert leaf["evidence"][0]["seen_from"] == "core1"
 
-    fi = inv.devices["fi-a(SSI12345ABC)"]
+    fi = inv.devices["fi-a"]
     assert fi["managed_by"] == "ucsm"
     assert fi["device_category"] == "fabric-interconnect"
     assert fi["device_type"] == "cisco_nxos"
 
     assert eng.skipped["192.0.2.101"] == {
-        "hostname": "leaf101(FDO12345ABC)", "reason": "controller_managed",
+        "hostname": "leaf101", "reason": "controller_managed",
         "managed_by": "aci", "platform": "N9K-C93180YC-EX",
     }
     assert eng.skipped["192.0.2.111"]["managed_by"] == "ucsm"
@@ -124,7 +125,7 @@ def test_controller_managed_collected_when_enabled():
     queued = eng._extract_neighbors(inv, "core1", "192.0.2.1", "cisco_nxos", 0)
     assert [ip for ip, _ in queued] == ["192.0.2.101"]
     assert eng.skipped == {}
-    assert inv.devices["leaf101(FDO12345ABC)"]["managed_by"] == "aci"
+    assert inv.devices["leaf101"]["managed_by"] == "aci"
 
 
 def test_known_controller_managed_target_is_not_logged_into(monkeypatch):
