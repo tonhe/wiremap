@@ -8,6 +8,11 @@ import tempfile
 import threading
 from datetime import datetime, timezone
 
+try:
+    from app.failures import failure_record, reason_counts  # noqa: F401
+except ImportError:
+    from failures import failure_record, reason_counts  # noqa: F401
+
 
 class DiscoveryInventory:
     """Represents a complete discovery run's data."""
@@ -126,31 +131,70 @@ class DiscoveryInventory:
         return self._data["devices"]
 
     def set_scan_summary(self, elapsed: float, failed: dict,
-                         out_of_scope=None, ceiling_hit=False):
+                         out_of_scope=None, ceiling_hit=False, skipped=None):
         """Persist scan summary metadata into the inventory data.
 
         out_of_scope records addresses a crawl boundary refused. A bounded
         scan that does not say what it skipped reads as a complete one.
+
+        failed maps IP -> failure record (see app.failures.failure_record;
+        older scans hold a plain string). skipped maps IP -> controller-
+        managed device not logged into on purpose, which is not a failure.
         """
+        skipped = skipped or {}
         self._data["scan_summary"] = {
             "elapsed": elapsed,
             "failed_count": len(failed),
             "failed": failed,
+            "failure_reasons": reason_counts(failed),
+            "skipped_count": len(skipped),
+            "skipped": skipped,
             "out_of_scope": sorted(out_of_scope or []),
             "out_of_scope_count": len(out_of_scope or []),
             "device_ceiling_hit": ceiling_hit,
         }
 
+    def update_scan_summary(self, **fields):
+        """Add fields to the stored scan summary."""
+        self._data.setdefault("scan_summary", {}).update(fields)
+
     def get_summary(self) -> dict:
         """Return summary stats for the Reports tab. Safe for old inventories."""
         stored = self._data.get("scan_summary", {})
+        failed = stored.get("failed") or {}
         return {
             "device_count": len(self._data.get("devices", {})),
             "seed_ip": self._data.get("seed_ip", ""),
             "timestamp": self._data.get("timestamp", ""),
             "elapsed": stored.get("elapsed"),
             "failed_count": stored.get("failed_count"),
+            # Recomputed rather than read back, so scans saved before
+            # failures were classified still get a breakdown.
+            "failure_reasons": reason_counts(failed),
+            "skipped_count": stored.get("skipped_count",
+                                        len(stored.get("skipped") or {})),
+            "source_ip": stored.get("source_ip"),
+            "source_access_warnings": list(
+                stored.get("source_access_warnings") or []),
+            "refused_hint": stored.get("refused_hint"),
+            "slowest": stored.get("slowest") or {"devices": [],
+                                                 "collectors": []},
         }
+
+    def set_controller_managed(self, hostname, managed_by,
+                               device_category=None):
+        """Tag a record as owned by a controller (APIC, UCS Manager).
+
+        These are deliberately not logged into, so the record says why it
+        holds no collected data.
+        """
+        with self._lock:
+            dev = self._data["devices"].get(hostname)
+            if dev is None:
+                return
+            dev["managed_by"] = managed_by
+            if device_category:
+                dev["device_category"] = device_category
 
     @staticmethod
     def _new_record(hostname, mgmt_ip=None, device_type=None,
@@ -313,7 +357,8 @@ class DiscoveryInventory:
                 return
             dev.setdefault("unresolved_neighbours", []).append({
                 "remote_ip": neighbor.get("remote_ip"),
-                "remote_port": neighbor.get("remote_port"),
+                "remote_port": (neighbor.get("remote_intf")
+                                or neighbor.get("remote_port")),
                 "source": neighbor.get("source", "cdp_lldp"),
             })
 

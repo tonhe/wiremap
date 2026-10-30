@@ -15,6 +15,13 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from .base import BaseReport
+from .findings import CRITICAL, WARNING, INFO, make_finding, overfire_check
+from .neighbor_lookup import neighbors_by_interface
+
+try:
+    from app.ifname import canonical_ifname
+except ImportError:
+    from ifname import canonical_ifname
 
 
 # ---------------------------------------------------------------------------
@@ -30,14 +37,14 @@ def _has_collector_data(inventory_data, collector_name):
 
 
 def _derive_site(hostname):
-    """Extract site code from hostname convention (e.g., 'NYC-CORE-01' -> 'NYC').
+    """Site code for a hostname: the configured site_rules, else the first
+    hyphen-delimited token of the short name ('NYC-CORE-01' -> 'NYC').
     Returns empty string if no pattern detected."""
-    if not hostname:
-        return ""
-    parts = hostname.split("-")
-    if len(parts) >= 2:
-        return parts[0]
-    return ""
+    try:
+        from site_mapping import derive_site
+    except ImportError:
+        from app.site_mapping import derive_site
+    return derive_site(hostname)
 
 
 # ---------------------------------------------------------------------------
@@ -219,12 +226,9 @@ def _get_interface_description(device, iface_name):
 
 def _get_cdp_neighbor(device, iface_name):
     """Look up CDP/LLDP neighbor for an interface."""
-    cdp_data = device.get("collector_data", {}).get("cdp_lldp", {})
-    parsed = cdp_data.get("parsed", {})
-    for n in parsed.get("neighbors", []):
-        if n.get("local_intf", "").lower() == iface_name.lower():
-            return n.get("remote_device", "")
-    return ""
+    # Switchport lists short names (Gi1/0/1) and CDP long ones
+    # (GigabitEthernet1/0/1); only canonical names compare equal.
+    return neighbors_by_interface(device).get(canonical_ifname(iface_name), "")
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +250,19 @@ def _analyze_vlans(inventory_data):
         stp_data = device.get("collector_data", {}).get("stp_vlan", {})
         parsed = stp_data.get("parsed", {})
 
-        for entry in parsed.get("spanning_tree_root", []):
+        root_entries = parsed.get("spanning_tree_root", [])
+        # Inventories collected before the IOS root parser was fixed hold
+        # an empty list; the raw output is still there to re-parse.
+        if not root_entries and device.get("device_type") != "cisco_nxos":
+            raw_root = stp_data.get("raw", {}).get("show spanning-tree root", "")
+            if raw_root.strip():
+                try:
+                    from app.collectors.stp_detail import parse_ios_stp_root
+                except ImportError:
+                    from collectors.stp_detail import parse_ios_stp_root
+                root_entries = parse_ios_stp_root(raw_root)
+
+        for entry in root_entries:
             # Handle both normalized and raw NX-OS field names
             vid = _norm_vid(str(entry.get("vlan_id", "")))
             root_mac = entry.get("root_address", "") or entry.get("root_id", "")
@@ -433,10 +449,15 @@ def _analyze_vlans(inventory_data):
     }
 
 
+# ACI only as its own token: it is a substring of ordinary names (FACILITIES).
+_INFRA_VLAN_RE = re.compile(r"VTEP|INFRA|FABRIC|(?<![A-Z])ACI(?![A-Z])", re.IGNORECASE)
+
+
 def _build_findings(vlans, blocked_ports, svi_ips, inventory_data):
     """Auto-detect anomalies and build findings list.
 
-    Each finding: {title, description}
+    Each finding is built by findings.make_finding (hostname, severity,
+    title, description, type); see findings.py for the severity rubric.
     """
     findings = []
 
@@ -460,7 +481,13 @@ def _build_findings(vlans, blocked_ports, svi_ips, inventory_data):
         title = f"{intf} -- {status_str}{reason_str}"
         desc = (f"{intf} is {status_str}{reason_str}. "
                 f"Affects VLANs: {vlan_str}.")
-        findings.append({"hostname": switch, "title": title, "description": desc})
+        # A plain BLK alternate port is STP doing its job; a broken or
+        # inconsistent port (BKN, *_Inc, err-disabled) is a probable fault.
+        broken = reasons or any(st.upper() != "BLK" for st in statuses)
+        findings.append(make_finding(
+            switch, WARNING if broken else INFO, title, desc,
+            finding_type="STP port not forwarding" if broken else "STP blocked port",
+        ))
 
     # 2. Default STP priority on root bridges
     for vid, info in sorted(vlans.items(),
@@ -476,12 +503,12 @@ def _build_findings(vlans, blocked_ports, svi_ips, inventory_data):
         # Default priority = 32768 + VLAN ID (or just 32768 for some platforms)
         if priority == 32768 + vlan_num or priority == 32768:
             root_dev = info.get("root_device") or info.get("root_bridge_mac") or "unknown"
-            findings.append({
-                "hostname": root_dev,
-                "title": f"VLAN {vid} -- default STP priority",
-                "description": (f"Root priority {priority} (32768+{vlan_num}, untuned). "
-                                f"Root election is arbitrary."),
-            })
+            findings.append(make_finding(
+                root_dev, WARNING, f"VLAN {vid} -- default STP priority",
+                (f"Root priority {priority} (32768+{vlan_num}, untuned). "
+                 f"Root election is arbitrary."),
+                finding_type="Default STP priority on root",
+            ))
 
     # 3. STP root bridge mismatches
     for vid, info in sorted(vlans.items(),
@@ -492,11 +519,11 @@ def _build_findings(vlans, blocked_ports, svi_ips, inventory_data):
         parts = []
         for mac, switches in bridges.items():
             parts.append(f"{mac} on {', '.join(sorted(switches))}")
-        findings.append({
-            "hostname": "",
-            "title": f"VLAN {vid} -- STP root bridge mismatch",
-            "description": f"Multiple root bridges detected: {'; '.join(parts)}.",
-        })
+        findings.append(make_finding(
+            "", CRITICAL, f"VLAN {vid} -- STP root bridge mismatch",
+            f"Multiple root bridges detected: {'; '.join(parts)}.",
+            finding_type="STP root bridge mismatch",
+        ))
 
     # 4. Subnets larger than /20
     for vid, ips in sorted(svi_ips.items(),
@@ -516,11 +543,16 @@ def _build_findings(vlans, blocked_ports, svi_ips, inventory_data):
                 # Collect all IPs for this VLAN with this prefix
                 entries = [f"{e['hostname']}: {e['ip']}/{e['prefix']}"
                            for e in ips if e.get("prefix") == prefix]
-                findings.append({
-                    "hostname": "",
-                    "title": title,
-                    "description": f"Large subnet (/{prefix_len}): {', '.join(entries)}. Verify intent.",
-                })
+                # Fabric/overlay infra VLANs (VTEP pools, ACI infra) are
+                # large by design.
+                infra = bool(_INFRA_VLAN_RE.search(vlan_name or ""))
+                desc = f"Large subnet (/{prefix_len}): {', '.join(entries)}."
+                desc += (" Name indicates fabric infrastructure; large by design."
+                         if infra else " Verify intent.")
+                findings.append(make_finding(
+                    "", INFO if infra else WARNING, title, desc,
+                    finding_type="Large subnet",
+                ))
                 break  # one finding per VLAN
 
     # 5. VLAN name discrepancies
@@ -548,12 +580,13 @@ def _build_findings(vlans, blocked_ports, svi_ips, inventory_data):
                 name_switches[name].append(switch)
             for name, switches in sorted(name_switches.items()):
                 parts.append(f'"{name}" on {", ".join(sorted(switches))}')
-            findings.append({
-                "hostname": "",
-                "title": f"VLAN {vid} -- name discrepancy",
-                "description": f"Different names: {'; '.join(parts)}.",
-            })
+            findings.append(make_finding(
+                "", INFO, f"VLAN {vid} -- name discrepancy",
+                f"Different names: {'; '.join(parts)}.",
+                finding_type="VLAN name discrepancy",
+            ))
 
+    overfire_check(findings, len(inventory_data.get("devices", {})))
     return findings
 
 
@@ -836,10 +869,10 @@ def _build_vlan_sheet(ws, analysis, inventory_data):
 
 
 def _build_findings_sheet(ws, analysis):
-    """Findings sheet -- Hostname, Site/Location, Port, Notes."""
+    """Findings sheet -- Hostname, Site/Location, Port, Notes, Severity."""
     findings = analysis["findings"]
 
-    headers = ["Hostname", "Site/Location", "Port", "Notes"]
+    headers = ["Hostname", "Site/Location", "Port", "Notes", "Severity"]
     _write_header_row(ws, headers, row=1)
 
     row = 2
@@ -851,6 +884,7 @@ def _build_findings_sheet(ws, analysis):
             ws.cell(row=row, column=3, value=finding["title"])
             cell = ws.cell(row=row, column=4, value=finding["description"])
             cell.alignment = _WRAP_ALIGN
+            ws.cell(row=row, column=5, value=finding.get("severity", ""))
             row += 1
     else:
         ws.cell(row=row, column=1, value="No findings detected.")
@@ -1300,7 +1334,7 @@ class L2DiscoveryReport(BaseReport):
         sheets["VLAN Documentation"] = (vlan_headers, vlan_rows)
 
         # ---- Findings sheet ----
-        findings_headers = ["Hostname", "Site/Location", "Port", "Notes"]
+        findings_headers = ["Hostname", "Site/Location", "Port", "Notes", "Severity"]
         findings_rows = []
         if analysis["findings"]:
             for finding in analysis["findings"]:
@@ -1310,9 +1344,10 @@ class L2DiscoveryReport(BaseReport):
                     _derive_site(hostname),
                     finding["title"],
                     finding["description"],
+                    finding.get("severity", ""),
                 ])
         else:
-            findings_rows.append(["No findings detected.", "", "", ""])
+            findings_rows.append(["No findings detected.", "", "", "", ""])
         sheets["Findings"] = (findings_headers, findings_rows)
 
         # ---- Root Bridge IDs sheet ----

@@ -1,6 +1,7 @@
 """
 Device Inventory report -- hostname, IP, platform, version, serial.
-Three sheets: Devices, Stack Members, Modules / Line Cards.
+Sheets: Devices, Stack Members, Modules / Line Cards, Failed Devices,
+and Skipped (Controller-Managed) when any device was skipped.
 """
 import io
 import re
@@ -10,9 +11,13 @@ from openpyxl import Workbook
 from .base import BaseReport
 from .xlsx_utils import create_sheet
 try:
-    from app.device_facts import extract_device_facts
+    from app.device_facts import extract_device_facts, extract_version_details
 except ImportError:
-    from device_facts import extract_device_facts
+    from device_facts import extract_device_facts, extract_version_details
+try:
+    from app.failures import failure_record, REASON_LABELS, SKIP_HINTS
+except ImportError:
+    from failures import failure_record, REASON_LABELS, SKIP_HINTS
 
 
 def _normalize_keys(d: dict) -> dict:
@@ -169,6 +174,162 @@ def _get_platform_description(pid: str) -> str:
     return ""
 
 
+def _parsed(device, collector):
+    data = (device.get("collector_data") or {}).get(collector) or {}
+    return data.get("parsed") or {}
+
+
+def _pair_info(parsed):
+    """Domain and per-member interconnect/DAD ports of an SVL or VSS pair."""
+    svl = parsed.get("stackwise_virtual")
+    if svl:
+        links, dad = {}, {}
+        for link in svl.get("links", []):
+            links.setdefault(str(link.get("switch")), []).append(link.get("port"))
+        for port in svl.get("dad_ports", []):
+            dad.setdefault(str(port.get("switch")), []).append(port.get("port"))
+        return {"type": "stackwise-virtual", "domain": svl.get("domain", ""),
+                "links": links, "dad": dad}
+    vss = parsed.get("vss")
+    if vss:
+        links = {}
+        for port in vss.get("links", []):
+            # VSS ports are named switch/slot/port: Te1/5/4 is on chassis 1.
+            m = re.search(r"(\d+)/", port)
+            if m:
+                links.setdefault(m.group(1), []).append(port)
+        return {"type": "vss", "domain": vss.get("domain", ""),
+                "links": links, "dad": {}}
+    return None
+
+
+def _redundancy(device):
+    """How this device is made redundant: standalone, stack, SVL, VSS, vPC,
+    an HSRP pair, or a firewall HA pair. Blank when nothing was collected."""
+    inv = _parsed(device, "device_inventory")
+    modes = []
+    if inv.get("stackwise_virtual"):
+        modes.append("stackwise-virtual")
+    elif inv.get("vss"):
+        modes.append("vss")
+    elif len(inv.get("stack_members") or []) > 1:
+        modes.append("stack")
+    if inv.get("vpc"):
+        modes.append("vpc")
+
+    hsrp = _parsed(device, "hsrp")
+    if any(str(e.get("state", "")).lower() in ("active", "standby")
+           for e in hsrp.get("entries") or []):
+        modes.append("hsrp-pair")
+    if device.get("ha_state") and not modes:
+        modes.append("ha-pair")
+
+    if modes:
+        return "+".join(modes)
+    if device.get("login_succeeded") and inv and not inv.get("collector_failed"):
+        return "standalone"
+    return ""
+
+
+_SOURCE_LABELS = {
+    "snmp": "snmp",
+    "cdp": "cdp",
+    "lldp": "lldp",
+    "routing_adjacency": "routing",
+    "next_hop": "next-hop",
+    "hsrp_vrrp": "fhrp",
+}
+
+
+def _neighbour_protocols(hostname, device, inventory_data):
+    """Which of CDP/LLDP the devices that saw this one heard it on."""
+    devices = inventory_data.get("devices", {})
+    name = hostname.lower()
+    ip = device.get("mgmt_ip")
+    found = set()
+    for ev in device.get("evidence") or []:
+        if ev.get("source") != "cdp_lldp":
+            continue
+        seer = devices.get(ev.get("seen_from")) or {}
+        for n in _parsed(seer, "cdp_lldp").get("neighbors") or []:
+            remote = str(n.get("remote_device") or "").lower()
+            if (remote and (remote == name or remote.split(".")[0] == name
+                            or remote.split("(")[0] == name)) \
+                    or (ip and n.get("remote_ip") == ip):
+                found.update(str(p).lower() for p in n.get("protocols") or [])
+    return found
+
+
+def _discovered_via(hostname, device, inventory_data):
+    """seed, target-list, cdp, lldp, snmp, ... -- how the device was found."""
+    source = device.get("discovery_source") or ""
+    ip = device.get("mgmt_ip")
+    if source in ("", "login"):
+        params = inventory_data.get("params") or {}
+        if ip and ip in (params.get("target_ips") or []):
+            return "target-list"
+        if ip and ip == inventory_data.get("seed_ip"):
+            return "seed"
+        return source
+    if source == "cdp_lldp":
+        protocols = _neighbour_protocols(hostname, device, inventory_data)
+        return "+".join(sorted(protocols)) if protocols else "cdp/lldp"
+    return _SOURCE_LABELS.get(source, source)
+
+
+def _failure_reason(entry):
+    """Short reason from a scan_summary failure.
+
+    Newer scans store a dict with a classified reason; older ones a plain
+    error string, which is classified here.
+    """
+    if isinstance(entry, dict):
+        if entry.get("reason"):
+            return str(entry["reason"])
+        entry = entry.get("message") or ""
+    text = str(entry or "").lower()
+    if not text:
+        return "error"
+    if "auth" in text or "permission denied" in text or "password" in text:
+        return "auth_failed"
+    if "timed out" in text or "timeout" in text:
+        return "timeout"
+    if "refused" in text:
+        return "connection_refused"
+    if "unreachable" in text or "no route" in text:
+        return "unreachable"
+    return "error"
+
+
+def _collection_status(device, inventory_data):
+    """collected, partial:<collectors>, failed:<reason> or skipped:<reason>."""
+    summary = inventory_data.get("scan_summary") or {}
+    ip = device.get("mgmt_ip")
+
+    if device.get("login_succeeded"):
+        failed = sorted(
+            name for name, data in (device.get("collector_data") or {}).items()
+            if ((data or {}).get("parsed") or {}).get("collector_failed"))
+        return "partial:" + ",".join(failed) if failed else "collected"
+
+    skipped = (summary.get("skipped") or {}).get(ip) if ip else None
+    if skipped or device.get("managed_by"):
+        reason = (skipped.get("reason") if isinstance(skipped, dict)
+                  else skipped) or "controller_managed"
+        return f"skipped:{reason}"
+
+    failed = (summary.get("failed") or {}).get(ip) if ip else None
+    if failed:
+        return f"failed:{_failure_reason(failed)}"
+    if device.get("login_error"):
+        return f"failed:{_failure_reason(device['login_error'])}"
+    if not ip:
+        return "skipped:no_mgmt_ip"
+    if ip in (summary.get("out_of_scope") or []):
+        return "skipped:out_of_scope"
+    return "skipped:not_crawled"
+
+
 class DeviceInventoryReport(BaseReport):
     name = "device_inventory"
     label = "Device Inventory"
@@ -185,6 +346,8 @@ class DeviceInventoryReport(BaseReport):
             self._build_devices_sheet(wb, inventory_data)
             self._build_stack_sheet(wb, inventory_data)
             self._build_modules_sheet(wb, inventory_data)
+            self._build_licenses_sheet(wb, inventory_data)
+            build_failed_devices_sheets(wb, inventory_data)
 
             buf = io.BytesIO()
             wb.save(buf)
@@ -197,6 +360,13 @@ class DeviceInventoryReport(BaseReport):
         result["Devices"] = self._extract_devices_data(inventory_data)
         result["Stack Members"] = self._extract_stack_data(inventory_data)
         result["Modules"] = self._extract_modules_data(inventory_data)
+        licenses = self._extract_licenses_data(inventory_data)
+        if licenses[1]:
+            result["Licenses"] = licenses
+        result["Failed Devices"] = extract_failed_devices_data(inventory_data)
+        skipped = extract_skipped_devices_data(inventory_data)
+        if skipped:
+            result["Skipped (Controller-Managed)"] = skipped
         sources = self._extract_merge_sources(inventory_data)
         if sources:
             result["Merge Sources"] = sources
@@ -262,6 +432,8 @@ class DeviceInventoryReport(BaseReport):
             "Hostname", "Mgmt IP", "Device Type", "Category",
             "Platform", "Platform Description", "Software Version",
             "Serial Number", "Discovery Source", "Logged In", "Login Error",
+            "Redundancy", "HA State", "Uptime", "Last Reload Reason",
+            "Image", "License", "Discovered Via", "Collection Status",
         ]
         # Only meaningful on a merged inventory, so the column is not there
         # to be ignored on every ordinary scan.
@@ -277,11 +449,16 @@ class DeviceInventoryReport(BaseReport):
             parsed = inv_data.get("parsed", {})
 
             facts = extract_device_facts(parsed)
+            details = extract_version_details(parsed)
             sw_version = facts["software_version"]
             serial = facts["serial"]
             platform = device.get("platform", "") or facts["model"]
             if isinstance(platform, list):
                 platform = ", ".join(str(x) for x in platform)
+            # A stack reports one model per member; describe the first.
+            first_pid = platform.split(",")[0].strip() if platform else ""
+            description = (_get_platform_description(first_pid)
+                           or details["platform_description"])
 
             # Provenance: a device seen only in a neighbour table has no
             # serial or version, and must not read as fully collected.
@@ -291,12 +468,20 @@ class DeviceInventoryReport(BaseReport):
                 device.get("device_type", ""),
                 device.get("device_category", ""),
                 platform,
-                _get_platform_description(platform),
+                description,
                 sw_version,
                 serial,
                 device.get("discovery_source", "") or "",
                 "Yes" if device.get("login_succeeded") else "No",
                 device.get("login_error", "") or "",
+                _redundancy(device),
+                device.get("ha_state", "") or "",
+                details["uptime"],
+                details["reload_reason"],
+                details["image"],
+                details["license"],
+                _discovered_via(hostname, device, inventory_data),
+                _collection_status(device, inventory_data),
             ]
             if merged:
                 row.append(device.get("source_scan", "") or "")
@@ -308,6 +493,7 @@ class DeviceInventoryReport(BaseReport):
         headers = [
             "Hostname", "Mgmt IP", "Member #", "Role",
             "Model", "Serial", "MAC", "Priority", "State",
+            "Stack Type", "Domain", "Interconnect Ports", "DAD Ports",
         ]
         rows = []
         for hostname, device in sorted(
@@ -320,19 +506,27 @@ class DeviceInventoryReport(BaseReport):
             if not stack:
                 continue
 
+            pair = _pair_info(parsed)
             mgmt_ip = device.get("mgmt_ip", "")
             for member in stack:
                 m = _normalize_keys(member)
+                num = str(m.get("switch") or m.get("member") or "")
+                stack_type = m.get("stack_type") or (
+                    pair["type"] if pair else "stack")
                 rows.append([
                     hostname,
                     mgmt_ip,
-                    m.get("switch") or m.get("member") or "",
+                    num,
                     m.get("role") or "",
                     m.get("model") or m.get("hw_ver") or "",
                     m.get("serial") or m.get("serialnum") or "",
                     m.get("mac_address") or m.get("mac") or "",
                     m.get("priority") or "",
                     m.get("state") or m.get("status") or "",
+                    stack_type,
+                    pair["domain"] if pair else "",
+                    ", ".join(pair["links"].get(num, [])) if pair else "",
+                    ", ".join(pair["dad"].get(num, [])) if pair else "",
                 ])
 
         return (headers, rows)
@@ -394,84 +588,59 @@ class DeviceInventoryReport(BaseReport):
 
         return (headers, rows)
 
-    def _build_devices_sheet(self, wb, inventory_data):
+    def _extract_licenses_data(self, inventory_data):
+        """One row per licence; a device with Smart Licensing or call-home
+        state but no licence rows still gets a row so its status shows."""
         headers = [
-            "Hostname", "Mgmt IP", "Device Type", "Category",
-            "Platform", "Platform Description", "Software Version",
-            "Serial Number", "Discovery Source", "Logged In", "Login Error",
+            "Hostname", "Mgmt IP", "License", "Entitlement", "Count", "Status",
+            "Smart Licensing", "Registration / Status", "Authorization",
+            "Transport", "Last Usage ACK", "Call-Home", "Call-Home Transport",
         ]
-        # Only meaningful on a merged inventory, so the column is not there
-        # to be ignored on every ordinary scan.
-        merged = bool(inventory_data.get("merged_from"))
-        if merged:
-            headers.append("Source Scan")
         rows = []
         for hostname, device in sorted(
             inventory_data.get("devices", {}).items()
         ):
-            inv_data = (device.get("collector_data", {})
-                        .get("device_inventory", {}))
-            parsed = inv_data.get("parsed", {})
-
-            facts = extract_device_facts(parsed)
-            sw_version = facts["software_version"]
-            serial = facts["serial"]
-            platform = device.get("platform", "") or facts["model"]
-            if isinstance(platform, list):
-                platform = ", ".join(str(x) for x in platform)
-
-            # Provenance: a device seen only in a neighbour table has no
-            # serial or version, and must not read as fully collected.
-            row = [
-                hostname,
-                device.get("mgmt_ip", ""),
-                device.get("device_type", ""),
-                device.get("device_category", ""),
-                platform,
-                _get_platform_description(platform),
-                sw_version,
-                serial,
-                device.get("discovery_source", "") or "",
-                "Yes" if device.get("login_succeeded") else "No",
-                device.get("login_error", "") or "",
+            parsed = _parsed(device, "device_inventory")
+            licenses = parsed.get("licenses") or []
+            smart = parsed.get("smart_licensing") or {}
+            call_home = parsed.get("call_home") or {}
+            if not (licenses or smart or call_home):
+                continue
+            if call_home:
+                ch_state = "enabled" if call_home.get("enabled") else "disabled"
+            else:
+                ch_state = ""
+            shared = [
+                smart.get("mode", ""),
+                smart.get("registration") or smart.get("status", ""),
+                smart.get("authorization", ""),
+                smart.get("transport", ""),
+                smart.get("last_ack", ""),
+                ch_state,
+                call_home.get("transport", ""),
             ]
-            if merged:
-                row.append(device.get("source_scan", "") or "")
-            rows.append(row)
+            mgmt_ip = device.get("mgmt_ip", "")
+            for lic in licenses or [{}]:
+                rows.append([
+                    hostname, mgmt_ip,
+                    lic.get("name", ""), lic.get("entitlement", ""),
+                    lic.get("count", ""), lic.get("status", ""),
+                ] + shared)
+        return headers, rows
 
+    def _build_licenses_sheet(self, wb, inventory_data):
+        headers, rows = self._extract_licenses_data(inventory_data)
+        # Older scans and non-Cisco networks have no licensing data; an
+        # empty sheet there would read as "nothing licensed".
+        if rows:
+            create_sheet(wb, "Licenses", headers, rows)
+
+    def _build_devices_sheet(self, wb, inventory_data):
+        headers, rows = self._extract_devices_data(inventory_data)
         create_sheet(wb, "Devices", headers, rows)
 
     def _build_stack_sheet(self, wb, inventory_data):
-        headers = [
-            "Hostname", "Mgmt IP", "Member #", "Role",
-            "Model", "Serial", "MAC", "Priority", "State",
-        ]
-        rows = []
-        for hostname, device in sorted(
-            inventory_data.get("devices", {}).items()
-        ):
-            inv_data = (device.get("collector_data", {})
-                        .get("device_inventory", {}))
-            parsed = inv_data.get("parsed", {})
-            stack = parsed.get("stack_members", [])
-            if not stack:
-                continue
-
-            mgmt_ip = device.get("mgmt_ip", "")
-            for member in stack:
-                m = _normalize_keys(member)
-                rows.append([
-                    hostname,
-                    mgmt_ip,
-                    m.get("switch") or m.get("member") or "",
-                    m.get("role") or "",
-                    m.get("model") or m.get("hw_ver") or "",
-                    m.get("serial") or m.get("serialnum") or "",
-                    m.get("mac_address") or m.get("mac") or "",
-                    m.get("priority") or "",
-                    m.get("state") or m.get("status") or "",
-                ])
-
+        headers, rows = self._extract_stack_data(inventory_data)
         create_sheet(wb, "Stack Members", headers, rows)
 
     def _build_modules_sheet(self, wb, inventory_data):
@@ -530,3 +699,93 @@ class DeviceInventoryReport(BaseReport):
                     ])
 
         create_sheet(wb, "Modules", headers, rows)
+
+
+
+# --- Failed and controller-managed devices ----------------------------------
+# Kept apart from the Devices sheet: these explain coverage gaps -- which
+# hosts were not collected and why -- without opening the inventory JSON.
+
+def _neighbour_record(inventory_data, ip, hostname=None):
+    """The device record a failed or skipped IP is known by, if any."""
+    devices = inventory_data.get("devices", {}) or {}
+    if hostname and hostname in devices:
+        return devices[hostname]
+    for dev in devices.values():
+        if dev.get("mgmt_ip") == ip:
+            return dev
+    return {}
+
+
+def _ip_sort_key(ip):
+    parts = str(ip).split(".")
+    if len(parts) == 4 and all(p.isdigit() for p in parts):
+        return (0, tuple(int(p) for p in parts))
+    return (1, str(ip))
+
+
+def _format_attempt(attempt):
+    proto = attempt.get("protocol") or ""
+    port = attempt.get("port")
+    where = f"{proto}/{port}" if port else proto
+    elapsed = attempt.get("elapsed_ms")
+    took = f" {elapsed}ms" if elapsed else ""
+    return (f"{where} {attempt.get('device_type') or ''} "
+            f"{attempt.get('exception_class') or ''}{took}: "
+            f"{attempt.get('message') or ''}").strip()
+
+
+def extract_failed_devices_data(inventory_data):
+    """(headers, rows) for hosts that could not be logged into."""
+    summary = inventory_data.get("scan_summary") or {}
+    headers = ["Mgmt IP", "Hostname", "Platform", "Reason", "Hint",
+               "Attempts", "Error"]
+    rows = []
+    for ip in sorted((summary.get("failed") or {}), key=_ip_sort_key):
+        record = failure_record(summary["failed"][ip])
+        device = _neighbour_record(inventory_data, ip, record["hostname"])
+        rows.append([
+            ip,
+            record["hostname"] or device.get("hostname") or "",
+            device.get("platform") or "",
+            REASON_LABELS.get(record["reason"], record["reason"]),
+            record["hint"],
+            "\n".join(_format_attempt(a) for a in record["attempts"]),
+            record["message"],
+        ])
+    return headers, rows
+
+
+def extract_skipped_devices_data(inventory_data):
+    """(headers, rows) for controller-managed hosts deliberately not logged
+    into. None when there are none, so ordinary scans get no empty sheet."""
+    skipped = (inventory_data.get("scan_summary") or {}).get("skipped") or {}
+    if not skipped:
+        return None
+    headers = ["Mgmt IP", "Hostname", "Platform", "Managed By", "Note"]
+    rows = []
+    for ip in sorted(skipped, key=_ip_sort_key):
+        entry = skipped[ip] or {}
+        device = _neighbour_record(inventory_data, ip, entry.get("hostname"))
+        managed_by = entry.get("managed_by") or device.get("managed_by") or ""
+        rows.append([
+            ip,
+            entry.get("hostname") or device.get("hostname") or "",
+            entry.get("platform") or device.get("platform") or "",
+            _MANAGED_BY_LABELS.get(managed_by, managed_by),
+            SKIP_HINTS.get(managed_by, ""),
+        ])
+    return headers, rows
+
+
+_MANAGED_BY_LABELS = {"aci": "ACI (APIC)", "ucsm": "UCS Manager"}
+
+
+def build_failed_devices_sheets(wb, inventory_data):
+    """Append the Failed Devices sheet, and a Controller-Managed sheet when
+    any device was skipped for that reason."""
+    headers, rows = extract_failed_devices_data(inventory_data)
+    create_sheet(wb, "Failed Devices", headers, rows)
+    skipped = extract_skipped_devices_data(inventory_data)
+    if skipped:
+        create_sheet(wb, "Skipped (Controller-Managed)", *skipped)

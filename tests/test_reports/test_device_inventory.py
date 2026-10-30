@@ -113,7 +113,8 @@ def test_three_sheets_present(sample_inventory):
     r = DeviceInventoryReport()
     data = r.generate(sample_inventory)
     wb = load_workbook(io.BytesIO(data))
-    assert wb.sheetnames == ["Devices", "Stack Members", "Modules"]
+    assert wb.sheetnames == ["Devices", "Stack Members", "Modules",
+                             "Failed Devices"]
 
 
 def test_devices_sheet_exposes_provenance():

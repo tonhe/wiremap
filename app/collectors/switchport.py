@@ -3,6 +3,7 @@ Switchport configuration collector.
 Gathers switchport settings, port-security, errdisable, and storm-control data.
 """
 from .base import BaseCollector
+from .errors import error_reason
 
 try:
     from ntc_templates.parse import parse_output
@@ -45,9 +46,10 @@ def _parse_switchport_regex(output):
     if not output or not output.strip():
         return entries
 
-    # Split on interface blocks
+    # Split on interface blocks. Whatever precedes the first "Name:" line is
+    # not an interface -- on a router it is the "^" caret line of an error.
     blocks = re.split(r'^Name:\s*', output, flags=re.MULTILINE)
-    for block in blocks:
+    for block in blocks[1:]:
         if not block.strip():
             continue
         entry = {}
@@ -119,6 +121,9 @@ def _try_ntc_parse(command, output, device_type):
     """Try parsing with ntc-templates, return None on failure."""
     if not HAS_NTC or not output or not output.strip():
         return None
+    # ntc happily turns an error response into rows (an interface named "^")
+    if error_reason(output):
+        return None
     # Map our device_type to ntc-templates platform
     platform_map = {
         "cisco_ios": "cisco_ios",
@@ -144,6 +149,7 @@ class SwitchportCollector(BaseCollector):
     unsupported_platforms = frozenset({"cisco_wlc", "vyos",
                                        "watchguard_fireware",
                                        "paloalto_panos"})
+    switching_only = True
 
     def get_commands(self, device_type: str) -> list[str]:
         return list(_COMMANDS.get(device_type, _DEFAULT_COMMANDS))

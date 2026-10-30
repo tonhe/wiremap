@@ -6,7 +6,12 @@ and per-VRF ARP tables.
 import logging
 import re
 
-from .base import BaseCollector
+from .base import BaseCollector, split_command_errors
+
+try:
+    from app.parsers import parse_arp_table
+except ImportError:
+    from parsers import parse_arp_table
 
 logger = logging.getLogger(__name__)
 
@@ -159,29 +164,21 @@ def _parse_vrf_routes(output: str) -> list[dict]:
 
 
 def _parse_vrf_arp(output: str) -> list[dict]:
-    """Parse 'show ip arp vrf <name>' output into ARP entries."""
-    entries = []
+    """Parse 'show ip arp vrf <name>' output into ARP entries.
+
+    Uses the same parser as the global ARP collector: the old IOS-only regex
+    matched nothing in NX-OS output ("IP ARP Table for context X" with no
+    "Internet" column), so every NX-OS VRF ARP table came back empty.
+    """
     if not output or not output.strip():
-        return entries
-    for line in output.splitlines():
-        # "Internet  10.1.1.1   0   0050.56aa.bb01  ARPA   GigabitEthernet0/1"
-        m = re.match(
-            r"^\s*Internet\s+"
-            r"(\d+\.\d+\.\d+\.\d+)\s+"  # IP address
-            r"(\S+)\s+"  # age
-            r"([0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\.[0-9a-fA-F]{4})\s+"  # MAC
-            r"\S+\s+"  # type (ARPA)
-            r"(\S+)",  # interface
-            line,
-        )
-        if m:
-            entries.append({
-                "ip_address": m.group(1),
-                "age": m.group(2),
-                "mac_address": m.group(3),
-                "interface": m.group(4),
-            })
-    return entries
+        return []
+    return [{
+        "ip_address": e["ip"],
+        "age": e.get("age", ""),
+        "mac_address": e.get("mac", ""),
+        "interface": e.get("interface", ""),
+        "incomplete": bool(e.get("incomplete")),
+    } for e in parse_arp_table(output)]
 
 
 class VrfCollector(BaseCollector):
@@ -235,6 +232,10 @@ class VrfCollector(BaseCollector):
 
     def collect(self, connection, device_type: str) -> dict:
         """Two-phase collection: get VRF list, then per-VRF routes/ARP."""
+        if device_type in self.unsupported_platforms:
+            return {"raw": {}, "parsed": {"not_applicable": True,
+                                          "reason": f"{self.name} does not apply to {device_type}"}}
+
         # Phase 1: run base commands
         cmds = self.get_commands(device_type)
         raw_outputs = {}
@@ -244,9 +245,11 @@ class VrfCollector(BaseCollector):
             except Exception:
                 raw_outputs[cmd] = ""
 
-        # Parse VRF names from phase 1
+        # Parse VRF names from phase 1. A rejected "show ip vrf" must not
+        # yield VRF names, or phase 2 fires commands at VRFs like "%".
+        phase1, _ = split_command_errors(raw_outputs)
         vrf_cmd = cmds[0]
-        vrf_output = raw_outputs.get(vrf_cmd, "")
+        vrf_output = phase1.get(vrf_cmd, "")
         if device_type == "cisco_nxos":
             vrfs = _parse_nxos_vrfs(vrf_output) if vrf_output else []
         else:
@@ -268,5 +271,5 @@ class VrfCollector(BaseCollector):
                     logger.debug(f"VRF command failed: {cmd}")
                     raw_outputs[cmd] = ""
 
-        parsed = self.parse(raw_outputs, device_type)
-        return {"raw": raw_outputs, "parsed": parsed}
+        return {"raw": raw_outputs,
+                "parsed": self.parse_collected(raw_outputs, device_type)}

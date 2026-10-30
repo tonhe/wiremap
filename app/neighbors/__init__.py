@@ -4,6 +4,11 @@ Mirrors the collector registry: sources are declared once here and the
 discovery engine asks for all of them rather than reading CDP directly.
 """
 from .base import NeighborSource
+
+try:
+    from app.parsers import neighbor_link_key
+except ImportError:
+    from parsers import neighbor_link_key
 from .scope import CrawlScope
 from .sources import (
     CdpLldpSource,
@@ -40,7 +45,12 @@ def extract_all(device: dict, enabled=None) -> list[dict]:
     if enabled is None:
         enabled = default_enabled()
 
+    # Parallel links to one peer share an address but are separate links,
+    # each with its own far-end port worth recording. Within a source,
+    # sightings are keyed per link; another source's sighting of the same
+    # address (OSPF knows only the address) folds into the first link.
     merged = {}
+    by_ip = {}
     unaddressed = []
     for name, source in _REGISTRY.items():
         if name not in enabled:
@@ -53,12 +63,19 @@ def extract_all(device: dict, enabled=None) -> list[dict]:
                 ref.setdefault("seen_via", [ref.get("source")])
                 unaddressed.append(ref)
                 continue
-            existing = merged.get(ip)
+            key = (name,) + neighbor_link_key(ref)
+            existing = merged.get(key)
+            if existing is None:
+                first = by_ip.get(ip)
+                if first is not None and first.get("source") != name:
+                    existing = first
             if existing is None:
                 ref["seen_via"] = [ref.get("source")]
-                merged[ip] = ref
+                merged[key] = ref
+                by_ip.setdefault(ip, ref)
                 continue
-            existing.setdefault("seen_via", []).append(ref.get("source"))
+            if ref.get("source") not in existing.setdefault("seen_via", []):
+                existing["seen_via"].append(ref.get("source"))
             for field in ("remote_device", "remote_platform",
                           "remote_capabilities", "remote_intf"):
                 if not existing.get(field) and ref.get(field):

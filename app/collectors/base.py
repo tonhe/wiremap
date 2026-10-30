@@ -5,6 +5,29 @@ and parsing their output.
 """
 from abc import ABC, abstractmethod
 
+try:
+    from app.collectors.errors import error_reason
+except ImportError:
+    from collectors.errors import error_reason
+
+
+def split_command_errors(raw_outputs):
+    """Separate CLI error responses from real output.
+
+    Returns (for_parse, command_errors): for_parse is raw_outputs with every
+    rejected command blanked, command_errors maps each rejected command to
+    the device's error line.
+    """
+    command_errors = {}
+    for cmd, out in raw_outputs.items():
+        reason = error_reason(out)
+        if reason:
+            command_errors[cmd] = reason
+    for_parse = dict(raw_outputs)
+    for cmd in command_errors:
+        for_parse[cmd] = ""
+    return for_parse, command_errors
+
 
 class BaseCollector(ABC):
     """Abstract base for collectors. Subclass and set class attributes."""
@@ -39,6 +62,44 @@ class BaseCollector(ABC):
     # Cisco commands at them produces nothing but rejected-command noise.
     unsupported_platforms = frozenset()
 
+    # Layer-2 switching collectors. An ASR or ISR is cisco_xe exactly like a
+    # Catalyst, so platform gating cannot keep switchport/VLAN/STP commands
+    # off routers; the engine skips these once it knows the box is a router.
+    switching_only = False
+
+    # Individual switch-only commands inside an otherwise general collector
+    # (e.g. "show interfaces status" in the interfaces collector). Dropped
+    # on routers while the rest of the collector still runs.
+    switching_commands = frozenset()
+
+    def parse_collected(self, raw_outputs, device_type):
+        """Parse raw outputs, treating CLI error responses as failures.
+
+        Shared by collect() and the engine's batch path so a rejected
+        command is never parsed as data, whichever way it was run.
+        """
+        # A device that rejected the command returns error text, not data.
+        # Parsing it produces rows like Area="Invalid", Interface="%".
+        for_parse, command_errors = split_command_errors(raw_outputs)
+        failed = [c for c in raw_outputs if c in command_errors]
+
+        if failed and len(failed) == len(raw_outputs):
+            return {
+                "collector_failed": True,
+                "collector_error": command_errors[failed[0]],
+                "failed_commands": failed,
+                "command_errors": command_errors,
+            }
+
+        # Rejected commands are blanked so a partially successful collector
+        # still parses whatever did work. The caller keeps the raw error text
+        # so the failure stays diagnosable.
+        parsed = self.parse(for_parse, device_type)
+        if failed:
+            parsed["failed_commands"] = failed
+            parsed["command_errors"] = command_errors
+        return parsed
+
     def collect(self, connection, device_type: str) -> dict:
         """Run commands and return raw + parsed data.
 
@@ -46,11 +107,6 @@ class BaseCollector(ABC):
         manipulation. The discovery engine calls this instead of the
         batch path when needs_custom_collect is True.
         """
-        try:
-            from app.collectors.errors import error_reason
-        except ImportError:
-            from collectors.errors import error_reason
-
         if device_type in self.unsupported_platforms:
             return {"raw": {}, "parsed": {"not_applicable": True,
                                           "reason": f"{self.name} does not apply to {device_type}"}}
@@ -67,29 +123,5 @@ class BaseCollector(ABC):
             except Exception:
                 raw_outputs[cmd] = ""
 
-        # A device that rejected the command returns error text, not data.
-        # Parsing it produces rows like Area="Invalid", Interface="%".
-        errors = {cmd: error_reason(out) for cmd, out in raw_outputs.items()}
-        failed = [c for c, e in errors.items() if e]
-
-        if failed and len(failed) == len(raw_outputs):
-            return {
-                "raw": raw_outputs,
-                "parsed": {
-                    "collector_failed": True,
-                    "collector_error": errors[failed[0]],
-                    "failed_commands": failed,
-                },
-            }
-
-        # Blank the rejected commands so a partially successful collector
-        # still parses whatever did work. raw keeps the error text so the
-        # failure stays diagnosable.
-        for_parse = dict(raw_outputs)
-        for cmd in failed:
-            for_parse[cmd] = ""
-
-        parsed = self.parse(for_parse, device_type)
-        if failed:
-            parsed["failed_commands"] = failed
-        return {"raw": raw_outputs, "parsed": parsed}
+        return {"raw": raw_outputs,
+                "parsed": self.parse_collected(raw_outputs, device_type)}

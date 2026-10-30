@@ -14,18 +14,28 @@ try:
     from app.inventory import DiscoveryInventory
     from app.identity import normalize_hostname, looks_like_mac, looks_like_host_nic
     from app.device_facts import extract_device_facts
+    from app.device_role import is_switchless_router
     from app.neighbors import extract_all, default_enabled, CrawlScope
     from app.snmp_probe import probe as snmp_probe, make_walker as snmp_make_walker
     from app.snmp_tables import collect_all as snmp_collect_all
+    from app.failures import failure_record, reason_counts, hint_for, OTHER, SKIP_HINTS
+    from app.login_rate import LoginRateLimiter
+    from app.source_access import local_source_ip, check_source_access, refused_hint
+    from app.scan_timing import collector_ms, summarize as summarize_timing
 except ImportError:
     from connection_manager import ConnectionManager, ConnectionError
     from collectors import get_registry, get_collector
     from inventory import DiscoveryInventory
     from identity import normalize_hostname, looks_like_mac, looks_like_host_nic
     from device_facts import extract_device_facts
+    from device_role import is_switchless_router
     from neighbors import extract_all, default_enabled, CrawlScope
     from snmp_probe import probe as snmp_probe, make_walker as snmp_make_walker
     from snmp_tables import collect_all as snmp_collect_all
+    from failures import failure_record, reason_counts, hint_for, OTHER, SKIP_HINTS
+    from login_rate import LoginRateLimiter
+    from source_access import local_source_ip, check_source_access, refused_hint
+    from scan_timing import collector_ms, summarize as summarize_timing
 
 logger = logging.getLogger(__name__)
 
@@ -33,18 +43,36 @@ logger = logging.getLogger(__name__)
 _log_context = threading.local()
 
 
-def _neighbour_platform_fields(remote_platform):
+def _neighbour_platform_fields(remote_platform, chassis_id=None):
     """Split a neighbour's reported platform into (platform, chassis_id).
 
     LLDP often reports a chassis MAC where a platform string belongs. A MAC
     is not a platform -- record it separately and leave platform empty rather
-    than writing 009a.d2d4.9700 into a Platform column.
+    than writing 009a.d2d4.9700 into a Platform column. The LLDP parser now
+    reports the chassis id on its own; only a MAC is kept from it.
     """
+    mac = str(chassis_id).strip() if looks_like_mac(chassis_id) else None
     if not remote_platform:
-        return None, None
+        return None, mac
     if looks_like_mac(remote_platform):
         return None, str(remote_platform).strip()
-    return remote_platform, None
+    return remote_platform, mac
+
+
+def _neighbour_remote_port(neighbor):
+    # Parsers name the far-end port remote_intf; remote_port is the older
+    # spelling still accepted from hand-built records.
+    return neighbor.get("remote_intf") or neighbor.get("remote_port")
+
+
+def _dedupe(commands):
+    seen = set()
+    unique = []
+    for cmd in commands:
+        if cmd not in seen:
+            seen.add(cmd)
+            unique.append(cmd)
+    return unique
 
 
 def _should_create_neighbour_device(neighbor) -> bool:
@@ -56,6 +84,10 @@ def _should_create_neighbour_device(neighbor) -> bool:
     """
     name = (neighbor.get("remote_device") or "").strip()
     return bool(name)
+
+
+def _ms_since(started):
+    return int((time.monotonic() - started) * 1000)
 
 
 class DeviceLogFilter(logging.Filter):
@@ -97,7 +129,10 @@ class DiscoveryEngine:
                  neighbor_sources=None,
                  crawl_scope=None,
                  snmp_credentials=None,
-                 base_inventory=None):
+                 base_inventory=None,
+                 target_resolution=None,
+                 collect_controller_managed: bool = False,
+                 max_logins_per_minute: int = 0):
         self.seed_ip = seed_ip
         self.seed_device_type = seed_device_type
         self.username = username
@@ -116,6 +151,10 @@ class DiscoveryEngine:
         # empty. Devices already collected are not re-visited; devices that
         # failed last time are, since a retry is usually the point.
         self.base_inventory = base_inventory
+        # How a targeted host list was resolved: names that resolved (kept
+        # as each target's expected name) and names that did not, so the
+        # scan summary says which inventory entries were never attempted.
+        self.target_resolution = target_resolution
         # A targeted scan visits exactly its host list unless the operator
         # asks it to keep going from each target. Already-visited IPs are
         # filtered per layer, so targets are never reprocessed.
@@ -137,9 +176,20 @@ class DiscoveryEngine:
         self.visited: set[str] = set()
         self._visited_lock = threading.Lock()
         self._discovered_hostnames: set[str] = set()
+        # Hostnames logged into during this run. Unlike names inherited from
+        # a continued scan, these are never re-collected, even when two
+        # requested targets turn out to be the same device.
+        self._run_hostnames: set[str] = set()
         self._hostname_lock = threading.Lock()
-        self.failed: dict[str, str] = {}
+        # IP -> failure record (app.failures.failure_record shape). Prior
+        # failures inherited from a continued scan may still be strings.
+        self.failed: dict = {}
         self._failed_lock = threading.Lock()
+        # ACI fabric nodes and UCS Fabric Interconnects take their CLI
+        # accounts from the controller; logging in with the network
+        # credential fails auth every run. Skipped unless asked for.
+        self.collect_controller_managed = collect_controller_managed
+        self.skipped: dict = {}
         # Hosts the operator asked for by name. These are never skipped as
         # duplicates, so re-listing a device refreshes it.
         self._requested_ips: set[str] = set()
@@ -148,6 +198,18 @@ class DiscoveryEngine:
         self._out_of_scope: set[str] = set()
         self._ceiling_hit = False
         self.max_workers = max(1, max_workers)
+        # One limiter for every worker: the AAA server counts logins from
+        # this host, not per thread.
+        self._login_limiter = LoginRateLimiter(max_logins_per_minute)
+        # hostname -> per-device timing record (see app.scan_timing).
+        self.timing: dict = {}
+        self._timing_lock = threading.Lock()
+        # Local address used to reach the seed, and any management ACL on
+        # the seed that does not permit it.
+        self.source_ip = None
+        self.source_access_warnings: list = []
+        self._source_checked = False
+        self._refused_hint = None
         self._progress_cb = progress_callback or (lambda event: None)
         self._cancelled = cancelled
 
@@ -212,6 +274,8 @@ class DiscoveryEngine:
             "connection_protocol": self.protocol,
             "collectors_enabled": list(self._collectors.keys()),
             "filters": self.filters,
+            # Lets the inventory report tell a host-list target from a seed.
+            "target_ips": [ip for ip, _ in (self.target_hosts or [])],
         }
 
         if self.base_inventory is not None:
@@ -232,10 +296,15 @@ class DiscoveryEngine:
 
         start_time = time.time()
         total_hosts = len(self.target_hosts) if self.target_hosts else None
+        self.source_ip = local_source_ip(current_layer[0][0])
+        if self.source_ip:
+            logger.info(f"Source address towards the seed: {self.source_ip}")
         self._progress_cb({
             "event": "scan_started",
             "scan_type": "targeted" if self.target_hosts else "discovery",
             "total_hosts": total_hosts,
+            "source_ip": self.source_ip,
+            "max_logins_per_minute": self._login_limiter.per_minute,
         })
 
         for depth in range(self.max_depth + 1):
@@ -281,9 +350,8 @@ class DiscoveryEngine:
                         next_layer.extend(neighbors)
                     except Exception as e:
                         logger.error(f"[{ip}] Unexpected error: {e}")
-                        with self._failed_lock:
-                            self.failed[ip] = str(e)
-                        self._progress_cb({"event": "device_failed", "ip": ip, "error": str(e)})
+                        self._record_failure(inventory, ip,
+                                             self._unexpected_record(e))
 
             self._progress_cb({
                 "event": "layer_complete",
@@ -307,13 +375,42 @@ class DiscoveryEngine:
             f"{len(self.failed)} failed"
         )
 
-        # Persist scan summary metadata for the Reports tab stat bar
+        # Persist scan summary metadata for the Reports tab stat bar.
+        # Prior failures from a continued scan may be bare strings; normalise
+        # so every saved record has the same shape.
+        with self._failed_lock:
+            for ip in self.skipped:
+                self.failed.pop(ip, None)
+            failed = {
+                ip: failure_record(value,
+                                   hostname=self._find_hostname_by_ip(inventory, ip))
+                for ip, value in self.failed.items()
+            }
         inventory.set_scan_summary(
             elapsed=round(elapsed, 1),
-            failed=dict(self.failed),
+            failed=failed,
             out_of_scope=set(self._out_of_scope),
             ceiling_hit=self._ceiling_hit,
+            skipped=dict(self.skipped),
         )
+        with self._timing_lock:
+            timing = dict(self.timing)
+        slowest = summarize_timing(timing)
+        hint = refused_hint(failed, self.source_ip)
+        inventory.update_scan_summary(
+            source_ip=self.source_ip,
+            source_access_warnings=list(self.source_access_warnings),
+            refused_hint=hint,
+            max_logins_per_minute=self._login_limiter.per_minute,
+            timing=timing,
+            slowest=slowest,
+        )
+        if self.target_resolution:
+            inventory.update_scan_summary(
+                targets=list(self.target_resolution.get("targets", [])),
+                unresolved=list(self.target_resolution.get("unresolved", [])),
+            )
+        failure_summary = reason_counts(failed)
         if self._out_of_scope:
             logger.info(
                 f"{len(self._out_of_scope)} address(es) seen but not crawled "
@@ -332,16 +429,28 @@ class DiscoveryEngine:
             self._progress_cb({
                 "event": "scan_cancelled",
                 "total_devices": len(self.visited),
-                "failed_count": len(self.failed),
+                "failed_count": len(failed),
+                "failure_reasons": failure_summary,
+                "skipped_count": len(self.skipped),
                 "elapsed": round(elapsed, 1),
+                "source_ip": self.source_ip,
+                "source_access_warnings": list(self.source_access_warnings),
+                "refused_hint": hint,
+                "slowest": slowest,
             })
         else:
             self._progress_cb({
                 "event": "scan_complete",
                 "total_devices": len(self.visited),
-                "failed_count": len(self.failed),
+                "failed_count": len(failed),
+                "failure_reasons": failure_summary,
+                "skipped_count": len(self.skipped),
                 "elapsed": round(elapsed, 1),
                 "inventory_key": inventory.discovery_id,
+                "source_ip": self.source_ip,
+                "source_access_warnings": list(self.source_access_warnings),
+                "refused_hint": hint,
+                "slowest": slowest,
             })
 
         # Remove the device-context filter now that discovery is done
@@ -359,8 +468,18 @@ class DiscoveryEngine:
         """
         _log_context.device_ip = ip
         logger.info(f"Discovering device at depth {depth}")
+        visit_started = time.monotonic()
 
         try:
+            known_name = self._find_hostname_by_ip(inventory, ip)
+            known = inventory.devices.get(known_name, {}) if known_name else {}
+            # A continued scan, or a host list naming an address already seen
+            # as an ACI/UCS neighbour, must not log into it either.
+            if known.get("managed_by") and self._skip_controller_managed(
+                    inventory, ip, known_name, known.get("managed_by"),
+                    known.get("platform")):
+                return []
+
             # Seed host uses user-selected protocol; discovered neighbors use auto
             is_seed = (ip == self.seed_ip and depth == 0)
             proto = self.protocol if is_seed else "auto"
@@ -372,8 +491,12 @@ class DiscoveryEngine:
                 username=self.username, password=self.password,
                 protocol=proto,
                 allow_fallback=not (explicit_type or self.disable_autodetect),
+                platform=known.get("platform"),
+                login_limiter=self._login_limiter,
             )
+            connect_started = time.monotonic()
             result = conn_mgr.connect()
+            connect_ms = _ms_since(connect_started)
             conn = result.connection
             if result.fallback_occurred:
                 self._progress_cb({
@@ -401,7 +524,10 @@ class DiscoveryEngine:
             norm_hostname = normalize_hostname(hostname)
             explicitly_requested = ip in self._requested_ips
             with self._hostname_lock:
-                if norm_hostname in self._discovered_hostnames and not explicitly_requested:
+                already_this_run = norm_hostname in self._run_hostnames
+                if already_this_run or (
+                        norm_hostname in self._discovered_hostnames
+                        and not explicitly_requested):
                     logger.info(
                         f"Skipping {ip}: already discovered as {hostname}"
                     )
@@ -416,6 +542,7 @@ class DiscoveryEngine:
                     conn.disconnect()
                     return []
                 self._discovered_hostnames.add(norm_hostname)
+                self._run_hostnames.add(norm_hostname)
 
             # Handle IP-placeholder rename
             self._rename_placeholder(inventory, ip, hostname)
@@ -450,33 +577,62 @@ class DiscoveryEngine:
                 else:
                     batch_collectors[cname] = collector
 
-            # Gather commands for batch collectors
-            all_commands = []
+            # Gather commands for batch collectors. Switch-only commands are
+            # held back until show version has said whether this is a router.
             collector_commands = {}
+            general_cmds = []
+            switching_cmds = []
             for cname, collector in batch_collectors.items():
                 cmds = collector.get_commands(device_type)
                 collector_commands[cname] = cmds
-                all_commands.extend(cmds)
+                for cmd in cmds:
+                    if (collector.switching_only
+                            or cmd in collector.switching_commands):
+                        switching_cmds.append(cmd)
+                    else:
+                        general_cmds.append(cmd)
 
-            # Deduplicate commands while preserving order
-            seen_cmds = set()
-            unique_commands = []
-            for cmd in all_commands:
-                if cmd not in seen_cmds:
-                    seen_cmds.add(cmd)
-                    unique_commands.append(cmd)
-
-            # Run all batch commands in single session
+            command_ms = {}
+            batch_started = time.monotonic()
             raw_outputs = ConnectionManager.run_commands(
-                conn, unique_commands,
+                conn, _dedupe(general_cmds), timings=command_ms,
             )
+
+            record = inventory.devices.get(hostname, {})
+            router_model = is_switchless_router(
+                show_version=raw_outputs.get("show version", ""),
+                model=record.get("model") or "",
+                platform=record.get("platform") or "",
+                category=record.get("device_category") or "",
+            )
+            if router_model:
+                logger.info("Router: skipping switching commands")
+            else:
+                pending = [c for c in _dedupe(switching_cmds)
+                           if c not in raw_outputs]
+                raw_outputs.update(ConnectionManager.run_commands(
+                    conn, pending, timings=command_ms))
+            batch_ms = _ms_since(batch_started)
+            collectors_ms = collector_ms(collector_commands, command_ms)
 
             # Parse batch collectors
             for cname, collector in batch_collectors.items():
+                if router_model and collector.switching_only:
+                    inventory.set_collector_data(
+                        hostname, cname, raw={},
+                        parsed={"not_applicable": True,
+                                "reason": f"{cname} does not apply to a router"},
+                    )
+                    continue
                 cmds = collector_commands[cname]
+                if router_model:
+                    cmds = [c for c in cmds
+                            if c not in collector.switching_commands]
                 collector_raw = {cmd: raw_outputs.get(cmd, "") for cmd in cmds}
                 try:
-                    parsed = collector.parse(collector_raw, device_type)
+                    # Same error handling as BaseCollector.collect: rejected
+                    # commands are blanked and recorded, never parsed.
+                    parsed = collector.parse_collected(collector_raw, device_type)
                 except Exception as e:
                     logger.warning(f"Collector {cname} parse failed on {hostname}: {e}")
                     parsed = {}
@@ -485,6 +641,7 @@ class DiscoveryEngine:
 
             # Run custom collectors (dynamic commands, post-processing)
             for cname, collector in custom_collectors.items():
+                collector_started = time.monotonic()
                 try:
                     result = collector.collect(conn, device_type)
                     inventory.set_collector_data(
@@ -494,8 +651,12 @@ class DiscoveryEngine:
                 except Exception as e:
                     logger.warning(f"Collector {cname} collect failed on {hostname}: {e}")
                     inventory.set_collector_data(hostname, cname, raw={}, parsed={})
+                collectors_ms[cname] = _ms_since(collector_started)
 
             conn.disconnect()
+
+            if ip == self.seed_ip and not self._source_checked:
+                self._check_source_access(inventory, hostname)
 
             # Record collected hardware facts. These only ever come from a
             # real login, which is what makes them a reliable signal that a
@@ -534,35 +695,143 @@ class DiscoveryEngine:
                 "new": new_count,
             })
 
+            total_ms = _ms_since(visit_started)
+            with self._timing_lock:
+                self.timing[hostname] = {
+                    "ip": ip,
+                    "connect_ms": connect_ms,
+                    "login_wait_ms": conn_mgr.login_wait_ms,
+                    "batch_ms": batch_ms,
+                    "commands_ms": command_ms,
+                    "collectors_ms": collectors_ms,
+                    "total_ms": total_ms,
+                }
+
             self._progress_cb({
                 "event": "device_complete",
                 "ip": ip,
                 "hostname": hostname,
                 "device_type": device_type or "auto",
+                "total_ms": total_ms,
             })
 
             return neighbors
 
         except ConnectionError as e:
-            logger.error(f"Connection error: {e.message}")
-            with self._failed_lock:
-                self.failed[ip] = e.message
+            logger.error(f"Connection error ({e.reason}): {e.message}")
+            record = e.to_record(
+                hostname=self._find_hostname_by_ip(inventory, ip))
             # A device seen as a neighbour keeps its record but records why
             # the login attempt against it failed.
             inventory.mark_login_failed_by_ip(ip, e.message)
             # SSH and telnet are gone; SNMP may still say what this thing is.
+            # It is still a failed login, so it is still recorded as one.
             if self._snmp_fallback(inventory, ip, e.message):
+                with self._failed_lock:
+                    self.failed[ip] = record
+                self._maybe_refused_hint()
                 return []
-            self._progress_cb({"event": "device_failed", "ip": ip, "error": e.message})
+            self._record_failure(inventory, ip, record)
             return []
         except Exception as e:
             logger.error(f"Unexpected error: {e}")
-            with self._failed_lock:
-                self.failed[ip] = str(e)
-            self._progress_cb({"event": "device_failed", "ip": ip, "error": str(e)})
+            self._record_failure(inventory, ip, self._unexpected_record(
+                e, hostname=self._find_hostname_by_ip(inventory, ip)))
             return []
         finally:
             _log_context.device_ip = None
+
+    @staticmethod
+    def _unexpected_record(exc, hostname=None) -> dict:
+        message = f"{type(exc).__name__}: {exc}"
+        return {
+            "hostname": hostname,
+            "reason": OTHER,
+            "hint": hint_for(OTHER),
+            "message": message,
+            "attempts": [],
+        }
+
+    def _record_failure(self, inventory, ip, record):
+        """Store a structured failure and tell the UI why it failed."""
+        with self._failed_lock:
+            self.failed[ip] = record
+        self._progress_cb({
+            "event": "device_failed",
+            "ip": ip,
+            "hostname": record.get("hostname"),
+            "error": record.get("message"),
+            "reason": record.get("reason"),
+            "hint": record.get("hint"),
+        })
+        self._maybe_refused_hint()
+
+    def _maybe_refused_hint(self):
+        """Point at the vty ACLs once enough devices have refused us."""
+        with self._failed_lock:
+            if self._refused_hint:
+                return
+            hint = refused_hint(self.failed, self.source_ip)
+            if not hint:
+                return
+            self._refused_hint = hint
+        logger.warning(hint)
+        self._progress_cb({"event": "refused_hint", "message": hint,
+                           "source_ip": self.source_ip})
+
+    def _check_source_access(self, inventory, hostname):
+        """Warn when the seed's vty or SNMP ACLs do not permit this host."""
+        self._source_checked = True
+        if not self.source_ip:
+            return
+        data = inventory.devices.get(hostname, {}).get("collector_data", {})
+        config_data = data.get("config", {})
+        config = (config_data.get("parsed") or {}).get("config", "")
+        if not config:
+            raw = config_data.get("raw") or {}
+            config = next(iter(raw.values()), "") if raw else ""
+        acl_output = (data.get("edge_services", {}).get("raw") or {}).get(
+            "show access-lists", "")
+        if not config:
+            logger.info("No running-config from the seed; source access "
+                        "check skipped")
+            return
+        try:
+            warnings = check_source_access(config, self.source_ip, hostname,
+                                           acl_output=acl_output)
+        except Exception as e:
+            logger.warning(f"Source access check failed: {type(e).__name__}: {e}")
+            return
+        for warning in warnings:
+            self.source_access_warnings.append(warning)
+            logger.warning(warning["message"])
+            self._progress_cb({"event": "source_access_warning", **warning})
+
+    def _skip_controller_managed(self, inventory, ip, hostname, managed_by,
+                                 platform) -> bool:
+        """Record a controller-managed device as skipped. False when the
+        operator asked for these to be collected anyway."""
+        if self.collect_controller_managed:
+            return False
+        with self._failed_lock:
+            self.failed.pop(ip, None)
+            self.skipped[ip] = {
+                "hostname": hostname,
+                "reason": "controller_managed",
+                "managed_by": managed_by,
+                "platform": platform,
+            }
+        logger.info(f"Not logging into {hostname} ({ip}): managed by "
+                    f"{managed_by}")
+        self._progress_cb({
+            "event": "device_skipped",
+            "ip": ip,
+            "hostname": hostname,
+            "reason": "controller_managed",
+            "managed_by": managed_by,
+            "hint": SKIP_HINTS.get(managed_by, ""),
+        })
+        return True
 
     def _snmp_fallback(self, inventory: DiscoveryInventory, ip: str,
                        login_error: str) -> bool:
@@ -647,6 +916,11 @@ class DiscoveryEngine:
                                    neighbor.get("system_description")):
                 neighbor_category = "host_nic"
 
+            managed = self._detector.detect_controller_managed(
+                neighbor.get("remote_platform"), neighbor.get("remote_device"))
+            if managed and managed.get("device_category"):
+                neighbor_category = managed["device_category"]
+
             if not self._should_include(neighbor_category):
                 logger.info(
                     f"Skipping {neighbor.get('remote_device', 'Unknown')}: "
@@ -660,7 +934,7 @@ class DiscoveryEngine:
             # a chassis -- it becomes evidence on the device that saw it, and
             # is still queued below for a login attempt that can name it.
             platform, chassis_id = _neighbour_platform_fields(
-                neighbor.get("remote_platform"))
+                neighbor.get("remote_platform"), neighbor.get("chassis_id"))
             source = neighbor.get("source", "cdp_lldp")
 
             remote_name = (neighbor.get("remote_device") or "").strip() \
@@ -677,9 +951,13 @@ class DiscoveryEngine:
                 )
                 if chassis_id:
                     inventory.set_chassis_id(remote_name, chassis_id)
+                if managed:
+                    inventory.set_controller_managed(
+                        remote_name, managed["managed_by"],
+                        managed.get("device_category"))
                 inventory.add_evidence(
                     remote_name, source=source, seen_from=hostname,
-                    remote_port=neighbor.get("remote_port"),
+                    remote_port=_neighbour_remote_port(neighbor),
                 )
             else:
                 existing = self._find_hostname_by_ip(
@@ -687,18 +965,31 @@ class DiscoveryEngine:
                 if existing:
                     inventory.add_evidence(
                         existing, source=source, seen_from=hostname,
-                        remote_port=neighbor.get("remote_port"),
+                        remote_port=_neighbour_remote_port(neighbor),
                     )
                 else:
                     inventory.add_unresolved_neighbour(hostname, neighbor)
 
             # Queue for next layer
             remote_ip = neighbor.get("remote_ip")
+            if remote_ip and not self._detector.is_collectible(neighbor_device_type):
+                logger.info(
+                    f"Not crawling {remote_name} ({remote_ip}): "
+                    f"{neighbor_device_type} has no CLI to collect from"
+                )
+                continue
             if remote_ip:
                 with self._visited_lock:
                     already_visited = remote_ip in self.visited
                     visited_count = len(self.visited)
                 if already_visited:
+                    continue
+                if managed and self._skip_controller_managed(
+                        inventory, remote_ip, remote_name,
+                        managed["managed_by"], platform):
+                    # Seen and recorded; never queued for a login.
+                    with self._visited_lock:
+                        self.visited.add(remote_ip)
                     continue
                 if not self.crawl_scope.allows(remote_ip):
                     logger.info(
@@ -752,15 +1043,24 @@ class DiscoveryEngine:
             else ("unknown", False)
         )
 
-        if platform:
-            dt = self._detector.detect_from_cdp(platform, capabilities, self.filters)
+        # The LLDP system description names the OS outright ("Arista Networks
+        # EOS ..."), so it outranks a platform string. Neither lookup may fall
+        # back to the default type here, or an unmatched platform would hide
+        # a perfectly good description.
+        if system_desc:
+            dt = self._detector.detect_from_lldp(
+                system_desc, capabilities, self.filters, fallback=False)
             if dt:
                 return (dt, device_category, has_routing)
 
-        if system_desc:
-            dt = self._detector.detect_from_lldp(system_desc, capabilities, self.filters)
+        if platform:
+            dt = self._detector.detect_from_cdp(
+                platform, capabilities, self.filters, fallback=False)
             if dt:
                 return (dt, device_category, has_routing)
+
+        if platform or system_desc:
+            return (self._detector.default_type, device_category, has_routing)
 
         if device_category and device_category != "unknown":
             return (self._detector.default_type, device_category, has_routing)
@@ -773,6 +1073,7 @@ class DiscoveryEngine:
             "router": "include_routers",
             "firewall": "include_routers",
             "switch": "include_switches",
+            "fabric-interconnect": "include_switches",
             "phone": "include_phones",
             # Server NICs are endpoints, not network devices. Off unless the
             # operator explicitly asks for other devices.

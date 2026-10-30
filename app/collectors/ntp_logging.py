@@ -269,7 +269,9 @@ class NtpLoggingCollector(BaseCollector):
         return list(_COMMANDS.get(device_type, _DEFAULT_COMMANDS))
 
     def parse(self, raw_outputs: dict[str, str], device_type: str) -> dict:
-        cmds = _COMMANDS.get(device_type, _DEFAULT_COMMANDS)
+        # Non-Cisco platforms run fewer than six commands; pad so the
+        # missing positions parse as empty instead of raising IndexError.
+        cmds = list(_COMMANDS.get(device_type, _DEFAULT_COMMANDS)) + [""] * 6
         ntp_status_cmd = cmds[0]
         ntp_peers_cmd = cmds[1]
         logging_cmd = cmds[2]
@@ -306,11 +308,14 @@ class NtpLoggingCollector(BaseCollector):
             except Exception:
                 raw_outputs[cmd] = ""
 
-        parsed = self.parse(raw_outputs, device_type)
+        parsed = self.parse_collected(raw_outputs, device_type)
 
-        # SECURITY: Redact raw outputs that may contain secrets
-        raw_outputs[cmds[3]] = "<REDACTED>"  # show snmp
-        raw_outputs[cmds[5]] = "<REDACTED>"  # show running-config | section aaa
+        # SECURITY: Redact raw outputs that may contain secrets. Matched by
+        # command, not position: VyOS, WLC, WatchGuard and PAN-OS run shorter
+        # lists, and indexing them raised IndexError and lost the collector.
+        for cmd in cmds:
+            if cmd == "show snmp" or "running-config" in cmd:
+                raw_outputs[cmd] = "<REDACTED>"
 
         return {
             "raw": raw_outputs,

@@ -17,6 +17,11 @@ import copy
 import logging
 from datetime import datetime, timezone
 
+try:
+    from app.failures import reason_counts
+except ImportError:
+    from failures import reason_counts
+
 logger = logging.getLogger(__name__)
 
 
@@ -225,13 +230,25 @@ def merge_inventories(inventories: list, filenames: list = None) -> dict:
         if dev.get("login_succeeded") and dev.get("mgmt_ip")
     }
     failed = {}
+    skipped = {}
     elapsed = 0.0
     for inventory in inventories:
         summary = inventory.get("scan_summary") or {}
         elapsed += float(summary.get("elapsed") or 0)
         for ip, error in (summary.get("failed") or {}).items():
+            if ip in reached:
+                continue
+            # A classified record beats an old bare string for the same host.
+            if isinstance(failed.get(ip), dict) and not isinstance(error, dict):
+                continue
+            failed[ip] = error
+        for ip, record in (summary.get("skipped") or {}).items():
             if ip not in reached:
-                failed[ip] = error
+                skipped[ip] = record
+    # A controller-managed device skipped in one scan is not a failure in
+    # the merged view just because an older scan tried and failed it.
+    for ip in skipped:
+        failed.pop(ip, None)
 
     seeds = [inv.get("seed_ip", "") for inv in inventories if inv.get("seed_ip")]
     discovery_id = f"{now.strftime('%Y-%m-%d_%H-%M-%S')}_merged"
@@ -257,6 +274,9 @@ def merge_inventories(inventories: list, filenames: list = None) -> dict:
             "elapsed": round(elapsed, 1),
             "failed_count": len(failed),
             "failed": failed,
+            "failure_reasons": reason_counts(failed),
+            "skipped_count": len(skipped),
+            "skipped": skipped,
             "out_of_scope": [],
             "out_of_scope_count": 0,
             "device_ceiling_hit": False,

@@ -365,6 +365,17 @@ def test_targeted_crawl_does_not_reprocess_targets():
     assert "192.168.1.1" in engine.visited
 
 
+def test_targeted_scan_records_target_ips():
+    """The inventory report needs to tell a host-list target from a seed."""
+    engine = DiscoveryEngine(
+        seed_ip="192.168.1.1", seed_device_type="cisco_nxos",
+        username="admin", password="admin",
+        target_hosts=[("192.168.1.1", "cisco_nxos")],
+    )
+    inventory = engine.discover()
+    assert inventory.params["target_ips"] == ["192.168.1.1"]
+
+
 def test_public_next_hop_is_not_crawled():
     """Regression: next-hop crawling must not walk into ISP space."""
     from app.inventory import DiscoveryInventory
@@ -686,3 +697,68 @@ def test_snmp_table_failure_keeps_the_identification(monkeypatch):
     inv = DiscoveryInventory.create(seed_ip="10.0.0.1")
     assert engine._snmp_fallback(inv, "10.254.254.1", "no ssh") is True
     assert "FW1" in inv.devices
+
+
+def _same_device_everywhere(monkeypatch, hostname="AB001-IDF-SWA-01"):
+    import app.discovery_engine as mod
+    monkeypatch.setattr(mod.ConnectionManager, "get_prompt_facts",
+                        staticmethod(lambda conn: {"hostname": hostname,
+                                                   "ha_state": None}))
+
+
+def test_two_targets_reaching_one_device_collect_once(monkeypatch):
+    """Two listed addresses for the same chassis: the second is skipped."""
+    _same_device_everywhere(monkeypatch)
+    events = []
+    engine = DiscoveryEngine(
+        seed_ip="192.168.1.1", seed_device_type="cisco_nxos",
+        username="admin", password="admin",
+        target_hosts=[("192.168.1.1", "cisco_nxos"),
+                      ("192.168.1.10", "extreme")],
+        progress_callback=events.append,
+    )
+    engine.discover()
+    skipped = [e for e in events
+               if e.get("event") == "device_complete" and e.get("skipped")]
+    assert len(skipped) == 1
+
+
+def test_continuation_targets_reaching_one_device_collect_once(monkeypatch):
+    """Explicit targets bypass dedupe against the base scan, but not
+    against each other."""
+    _same_device_everywhere(monkeypatch)
+    base = DiscoveryInventory.create(seed_ip="192.168.1.1")
+    base.add_device("AB001-IDF-SWA-01", mgmt_ip="192.168.1.1",
+                    discovery_source="login")
+    base.mark_login_succeeded("AB001-IDF-SWA-01")
+    events = []
+    engine = DiscoveryEngine(
+        seed_ip="192.168.1.1", seed_device_type="cisco_nxos",
+        username="admin", password="admin",
+        base_inventory=base,
+        target_hosts=[("192.168.1.1", "cisco_nxos"),
+                      ("192.168.1.10", "extreme")],
+        progress_callback=events.append,
+    )
+    engine.discover()
+    done = [e for e in events if e.get("event") == "device_complete"]
+    assert len(done) == 2
+    assert sum(1 for e in done if e.get("skipped")) == 1
+
+
+def test_target_resolution_recorded_in_scan_summary():
+    resolution = {
+        "targets": [{"input": "sw1.example.com", "resolved_ip": "192.168.1.1"}],
+        "unresolved": [{"input": "gone.example.com", "error": "not found"}],
+    }
+    engine = DiscoveryEngine(
+        seed_ip="192.168.1.1", seed_device_type="cisco_nxos",
+        username="admin", password="admin",
+        target_hosts=[("192.168.1.1", "cisco_nxos")],
+        target_resolution=resolution,
+    )
+    inv = engine.discover()
+    summary = inv.to_dict()["scan_summary"]
+    assert summary["targets"] == resolution["targets"]
+    assert summary["unresolved"] == resolution["unresolved"]
+    assert "failed" in summary

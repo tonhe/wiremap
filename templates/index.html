@@ -164,6 +164,11 @@
             border-left-color: var(--success);
             color: var(--success);
         }
+        .alert-warning {
+            background: rgba(251, 191, 36, 0.08);
+            border-left-color: var(--warning);
+            color: var(--warning);
+        }
 
         /* Tabs */
         .tab-bar {
@@ -804,11 +809,25 @@
                         <label for="host_list">Host List</label>
                         <textarea name="host_list" id="host_list" rows="10"
                                   style="width: 100%; font-family: 'JetBrains Mono', monospace; font-size: 13px; background: var(--bg-input); color: var(--text-bright); border: 1px solid var(--border); padding: 10px; resize: vertical;"
-                                  placeholder="# One device per line: IP [device_type]
+                                  placeholder="# One device per line: IP or hostname [device_type]
 10.1.1.1
 10.1.1.2 cisco_ios
-10.1.1.3 paloalto_panos
-10.1.1.4 paloalto_panos"></textarea>
+sw1.example.com
+fw1.example.com paloalto_panos"></textarea>
+                        <div style="display: flex; align-items: center; gap: 12px; margin-top: 6px; font-size: 13px;">
+                            <label class="upload-link" style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); cursor: pointer; margin-bottom: 0; font-weight: normal;">
+                                <span style="font-size: 15px;">&#8593;</span> Upload host list (.txt or .csv)
+                                <input type="file" name="host_file" id="ts_host_file" accept=".txt,.csv,text/plain,text/csv" style="display: none;">
+                            </label>
+                            <span id="ts_host_file_name" class="mono" style="color: var(--text-bright);"></span>
+                            <a href="#" id="ts_host_file_clear" style="display: none; color: var(--text-muted);">clear</a>
+                        </div>
+                        <p class="helper-text" style="margin-top: 4px;">
+                            Hostnames are resolved before the scan starts; names that do not resolve are listed
+                            and skipped. CSV files need a header with a <span class="mono">hostname</span> and/or
+                            <span class="mono">ip</span> column, plus optional <span class="mono">device_type</span>.
+                            Pasted and uploaded hosts are combined.
+                        </p>
                         <details style="margin-top: 6px; font-size: 12px; color: var(--text-muted);">
                             <summary style="cursor: pointer;">Supported device types</summary>
                             <div class="mono" style="margin-top: 6px; line-height: 1.8;">
@@ -1046,6 +1065,38 @@
                             <option value="">Loading...</option>
                         </select>
                     </div>
+                    <div class="form-group">
+                        <label for="settings-max-logins">Max Logins per Minute</label>
+                        <p class="helper-text">Login attempts per minute across all workers, including SSH, telnet and legacy-algorithm retries. Keeps large runs under TACACS+/ISE throttling. 0 = no limit (0-600).</p>
+                        <input type="number" id="settings-max-logins" min="0" max="600" step="1" value="0">
+                    </div>
+                    <div class="form-group">
+                        <label for="settings-site-rules">Site Mapping Rules</label>
+                        <p class="helper-text">One rule per line: <span class="mono">regex =&gt; SITE</span>. Checked in order against the hostname (case-insensitive); the first match wins and <span class="mono">\1</span> inserts a captured group. Unmatched names use the first hyphen-delimited token of the short hostname.</p>
+                        <textarea id="settings-site-rules" rows="5"
+                                  style="width: 100%; font-family: 'JetBrains Mono', monospace; font-size: 13px; background: var(--bg-input); color: var(--text-bright); border: 1px solid var(--border); padding: 10px; resize: vertical;"
+                                  placeholder="# regex =&gt; SITE
+^AB001- =&gt; HQ
+\.east\.example\.net$ =&gt; EAST
+^([A-Z]{2})[0-9]{3}- =&gt; \1"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <div class="plugin-card-header">
+                            <label for="settings-redact-secrets">Redact Secrets</label>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="settings-redact-secrets" checked>
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <p class="helper-text">Replace SNMP communities, passwords and keys in collected configs with &lt;REDACTED&gt; before they are saved. Applies to new scans.</p>
+                    </div>
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" id="settings-collect-controller-managed" style="width: auto; margin-right: 8px; accent-color: var(--accent);">
+                            Collect controller-managed devices
+                        </label>
+                        <p class="helper-text">ACI leaf/spine switches and UCS Fabric Interconnects take their CLI accounts from APIC or UCS Manager, so they are recorded from neighbour data but not logged into. Enable to try the network credential on them anyway.</p>
+                    </div>
                     <div class="plugin-actions">
                         <button type="button" class="btn-primary" onclick="saveDiscoverySettings()">Save</button>
                     </div>
@@ -1161,11 +1212,45 @@
                 clearReportsTab();
                 showProgressPanel(scanType === 'targeted' ? 'TARGETED SCAN IN PROGRESS' : 'DISCOVERY IN PROGRESS');
                 openEventStream(data.scan_id);
+                logTargetResolution(data);
             })
             .catch(function(err) {
                 alert('Error: ' + err.message);
             });
     }
+
+    function logTargetResolution(data) {
+        if (data.target_count === undefined) return;
+        var msg = data.target_count + ' target(s)';
+        if (data.resolved) msg += ', ' + data.resolved + ' hostname(s) resolved';
+        logEvent(msg, 'muted');
+        (data.warnings || []).forEach(function(w) { logEvent('Warning: ' + w, 'fail'); });
+        var unresolved = data.unresolved || [];
+        if (unresolved.length) {
+            logEvent(unresolved.length + ' hostname(s) did not resolve and will be skipped:', 'fail');
+            unresolved.forEach(function(u) {
+                logEvent('  ' + u.input + (u.error ? ' (' + u.error + ')' : ''), 'fail');
+            });
+        }
+    }
+
+    (function () {
+        var input = document.getElementById('ts_host_file');
+        var label = document.getElementById('ts_host_file_name');
+        var clear = document.getElementById('ts_host_file_clear');
+        if (!input) return;
+        input.addEventListener('change', function () {
+            var name = input.files.length ? input.files[0].name : '';
+            label.textContent = name;
+            clear.style.display = name ? '' : 'none';
+        });
+        clear.addEventListener('click', function (e) {
+            e.preventDefault();
+            input.value = '';
+            label.textContent = '';
+            clear.style.display = 'none';
+        });
+    })();
 
     function showProgressPanel(title) {
         document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); });
@@ -1197,7 +1282,18 @@
         _eventSource = new EventSource('/scan/' + scanId + '/stream');
 
         _eventSource.addEventListener('scan_started', function(e) {
+            var d = JSON.parse(e.data);
             logEvent('Scan started', 'muted');
+            if (d.source_ip) logEvent('Source address: ' + d.source_ip, 'muted');
+            if (d.max_logins_per_minute) logEvent('Login rate limited to ' + d.max_logins_per_minute + '/min', 'muted');
+        });
+        _eventSource.addEventListener('source_access_warning', function(e) {
+            var d = JSON.parse(e.data);
+            logEvent('WARNING: ' + d.message, 'warn');
+        });
+        _eventSource.addEventListener('refused_hint', function(e) {
+            var d = JSON.parse(e.data);
+            logEvent('HINT: ' + d.message, 'warn');
         });
         _eventSource.addEventListener('device_connecting', function(e) {
             var d = JSON.parse(e.data);
@@ -1233,7 +1329,14 @@
             var d = JSON.parse(e.data);
             _failedCount++;
             document.getElementById('prog-failed').textContent = _failedCount;
-            logEvent(d.ip + ' \u2717 ' + d.error, 'fail');
+            var who = d.hostname ? d.hostname + ' (' + d.ip + ')' : d.ip;
+            var why = d.reason ? '[' + d.reason + '] ' : '';
+            logEvent(who + ' \u2717 ' + why + d.error, 'fail');
+        });
+        _eventSource.addEventListener('device_skipped', function(e) {
+            var d = JSON.parse(e.data);
+            logEvent((d.hostname || d.ip) + ' (' + d.ip + ') not logged into \u2014 managed by ' +
+                     (d.managed_by === 'aci' ? 'APIC' : d.managed_by === 'ucsm' ? 'UCS Manager' : d.managed_by), 'muted');
         });
         _eventSource.addEventListener('layer_complete', function(e) {
             var d = JSON.parse(e.data);
@@ -1267,11 +1370,53 @@
         var color = 'var(--text-muted)';
         if (type === 'ok') color = 'var(--status-ok, #22c55e)';
         if (type === 'fail') color = 'var(--danger, #f43f5e)';
+        if (type === 'warn') color = 'var(--warning, #fbbf24)';
         var line = document.createElement('div');
         line.style.color = color;
+        if (type === 'warn') line.style.fontWeight = '600';
         line.textContent = ts + '  ' + message;
         log.appendChild(line);
         log.scrollTop = log.scrollHeight;
+    }
+
+    /* One line per failure class: count, then the likely cause and fix. */
+    function logFailureReasons(reasons) {
+        (reasons || []).forEach(function(r) {
+            logEvent('  ' + r.count + ' × ' + (r.label || r.reason) + ' — ' + r.hint, 'fail');
+        });
+    }
+
+    function fmtMs(ms) {
+        return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms + 'ms';
+    }
+
+    /* Where the time went: slowest devices, then the costliest collectors. */
+    function logSlowest(slowest) {
+        if (!slowest) return;
+        var devs = slowest.devices || [];
+        if (devs.length) {
+            logEvent('Slowest devices:', 'muted');
+            devs.forEach(function(d) {
+                var extra = 'login ' + fmtMs(d.connect_ms || 0);
+                if (d.login_wait_ms) extra += ', rate-limit wait ' + fmtMs(d.login_wait_ms);
+                logEvent('  ' + d.hostname + ' ' + fmtMs(d.total_ms || 0) + ' (' + extra + ')', 'muted');
+            });
+        }
+        var cols = slowest.collectors || [];
+        if (cols.length) {
+            logEvent('Costliest collectors:', 'muted');
+            cols.forEach(function(c) {
+                logEvent('  ' + c.collector + ' ' + fmtMs(c.total_ms || 0) + ' total, max ' +
+                         fmtMs(c.max_ms || 0) + ' on ' + c.max_device, 'muted');
+            });
+        }
+    }
+
+    function logSourceAccess(data) {
+        (data.source_access_warnings || []).forEach(function(w) {
+            logEvent('WARNING: ' + w.message, 'warn');
+        });
+        if (data.refused_hint) logEvent('HINT: ' + data.refused_hint, 'warn');
     }
 
     function onScanFinished(title, data) {
@@ -1280,7 +1425,12 @@
         if (_elapsedInterval) clearInterval(_elapsedInterval);
         document.getElementById('progress-title').textContent = title;
         document.getElementById('cancel-btn').style.display = 'none';
-        logEvent(title + ' \u2014 ' + (data.total_devices || 0) + ' devices, ' + (data.failed_count || 0) + ' failed', 'muted');
+        var line = title + ' \u2014 ' + (data.total_devices || 0) + ' devices, ' + (data.failed_count || 0) + ' failed';
+        if (data.skipped_count) line += ', ' + data.skipped_count + ' controller-managed not logged into';
+        logEvent(line, 'muted');
+        logFailureReasons(data.failure_reasons);
+        logSourceAccess(data);
+        logSlowest(data.slowest);
 
         if (data.inventory_key) {
             fetch('/api/reports/available/' + encodeURIComponent(data.inventory_key))
@@ -1354,6 +1504,7 @@
 
         addTile('DEVICES', s.device_count != null ? s.device_count : '--', 'var(--cyan)');
         addTile('FAILED', s.failed_count != null ? s.failed_count : '--', 'var(--danger)');
+        if (s.skipped_count) addTile('CONTROLLER-MANAGED', s.skipped_count, 'var(--text-muted)');
 
         var elapsedStr = '--';
         if (s.elapsed != null) {
@@ -1373,6 +1524,50 @@
         addTile('SCAN DATE', dateStr, 'var(--text)');
 
         contentEl.appendChild(statsRow);
+
+        /* Why devices failed, with the likely fix for each class */
+        if (s.failure_reasons && s.failure_reasons.length) {
+            var reasonsEl = document.createElement('div');
+            reasonsEl.className = 'alert alert-error';
+            reasonsEl.style.marginBottom = '20px';
+            s.failure_reasons.forEach(function(r) {
+                var row = document.createElement('div');
+                var strong = document.createElement('strong');
+                strong.textContent = r.count + ' × ' + (r.label || r.reason);
+                row.appendChild(strong);
+                row.appendChild(document.createTextNode(' — ' + r.hint));
+                reasonsEl.appendChild(row);
+            });
+            contentEl.appendChild(reasonsEl);
+        }
+
+        /* Management ACLs on the seed that do not permit this host */
+        var accessNotes = (s.source_access_warnings || []).map(function(w) { return w.message; });
+        if (s.refused_hint) accessNotes.push(s.refused_hint);
+        if (accessNotes.length) {
+            var accessEl = document.createElement('div');
+            accessEl.className = 'alert alert-warning';
+            accessEl.style.marginBottom = '20px';
+            accessNotes.forEach(function(msg) {
+                var row = document.createElement('div');
+                row.textContent = msg;
+                accessEl.appendChild(row);
+            });
+            contentEl.appendChild(accessEl);
+        }
+
+        /* Slowest devices, so a long run can be explained */
+        var slowDevs = (s.slowest && s.slowest.devices) || [];
+        if (slowDevs.length) {
+            var slowEl = document.createElement('div');
+            slowEl.className = 'helper-text';
+            slowEl.style.marginBottom = '20px';
+            slowEl.textContent = 'Slowest: ' + slowDevs.map(function(d) {
+                return d.hostname + ' ' + fmtMs(d.total_ms || 0);
+            }).join(', ');
+            if (s.source_ip) slowEl.textContent += '  \u00b7  source ' + s.source_ip;
+            contentEl.appendChild(slowEl);
+        }
 
         var availableSet = {};
         availableReports.forEach(function(name) { availableSet[name] = true; });
@@ -1787,6 +1982,16 @@
                     if (i === settings.max_workers) opt.selected = true;
                     select.appendChild(opt);
                 }
+                document.getElementById('settings-site-rules').value =
+                    (settings.site_rules || []).map(function(r) {
+                        return r.pattern + ' => ' + r.site;
+                    }).join('\n');
+                document.getElementById('settings-redact-secrets').checked =
+                    settings.redact_secrets !== false;
+                document.getElementById('settings-collect-controller-managed').checked =
+                    !!settings.collect_controller_managed;
+                document.getElementById('settings-max-logins').value =
+                    settings.max_logins_per_minute || 0;
             })
             .catch(function() {});
     }
@@ -1796,7 +2001,13 @@
         fetch('/api/settings/discovery', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({max_workers: maxWorkers})
+            body: JSON.stringify({
+                max_workers: maxWorkers,
+                site_rules: document.getElementById('settings-site-rules').value,
+                redact_secrets: document.getElementById('settings-redact-secrets').checked,
+                collect_controller_managed: document.getElementById('settings-collect-controller-managed').checked,
+                max_logins_per_minute: parseInt(document.getElementById('settings-max-logins').value || '0', 10)
+            })
         })
         .then(function(r) { return r.json(); })
         .then(function(data) {

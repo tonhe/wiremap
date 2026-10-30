@@ -86,6 +86,9 @@ class InterfacesCollector(BaseCollector):
     label = "Interface Status"
     description = "Collect interface status, descriptions, IP assignments, and etherchannel info"
     enabled_by_default = True
+    # Routers reject these; the rest of the collector applies to them.
+    switching_commands = frozenset({"show interfaces status",
+                                    "show interface status"})
 
     def get_commands(self, device_type: str) -> list[str]:
         return _COMMANDS.get(device_type, _DEFAULT_COMMANDS)

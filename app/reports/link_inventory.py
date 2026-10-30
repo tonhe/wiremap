@@ -9,6 +9,13 @@ from openpyxl import Workbook
 from .base import BaseReport
 from .xlsx_utils import create_sheet
 
+try:
+    from app.identity import normalize_hostname
+    from app.ifname import canonical_ifname
+except ImportError:
+    from identity import normalize_hostname
+    from ifname import canonical_ifname
+
 
 class LinkInventoryReport(BaseReport):
     name = "link_inventory"
@@ -29,10 +36,11 @@ class LinkInventoryReport(BaseReport):
                 remote = n.get("remote_device", "Unknown")
                 local_intf = n.get("local_intf", "?")
                 remote_intf = n.get("remote_intf", "?")
-                # Deduplicate bidirectional links
+                # Deduplicate bidirectional links. Each end may spell the
+                # ports differently (CDP long names, LLDP short ones).
                 key = tuple(sorted([
-                    f"{hostname}:{local_intf}",
-                    f"{remote}:{remote_intf}",
+                    f"{normalize_hostname(hostname)}:{canonical_ifname(local_intf)}",
+                    f"{normalize_hostname(remote)}:{canonical_ifname(remote_intf)}",
                 ]))
                 if key in seen:
                     continue

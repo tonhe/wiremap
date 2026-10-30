@@ -143,3 +143,22 @@ def test_snmp_no_secrets(collector):
     assert result["snmp"]["communities_detected"] is True
     assert result["snmp"]["contact"] == "admin@example.com"
     assert result["snmp"]["location"] == "DC1-Row5-Rack12"
+
+
+class _EchoConnection:
+    def send_command(self, cmd):
+        return f"output of {cmd}"
+
+
+@pytest.mark.parametrize("device_type", [
+    "cisco_ios", "cisco_nxos", "vyos", "cisco_wlc",
+    "watchguard_fireware", "paloalto_panos",
+])
+def test_collect_redacts_by_command_on_every_platform(collector, device_type):
+    raw = collector.collect(_EchoConnection(), device_type)["raw"]
+    assert set(raw) == set(collector.get_commands(device_type))
+    for cmd, out in raw.items():
+        if cmd == "show snmp" or "running-config" in cmd:
+            assert out == "<REDACTED>"
+        else:
+            assert out == f"output of {cmd}"

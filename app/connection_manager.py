@@ -3,11 +3,69 @@ Connection Manager -- SSH and Telnet connections to network devices.
 Dumb pipe: connects, runs commands, returns raw output. No parsing.
 """
 import logging
+import re
+import time
 from collections import namedtuple
+
+try:
+    from app import failures
+except ImportError:
+    import failures
 
 logger = logging.getLogger(__name__)
 
 _TELNET_SUFFIX = "_telnet"
+
+_PORTS = {"ssh": 22, "telnet": 23}
+
+# Failures where the device type is not the problem. Retrying the same host
+# with three other netmiko drivers only triples the wait and the AAA noise.
+_NETWORK_LAYER = {failures.TIMEOUT, failures.REFUSED, failures.LEGACY_CRYPTO}
+
+# Platforms where an SSH refusal means telnet is closed for the same reason
+# (vty access-class, or telnet disabled by default). Trying it only logs
+# another failed login on the AAA server.
+_NO_TELNET_AFTER_REFUSAL_TYPES = {"cisco_xe", "cisco_nxos"}
+_NO_TELNET_AFTER_REFUSAL_PLATFORM = re.compile(
+    r"(\bC9\d{3}|\bN\dK-|\bN\d{4}|nexus|ios-?xe)", re.IGNORECASE)
+
+# Second SSH attempt after a negotiation failure. paramiko 3.5.1 (pinned)
+# already offers SHA-1 kex, ssh-rsa and CBC ciphers, so what actually trips
+# old IOS is the rsa-sha2 signature upgrade and group-exchange moduli the
+# device cannot handle. Disabling those leaves the legacy set to negotiate.
+LEGACY_DISABLED_ALGORITHMS = {
+    "pubkeys": ["rsa-sha2-512", "rsa-sha2-256"],
+    "keys": ["rsa-sha2-512", "rsa-sha2-256"],
+    "kex": ["diffie-hellman-group-exchange-sha256",
+            "diffie-hellman-group-exchange-sha1"],
+}
+LEGACY_ALGORITHMS = {
+    "_preferred_kex": ("_kex_info", ["diffie-hellman-group14-sha1",
+                                     "diffie-hellman-group1-sha1"]),
+    "_preferred_keys": ("_key_info", ["ssh-rsa"]),
+    "_preferred_pubkeys": ("_key_info", ["ssh-rsa"]),
+    "_preferred_ciphers": ("_cipher_info", ["aes128-cbc", "aes256-cbc",
+                                            "3des-cbc"]),
+}
+
+
+def _ensure_legacy_algorithms():
+    """Make sure paramiko offers the legacy set, at lowest preference.
+
+    A no-op on the pinned paramiko. If a later version drops one from the
+    default offer but still implements it, this puts it back at the end of
+    the list, so modern devices still negotiate modern algorithms.
+    """
+    try:
+        from paramiko.transport import Transport
+    except ImportError:
+        return
+    for attr, (info_attr, names) in LEGACY_ALGORITHMS.items():
+        preferred = tuple(getattr(Transport, attr, ()))
+        known = getattr(Transport, info_attr, {})
+        missing = tuple(n for n in names if n in known and n not in preferred)
+        if missing:
+            setattr(Transport, attr, preferred + missing)
 
 # Used when a host list line names no device type. Matches
 # default_device_type in config/device_type_patterns.yaml.
@@ -43,15 +101,64 @@ def _connect_handler(**params):
 class ConnectionError(Exception):
     """Raised when connection fails.
 
-    attempts holds every (protocol, device_type, error) tried, so the
-    genuine SSH failure survives alongside later fallback failures.
+    attempts holds one dict per try -- protocol, port, device_type,
+    exception_class, message, elapsed_ms, reason -- so the genuine SSH
+    failure survives alongside later fallback failures. reason is the
+    overall failure class (see app.failures), hint its remediation.
     """
     def __init__(self, message: str, error_type: str = "connection",
-                 attempts=None):
+                 attempts=None, reason: str = None):
         super().__init__(message)
         self.message = message
         self.error_type = error_type
         self.attempts = attempts or []
+        self.reason = reason or failures.OTHER
+        self.hint = failures.hint_for(self.reason)
+
+    def to_record(self, hostname=None) -> dict:
+        """The scan_summary["failed"] value for this failure."""
+        return {
+            "hostname": hostname,
+            "reason": self.reason,
+            "hint": self.hint,
+            "message": self.message,
+            "attempts": [dict(a) for a in self.attempts],
+        }
+
+
+def _attempt(protocol, device_type, reason, exception_class, message,
+             elapsed_ms=0):
+    return {
+        "protocol": protocol,
+        "port": _PORTS.get(protocol),
+        "device_type": device_type,
+        "exception_class": exception_class,
+        "message": message,
+        "elapsed_ms": elapsed_ms,
+        "reason": reason,
+    }
+
+
+def _short_message(exc) -> str:
+    """First meaningful line of an exception -- netmiko pads its messages
+    with multi-line "Common causes" boilerplate."""
+    lines = [ln.strip() for ln in str(exc).splitlines() if ln.strip()]
+    for ln in lines:
+        if ln.lower().startswith(("incompatible", "no acceptable",
+                                  "authentication failed", "[errno")):
+            return ln
+    return lines[0] if lines else type(exc).__name__
+
+
+def overall_reason(attempts) -> str:
+    """One class for the whole failure, judged on the SSH attempts.
+
+    Telnet runs only after SSH failed, so its outcome says little about why
+    the device is not collectable -- unless telnet was all there was.
+    """
+    ssh = [a["reason"] for a in attempts if a["protocol"] == "ssh"]
+    pool = ssh or [a["reason"] for a in attempts]
+    return failures.pick_reason(pool)
 
 
 class ConnectionManager:
@@ -59,8 +166,15 @@ class ConnectionManager:
 
     def __init__(self, host: str, device_type: str, username: str,
                  password: str, protocol: str = "ssh",
-                 allow_fallback: bool = True):
+                 allow_fallback: bool = True, platform: str = None,
+                 login_limiter=None):
         self.host = host
+        # Shared across workers; spaces logins so AAA servers do not throttle.
+        self.login_limiter = login_limiter
+        self.login_wait_ms = 0
+        # Neighbour-reported platform, when known. Only used to decide
+        # whether telnet is worth trying after SSH is refused.
+        self.platform = platform or ""
         # A host list line may name no device type at all. Carrying None
         # through crashes on the first .endswith() -- three Citrix NetScalers
         # were never reached because of exactly that.
@@ -140,51 +254,96 @@ class ConnectionManager:
                                             self.username, self.password)
             return ConnectionResult(connection=mock_conn, protocol_used="mock", fallback_occurred=False)
 
-        # Lazy import -- netmiko is only available inside Docker
-        from netmiko import NetmikoTimeoutException, NetmikoAuthenticationException
-
         protocols_to_try = ["ssh", "telnet"] if self.protocol == "auto" else [self.protocol]
         attempts = []
         fallback_occurred = False
 
         for proto in protocols_to_try:
+            if proto == "telnet" and attempts and self._telnet_pointless(attempts):
+                attempts.append(_attempt(
+                    proto, self.device_type, "skipped", "Skipped",
+                    "telnet not tried: SSH was refused and this platform "
+                    "refuses telnet for the same reason"))
+                logger.info(f"Not trying telnet to {self.host}: SSH refused")
+                continue
+            if proto == "telnet" and attempts:
+                fallback_occurred = True
+
             for dt in self._types_to_try():
                 if proto == "telnet":
                     effective_dt = telnet_type_for(dt)
                     if effective_dt is None:
-                        attempts.append(
-                            (proto, dt, "telnet not supported for this platform"))
+                        attempts.append(_attempt(
+                            proto, dt, failures.NO_TELNET_DRIVER, "Unsupported",
+                            "telnet not supported for this platform"))
                         continue
                 else:
                     effective_dt = dt
 
                 params = self._build_device_params(effective_dt)
                 params["device_type"] = effective_dt
-                try:
-                    logger.info(f"Connecting to {self.host} ({effective_dt} via {proto})")
-                    conn = _connect_handler(**params)
-                    logger.info(f"Connected to {self.host} ({effective_dt} via {proto})")
+                conn, reason = self._try_connect(proto, effective_dt, params,
+                                                 attempts)
+                if conn is None and reason == failures.LEGACY_CRYPTO \
+                        and proto == "ssh":
+                    _ensure_legacy_algorithms()
+                    legacy = dict(params,
+                                  disabled_algorithms=LEGACY_DISABLED_ALGORITHMS)
+                    logger.info(f"Retrying {self.host} with legacy SSH algorithms")
+                    conn, reason = self._try_connect(proto, effective_dt,
+                                                     legacy, attempts)
+                if conn is not None:
                     self.effective_device_type = effective_dt
                     return ConnectionResult(connection=conn, protocol_used=proto,
                                             fallback_occurred=fallback_occurred)
-                except NetmikoAuthenticationException as e:
-                    attempts.append((proto, effective_dt, f"authentication failed: {e}"))
+                if reason == failures.AUTH:
                     raise ConnectionError(
-                        f"Authentication failed to {self.host}", "auth", attempts)
-                except NetmikoTimeoutException as e:
-                    attempts.append((proto, effective_dt, f"timeout: {e}"))
-                    logger.warning(f"Timeout {self.host} with {effective_dt} via {proto}")
-                    if proto == "ssh" and "telnet" in protocols_to_try:
-                        fallback_occurred = True
-                        break  # skip remaining ssh types, try telnet
-                except Exception as e:
-                    detail = f"{type(e).__name__}: {e}"
-                    attempts.append((proto, effective_dt, detail))
-                    logger.warning(f"Failed {self.host} with {effective_dt} via {proto}: {detail}")
+                        f"Authentication failed to {self.host}", "auth",
+                        attempts, failures.AUTH)
+                if reason in _NETWORK_LAYER:
+                    # Another driver will hit the same closed port.
+                    break
 
-        summary = "; ".join(f"{p}/{d}: {e}" for p, d, e in attempts)
+        summary = "; ".join(
+            f"{a['protocol']}/{a['device_type']}: {a['message']}"
+            for a in attempts)
         raise ConnectionError(
-            f"Connection failed to {self.host}: {summary}", "connection", attempts)
+            f"Connection failed to {self.host}: {summary}", "connection",
+            attempts, overall_reason(attempts))
+
+    def _try_connect(self, proto, device_type, params, attempts):
+        """One connection attempt. Returns (connection, None) or (None, reason)
+        after appending the attempt record."""
+        if self.login_limiter is not None:
+            waited = self.login_limiter.acquire()
+            if waited:
+                self.login_wait_ms += int(waited * 1000)
+        logger.info(f"Connecting to {self.host} ({device_type} via {proto})")
+        started = time.monotonic()
+        try:
+            conn = _connect_handler(**params)
+        except Exception as e:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            reason = failures.classify_exception(e)
+            message = _short_message(e)
+            if params.get("disabled_algorithms"):
+                message = f"legacy algorithms retry: {message}"
+            attempts.append(_attempt(proto, device_type, reason,
+                                     type(e).__name__, message, elapsed_ms))
+            logger.warning(f"Failed {self.host} with {device_type} via "
+                           f"{proto} ({reason}): {message}")
+            return None, reason
+        logger.info(f"Connected to {self.host} ({device_type} via {proto})")
+        return conn, None
+
+    def _telnet_pointless(self, attempts) -> bool:
+        """True when SSH was refused on a platform that refuses telnet too."""
+        ssh_reasons = {a["reason"] for a in attempts if a["protocol"] == "ssh"}
+        if ssh_reasons != {failures.REFUSED}:
+            return False
+        if self.device_type in _NO_TELNET_AFTER_REFUSAL_TYPES:
+            return True
+        return bool(_NO_TELNET_AFTER_REFUSAL_PLATFORM.search(self.platform))
 
     @staticmethod
     def get_hostname(connection) -> str:
@@ -212,17 +371,21 @@ class ConnectionManager:
 
     @staticmethod
     def run_commands(connection, commands: list[str],
-                     read_timeout: int = 30) -> dict[str, str]:
+                     read_timeout: int = 30, timings=None) -> dict[str, str]:
         """Run a list of commands and return dict of command -> raw output.
 
         Commands that fail are logged and stored with empty string output.
+        When timings is a dict, each command's wall time in ms is put in it.
         """
         results = {}
         for cmd in commands:
+            started = time.monotonic()
             try:
                 output = connection.send_command(cmd, read_timeout=read_timeout)
                 results[cmd] = output
             except Exception as e:
                 logger.warning(f"Command failed '{cmd}': {e}")
                 results[cmd] = ""
+            if timings is not None:
+                timings[cmd] = int((time.monotonic() - started) * 1000)
         return results

@@ -88,6 +88,33 @@ def test_save_discovery_settings_invalid(client, tmp_path, monkeypatch):
     assert rv.status_code == 400
 
 
+def test_save_site_rules_from_text(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_module, 'DEFAULT_CONFIG_DIR', str(tmp_path))
+    rv = client.post('/api/settings/discovery',
+                     json={"max_workers": 5, "site_rules": "^AB001- => HQ"})
+    assert rv.status_code == 200
+    assert rv.get_json()["site_rules"] == [{"pattern": "^AB001-", "site": "HQ"}]
+
+
+def test_save_site_rules_rejects_bad_regex(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_module, 'DEFAULT_CONFIG_DIR', str(tmp_path))
+    rv = client.post('/api/settings/discovery', json={"site_rules": "( => X"})
+    assert rv.status_code == 400
+    assert "invalid regex" in rv.get_json()["error"]
+
+
+def test_settings_ui_has_site_rules(client):
+    _point_at_repo_templates()
+    assert b'id="settings-site-rules"' in client.get('/').data
+def test_discovery_settings_redact_secrets_toggle(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_module, 'DEFAULT_CONFIG_DIR', str(tmp_path))
+    assert client.get('/api/settings/discovery').get_json()["redact_secrets"] is True
+    rv = client.post('/api/settings/discovery',
+                     json={"max_workers": 5, "redact_secrets": False})
+    assert rv.status_code == 200
+    assert rv.get_json()["redact_secrets"] is False
+
+
 def test_load_inventory_returns_json(inventory_dir, client):
     """POST /load-inventory should return JSON, not HTML."""
     from app.inventory import DiscoveryInventory
@@ -251,3 +278,144 @@ def test_merge_ui_present_in_saved_scans(client):
     assert "merge-bar" in body
     assert "mergeSelectedScans" in body
     assert "Merge selected" in body
+
+
+class _CapturedScan:
+    def __init__(self, monkeypatch):
+        self.engine_kwargs = None
+        captured = self
+
+        class FakeEngine:
+            def __init__(self, **kwargs):
+                captured.engine_kwargs = kwargs
+
+            def discover(self):
+                class Inv:
+                    def save(self, d):
+                        return None
+                return Inv()
+
+        def fake_start(scan_type, fn):
+            fn(lambda e: None, None)
+            return "scan-1"
+
+        monkeypatch.setattr(app_module, "DiscoveryEngine", FakeEngine)
+        monkeypatch.setattr(app_module.scan_manager, "is_running", lambda: False)
+        monkeypatch.setattr(app_module.scan_manager, "start_scan", fake_start)
+
+
+def _fake_dns(monkeypatch, table):
+    import socket
+
+    def resolve(host, port, family=0, type=0, *a, **k):
+        if host not in table:
+            raise socket.gaierror(-2, "Name or service not known")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (table[host], 0))]
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+
+
+TARGETED = {"scan_type": "targeted", "username": "u", "password": "p"}
+
+
+def test_targeted_scan_resolves_hostnames(client, monkeypatch):
+    scan = _CapturedScan(monkeypatch)
+    _fake_dns(monkeypatch, {"sw1.example.com": "192.0.2.1"})
+    resp = client.post("/scan/start", data=dict(
+        TARGETED, host_list="sw1.example.com cisco_ios\ngone.example.com\n192.0.2.2"))
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["target_count"] == 2
+    assert [u["input"] for u in body["unresolved"]] == ["gone.example.com"]
+    kw = scan.engine_kwargs
+    assert kw["target_hosts"] == [("192.0.2.1", "cisco_ios"), ("192.0.2.2", None)]
+    assert kw["seed_ip"] == "192.0.2.1"
+    assert kw["target_resolution"]["targets"] == [
+        {"input": "sw1.example.com", "resolved_ip": "192.0.2.1"}]
+    assert kw["target_resolution"]["unresolved"][0]["input"] == "gone.example.com"
+
+
+def test_targeted_scan_with_nothing_resolvable_is_rejected(client, monkeypatch):
+    _CapturedScan(monkeypatch)
+    _fake_dns(monkeypatch, {})
+    resp = client.post("/scan/start", data=dict(TARGETED, host_list="gone.example.com"))
+    assert resp.status_code == 400
+    assert "gone.example.com" in resp.get_json()["error"]
+
+
+def test_targeted_scan_accepts_uploaded_csv_with_paste(client, monkeypatch):
+    import io
+    scan = _CapturedScan(monkeypatch)
+    _fake_dns(monkeypatch, {"AB001-IDF-SWA-01.example.net": "192.0.2.20"})
+    csv_body = b"hostname,ip,device_type\nAB001-IDF-SWA-01.example.net,,cisco_ios\n,192.0.2.21,\n"
+    resp = client.post("/scan/start", content_type="multipart/form-data", data=dict(
+        TARGETED, host_list="192.0.2.22",
+        host_file=(io.BytesIO(csv_body), "hosts.csv")))
+    assert resp.status_code == 200, resp.get_json()
+    assert scan.engine_kwargs["target_hosts"] == [
+        ("192.0.2.22", None), ("192.0.2.20", "cisco_ios"), ("192.0.2.21", None)]
+
+
+def test_targeted_scan_accepts_upload_alone(client, monkeypatch):
+    import io
+    scan = _CapturedScan(monkeypatch)
+    resp = client.post("/scan/start", content_type="multipart/form-data", data=dict(
+        TARGETED, host_file=(io.BytesIO(b"# list\n192.0.2.30\n"), "hosts.txt")))
+    assert resp.status_code == 200
+    assert scan.engine_kwargs["target_hosts"] == [("192.0.2.30", None)]
+
+
+def test_targeted_scan_upload_errors_name_the_file(client, monkeypatch):
+    import io
+    _CapturedScan(monkeypatch)
+    resp = client.post("/scan/start", content_type="multipart/form-data", data=dict(
+        TARGETED, host_file=(io.BytesIO(b"192.0.2.999\n"), "hosts.txt")))
+    assert resp.status_code == 400
+    assert "hosts.txt" in resp.get_json()["error"]
+
+
+def test_targeted_scan_requires_some_hosts(client, monkeypatch):
+    _CapturedScan(monkeypatch)
+    resp = client.post("/scan/start", data=dict(TARGETED))
+    assert resp.status_code == 400
+
+
+def test_large_target_list_warns(client, monkeypatch):
+    _CapturedScan(monkeypatch)
+    monkeypatch.setattr(app_module, "WARN_TARGET_COUNT", 2)
+    resp = client.post("/scan/start", data=dict(
+        TARGETED, host_list="192.0.2.1\n192.0.2.2\n192.0.2.3"))
+    assert resp.status_code == 200
+    assert resp.get_json()["warnings"]
+
+
+def test_targeted_form_has_file_upload(client):
+    _point_at_repo_templates()
+    body = client.get("/").get_data(as_text=True)
+    assert 'name="host_file"' in body
+    assert 'accept=".txt,.csv' in body
+
+
+def test_scan_passes_login_rate_limit_to_engine(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_module, 'DEFAULT_CONFIG_DIR', str(tmp_path))
+    settings_module.save_discovery_settings({"max_logins_per_minute": 90},
+                                            config_dir=str(tmp_path))
+    scan = _CapturedScan(monkeypatch)
+    resp = client.post("/scan/start", data=dict(TARGETED, host_list="192.0.2.1"))
+    assert resp.status_code == 200
+    assert scan.engine_kwargs["max_logins_per_minute"] == 90
+
+
+def test_login_rate_setting_saved_and_validated(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_module, 'DEFAULT_CONFIG_DIR', str(tmp_path))
+    assert client.get('/api/settings/discovery').get_json()["max_logins_per_minute"] == 0
+    rv = client.post('/api/settings/discovery', json={"max_logins_per_minute": 30})
+    assert rv.get_json()["max_logins_per_minute"] == 30
+    rv = client.post('/api/settings/discovery', json={"max_logins_per_minute": 1000})
+    assert rv.status_code == 400
+
+
+def test_settings_ui_has_login_rate_control(client):
+    _point_at_repo_templates()
+    body = client.get('/').get_data(as_text=True)
+    assert 'id="settings-max-logins"' in body
+    assert "source_access_warning" in body

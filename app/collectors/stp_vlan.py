@@ -7,8 +7,12 @@ import logging
 import re
 
 from .base import BaseCollector
+from .stp_detail import parse_ios_stp_root
 
 logger = logging.getLogger(__name__)
+
+# Platforms whose 'show spanning-tree root' ntc-templates really parses.
+_NTC_ROOT_PLATFORMS = {"cisco_nxos"}
 
 _COMMANDS = {
     "cisco_ios": [
@@ -218,6 +222,7 @@ class StpVlanCollector(BaseCollector):
     unsupported_platforms = frozenset({"cisco_wlc", "vyos",
                                        "watchguard_fireware",
                                        "paloalto_panos"})
+    switching_only = True
 
     def get_commands(self, device_type: str) -> list[str]:
         return _COMMANDS.get(device_type, _DEFAULT_COMMANDS)
@@ -237,10 +242,15 @@ class StpVlanCollector(BaseCollector):
 
         # STP root -- normalize field names
         root_cmd = _find_cmd(commands, "spanning-tree", "root")
-        raw_root = _ntc_parse(
-            raw_outputs.get(root_cmd, ""), device_type, root_cmd
-        ) if root_cmd else []
-        spanning_tree_root = _normalize_root_entries(raw_root)
+        if not root_cmd:
+            spanning_tree_root = []
+        elif device_type in _NTC_ROOT_PLATFORMS:
+            spanning_tree_root = _normalize_root_entries(_ntc_parse(
+                raw_outputs.get(root_cmd, ""), device_type, root_cmd))
+        else:
+            # ntc has no IOS template for this command; it falls back to
+            # the 'show spanning-tree' template and matches nothing.
+            spanning_tree_root = parse_ios_stp_root(raw_outputs.get(root_cmd, ""))
 
         # Blocked ports -- try ntc-templates first, fall back to raw parsing
         blocked_cmd = _find_cmd(commands, "blocked")

@@ -19,6 +19,7 @@ from snmp_probe import SnmpCredentials
 from scan_manager import ScanManager
 from plugins import get_plugin_config, save_plugin_config, get_plugin_status, list_plugins
 from settings import get_discovery_settings, save_discovery_settings
+from target_list import WARN_TARGET_COUNT, parse_targets, resolve_targets
 try:
     from app.collectors import get_registry as get_collector_registry
     from app.reports import get_registry as get_report_registry, get_report
@@ -109,17 +110,22 @@ def scan_start():
     disc_settings = get_discovery_settings()
     max_workers = disc_settings.get("max_workers", 10)
     disable_autodetect = disc_settings.get("disable_autodetect", False)
+    collect_controller_managed = bool(
+        disc_settings.get("collect_controller_managed", False))
+    max_logins_per_minute = int(disc_settings.get("max_logins_per_minute") or 0)
 
     if not username or not password:
         return jsonify({"error": "Username and password are required"}), 400
 
+    target_resolution = None
     if scan_type == 'targeted':
-        host_list_raw = request.form.get('host_list', '').strip()
-        if not host_list_raw:
+        has_file = bool(getattr(request.files.get('host_file'), 'filename', ''))
+        if not request.form.get('host_list', '').strip() and not has_file:
             return jsonify({"error": "Host list is required"}), 400
         valid_types = {dt[0] for dt in DEVICE_TYPES}
         try:
-            target_hosts = _parse_host_list(host_list_raw, valid_types)
+            target_hosts, target_resolution = _build_target_hosts(
+                request.form, request.files, valid_types)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
         seed_ip = target_hosts[0][0]
@@ -198,6 +204,9 @@ def scan_start():
             crawl_scope=crawl_scope,
             snmp_credentials=snmp_credentials,
             base_inventory=base_inventory,
+            target_resolution=target_resolution,
+            collect_controller_managed=collect_controller_managed,
+            max_logins_per_minute=max_logins_per_minute,
         )
         inventory = engine.discover()
         inventory.save(INVENTORY_DIR)
@@ -207,7 +216,13 @@ def scan_start():
     if scan_id is None:
         return jsonify({"error": "A scan is already running"}), 409
 
-    return jsonify({"scan_id": scan_id})
+    response = {"scan_id": scan_id}
+    if target_resolution:
+        response["target_count"] = len(target_hosts)
+        response["resolved"] = len(target_resolution["targets"])
+        response["unresolved"] = target_resolution["unresolved"]
+        response["warnings"] = target_resolution["warnings"]
+    return jsonify(response)
 
 
 @app.route('/scan/<scan_id>/stream')
@@ -542,37 +557,54 @@ def _split_cidrs(raw_text):
     return [p.strip() for p in parts if p.strip()]
 
 
-def _parse_host_list(raw_text, valid_types):
-    """Parse textarea host list into [(ip, device_type_or_None), ...].
+def _parse_host_list(raw_text, valid_types, filename=None):
+    """Parse a pasted or uploaded host list into unresolved host entries.
 
-    Each line: IP [device_type]. Blank lines and # comments ignored.
+    Text: one `host [device_type]` per line, host an IPv4 address or a
+    hostname/FQDN; blank lines and # comments ignored. CSV (by .csv name or
+    a recognisable header): hostname and/or ip column, optional device_type.
     """
-    hosts = []
-    seen_ips = set()
-    for lineno, line in enumerate(raw_text.splitlines(), 1):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        parts = stripped.split()
-        ip = parts[0]
-        octets = ip.split(".")
-        if len(octets) != 4:
-            raise ValueError(f"Line {lineno}: invalid IP address '{ip}'")
-        for octet in octets:
-            if not octet.isdigit() or not 0 <= int(octet) <= 255:
-                raise ValueError(f"Line {lineno}: invalid IP address '{ip}'")
-        if ip in seen_ips:
-            continue
-        seen_ips.add(ip)
-        device_type = None
-        if len(parts) >= 2:
-            device_type = parts[1]
-            if device_type not in valid_types:
-                raise ValueError(f"Line {lineno}: unknown device type '{device_type}'")
-        hosts.append((ip, device_type))
-    if not hosts:
+    return parse_targets(raw_text, valid_types, filename=filename)
+
+
+MAX_HOST_FILE_BYTES = 5 * 1024 * 1024
+
+
+def _read_host_file(storage):
+    """Return (text, filename) from an uploaded host file, or ('', None)."""
+    if storage is None or not storage.filename:
+        return "", None
+    data = storage.read(MAX_HOST_FILE_BYTES + 1)
+    if len(data) > MAX_HOST_FILE_BYTES:
+        raise ValueError("Host file is larger than 5 MB")
+    return data.decode("utf-8-sig", errors="replace"), storage.filename
+
+
+def _build_target_hosts(form, files, valid_types):
+    """Parse paste and upload, resolve names. Returns (hosts, resolution)."""
+    entries = []
+    pasted = form.get('host_list', '').strip()
+    if pasted:
+        entries.extend(_parse_host_list(pasted, valid_types))
+    file_text, filename = _read_host_file(files.get('host_file'))
+    if file_text.strip():
+        try:
+            entries.extend(_parse_host_list(file_text, valid_types, filename))
+        except ValueError as e:
+            raise ValueError(f"{filename}: {e}")
+    if not entries:
         raise ValueError("No valid hosts provided")
-    return hosts
+    hosts, targets, unresolved = resolve_targets(entries)
+    resolution = {"targets": targets, "unresolved": unresolved,
+                  "warnings": []}
+    if len(hosts) > WARN_TARGET_COUNT:
+        resolution["warnings"].append(
+            f"{len(hosts)} targets is more than {WARN_TARGET_COUNT}; "
+            f"check the list is network devices only")
+    if not hosts:
+        names = ", ".join(u["input"] for u in unresolved[:10])
+        raise ValueError(f"No hosts resolved: {names}")
+    return hosts, resolution
 
 def _get_report_info():
     """Return list of report dicts for the UI, grouped by category."""

@@ -145,13 +145,22 @@ def _parse_ip_interfaces(output: str) -> list[dict]:
     """Parse 'show ip interface' output into per-interface records."""
     interfaces = []
     current = None
+    # NX-OS groups interfaces under 'IP Interface Status for VRF "X"(n)'
+    section_vrf = ""
 
     for line in output.splitlines():
+        vrf_section = re.match(r'^IP Interface Status for VRF "([^"]+)"', line)
+        if vrf_section:
+            section_vrf = vrf_section.group(1)
+            current = None
+            continue
+
         # Interface header line (not indented)
         iface_match = re.match(r"^(\S+)\s+is\s+", line)
         if iface_match:
             current = {
                 "interface": iface_match.group(1),
+                "vrf": section_vrf,
                 "ip_address": "",
                 "acl_in": "",
                 "acl_out": "",
@@ -171,6 +180,12 @@ def _parse_ip_interfaces(output: str) -> list[dict]:
         ip_match = re.match(r"Internet address is (\S+)", stripped)
         if ip_match:
             current["ip_address"] = ip_match.group(1)
+            continue
+
+        # IOS: 'VPN Routing/Forwarding "CUST-A"'
+        vrf_match = re.match(r'VPN Routing/Forwarding "([^"]+)"', stripped)
+        if vrf_match:
+            current["vrf"] = vrf_match.group(1)
             continue
 
         # Inbound ACL

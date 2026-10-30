@@ -117,3 +117,12 @@ def test_supported_platform_still_collects():
 def test_empty_command_list_short_circuits():
     result = _EmptyCmd().collect(_Conn("x"), "cisco_ios")
     assert result["parsed"]["not_applicable"] is True
+
+
+def test_parse_collected_matches_collect():
+    """The engine batch path uses parse_collected directly."""
+    parsed = _TwoCommand().parse_collected(
+        {"good": "data here", "bad": "% Invalid input detected"}, "cisco_ios")
+    assert parsed["good"] == "data here"
+    assert parsed["bad"] == ""
+    assert parsed["command_errors"] == {"bad": "% Invalid input detected"}

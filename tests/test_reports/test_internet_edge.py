@@ -31,7 +31,11 @@ def test_bgp_peers_tab(sample_inventory):
     assert ws.cell(row=1, column=1).value == "Device"
     # SW1 has one BGP peer
     assert ws.cell(row=2, column=1).value == "SW1"
-    assert ws.cell(row=2, column=4).value == "65002"
+    assert ws.cell(row=1, column=3).value == "VRF"
+    # pre-VRF inventories have no vrf key; they are global-table peers
+    assert ws.cell(row=2, column=3).value == "default"
+    assert ws.cell(row=2, column=4).value == "10.0.0.2"
+    assert ws.cell(row=2, column=5).value == "65002"
 
 
 def test_nat_overview_tab(sample_inventory):

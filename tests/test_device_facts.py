@@ -1,4 +1,44 @@
-from app.device_facts import extract_device_facts
+from app.device_facts import extract_device_facts, extract_version_details
+
+
+def test_version_details_prefer_collector_reading():
+    parsed = {
+        "version": [{"uptime": "2 weeks", "running_image": "packages.conf"}],
+        "version_details": {"uptime": "1 year, 2 weeks",
+                            "image": "flash:packages.conf",
+                            "license": "network-advantage"},
+    }
+    d = extract_version_details(parsed)
+    assert d["uptime"] == "1 year, 2 weeks"
+    assert d["image"] == "flash:packages.conf"
+    assert d["license"] == "network-advantage"
+
+
+def test_version_details_fall_back_to_ntc_fields_on_old_scans():
+    nxos = {"version": [{"UPTIME": "120 day(s), 3 hour(s)",
+                         "LAST_REBOOT_REASON": "Reset Requested by CLI command reload",
+                         "BOOT_IMAGE": "bootflash:///nxos.9.3.10.bin",
+                         "PLATFORM": "C93180YC"}]}
+    d = extract_version_details(nxos)
+    assert d["uptime"] == "120 day(s), 3 hour(s)"
+    assert d["reload_reason"].startswith("Reset Requested")
+    assert d["image"] == "bootflash:///nxos.9.3.10.bin"
+    assert d["platform_description"] == "C93180YC"
+
+
+def test_platform_description_from_inventory_chassis():
+    parsed = {"inventory": [
+        {"NAME": "Chassis", "DESCR": "Cisco ISR9999 Chassis", "PID": "ISR9999"},
+        {"NAME": "module 0", "DESCR": "Built-In NIM", "PID": "ISR9999-X"},
+    ]}
+    assert extract_version_details(parsed)["platform_description"] == \
+        "Cisco ISR9999 Chassis"
+
+
+def test_version_details_empty_when_collector_failed():
+    d = extract_version_details({"collector_failed": True})
+    assert set(d.values()) == {""}
+    assert set(extract_version_details(None).values()) == {""}
 
 
 def test_extracts_from_version_list():

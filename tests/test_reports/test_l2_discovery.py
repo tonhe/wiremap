@@ -675,6 +675,20 @@ def test_generate_trunk_summary_tab(l2_inventory):
     assert found_dist_trunk
 
 
+def test_trunk_neighbor_joins_short_switchport_to_long_cdp_name(l2_inventory):
+    """Regression: switchport lists Gi0/1, CDP says GigabitEthernet0/1, and
+    a plain lowercase compare left the Neighbor column blank."""
+    cdp = l2_inventory["devices"]["CORE-SW-01"]["collector_data"]["cdp_lldp"]
+    cdp["parsed"]["neighbors"] = [
+        {"remote_device": "DIST-SW-01", "local_intf": "GigabitEthernet0/1",
+         "remote_intf": "GigabitEthernet0/24", "protocols": ["CDP"]},
+    ]
+    sheets = L2DiscoveryReport().generate_tabular_data(l2_inventory)
+    headers, rows = sheets["Trunk Summary"]
+    core = [r for r in rows if r[0] == "CORE-SW-01" and r[2] == "Gi0/1"]
+    assert core and core[0][5] == "DIST-SW-01"
+
+
 def test_conditional_sheets_absent_without_data():
     """STP Topology, Port Security, Trunk Summary not added without data."""
     inv = {

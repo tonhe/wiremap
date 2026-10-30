@@ -200,9 +200,12 @@ def test_cisco_ios_fallback_never_raises_platform_dump(monkeypatch):
     assert "adtran_os_telnet" not in msg
     assert "connection refused by cisco_ios" in msg
     assert "connection refused by cisco_ios_telnet" in msg
-    tried_telnet = [d for p, d, _ in exc.value.attempts if p == "telnet"]
+    tried_telnet = [a["device_type"] for a in exc.value.attempts
+                    if a["protocol"] == "telnet"]
     assert "cisco_ios_telnet" in tried_telnet
-    assert "cisco_nxos" in tried_telnet
+    # A refusal is not the driver's fault, so no other driver is tried.
+    assert "cisco_nxos" not in tried_telnet
+    assert exc.value.reason == "refused"
 
 
 def test_none_device_type_does_not_crash():

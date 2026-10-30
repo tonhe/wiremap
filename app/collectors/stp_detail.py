@@ -23,6 +23,7 @@ class StpDetailCollector(BaseCollector):
     unsupported_platforms = frozenset({"cisco_wlc", "vyos",
                                        "watchguard_fireware",
                                        "paloalto_panos"})
+    switching_only = True
 
     def get_commands(self, device_type: str) -> list[str]:
         cmds = [_CMD_DETAIL]
@@ -166,24 +167,45 @@ def _parse_inconsistent_ports(output: str) -> list[dict]:
 # --------------- -------------------- --------- ----- --- --- ------------
 # VLAN0001        32769 0050.56aa.bb01         0    2  20  15
 # VLAN0010        32778 0050.56aa.bb02         4    2  20  15 Gi0/1
+# The timer columns are matched explicitly: with a loose tail the forward
+# delay ("15") was taken as the root port on the root bridge's own line.
 _RE_ROOT_LINE = re.compile(
-    r"VLAN(\d+)\s+(\d+)\s+([0-9a-fA-F.]+)\s+(\d+)\s+.*?(?:(\S+)\s*)?$"
+    r"^\s*VLAN(\d+)\s+(\d+)\s+([0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\.[0-9a-fA-F]{4})"
+    r"\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)(?:\s+(\S+))?\s*$"
 )
 
 
 def _parse_stp_root(output: str) -> list[dict]:
+    return [
+        {"vlan": int(e["vlan_id"]), "priority": int(e["root_priority"]),
+         "root_address": e["root_address"], "cost": int(e["root_cost"]),
+         "port": e["root_port"]}
+        for e in parse_ios_stp_root(output)
+    ]
+
+
+def parse_ios_stp_root(output: str) -> list[dict]:
+    """Parse IOS / IOS-XE 'show spanning-tree root'.
+
+    ntc-templates has no IOS template for this command and silently applies
+    the 'show spanning-tree' one, which matches nothing. Field names follow
+    stp_vlan's normalised spanning_tree_root shape.
+    """
     if not output or not output.strip():
         return []
 
     results = []
     for line in output.splitlines():
-        m = _RE_ROOT_LINE.search(line)
+        m = _RE_ROOT_LINE.match(line)
         if m:
             results.append({
-                "vlan": int(m.group(1)),
-                "priority": int(m.group(2)),
+                "vlan_id": m.group(1).lstrip("0") or "0",
+                "root_priority": m.group(2),
                 "root_address": m.group(3),
-                "cost": int(m.group(4)),
-                "port": m.group(5) if m.group(5) else "",
+                "root_cost": m.group(4),
+                "root_port": m.group(8) or "",
+                "hello_time": m.group(5),
+                "max_age": m.group(6),
+                "fwd_delay": m.group(7),
             })
     return results

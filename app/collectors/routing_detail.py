@@ -6,8 +6,25 @@ import logging
 import re
 
 from .base import BaseCollector
+from .errors import is_error_output
 
 logger = logging.getLogger(__name__)
+
+# BGP outside the global table (issue #9). "show ip bgp summary" only sees
+# the default VRF, so a PE/edge router whose peers live under
+# "address-family ipv4 vrf X" looked like it had one peer or none.
+_VPNV4_SUMMARY = "show bgp vpnv4 unicast all summary"
+_VPNV4_SUMMARY_OLD = "show ip bgp vpnv4 all summary"
+# The full neighbors output is large; the header line alone carries the
+# neighbor-to-VRF mapping that the summary table lacks.
+_VPNV4_NEIGHBORS = "show bgp vpnv4 unicast all neighbors | include BGP neighbor is"
+_VPNV4_NEIGHBORS_OLD = "show ip bgp vpnv4 all neighbors | include BGP neighbor is"
+_NXOS_BGP_VRF_ALL = "show bgp vrf all all summary"
+_NXOS_ROUTE_SUMMARY_VRF_ALL = "show ip route summary vrf all"
+# LSDB and EIGRP topology size: how much state each process carries.
+_OSPF_DB_SUMMARY = "show ip ospf database database-summary"
+_NXOS_OSPF_DB_SUMMARY = "show ip ospf database database-summary vrf all"
+_EIGRP_TOPO_SUMMARY = "show ip eigrp topology summary"
 
 # Commands per vendor
 _COMMANDS = {
@@ -19,6 +36,14 @@ _COMMANDS = {
         "show ip eigrp topology",
         "show ip eigrp neighbors detail",
         "show ip bgp",
+        _VPNV4_SUMMARY,
+        _VPNV4_NEIGHBORS,
+        # Pre-15.x IOS only knows the older "ip bgp vpnv4" form. When the
+        # newer command is rejected, parse() falls back to these.
+        _VPNV4_SUMMARY_OLD,
+        _VPNV4_NEIGHBORS_OLD,
+        _OSPF_DB_SUMMARY,
+        _EIGRP_TOPO_SUMMARY,
     ],
     "cisco_xe": [
         "show ip route summary",
@@ -28,6 +53,10 @@ _COMMANDS = {
         "show ip eigrp topology",
         "show ip eigrp neighbors detail",
         "show ip bgp",
+        _VPNV4_SUMMARY,
+        _VPNV4_NEIGHBORS,
+        _OSPF_DB_SUMMARY,
+        _EIGRP_TOPO_SUMMARY,
     ],
     "cisco_nxos": [
         "show ip route summary",
@@ -37,6 +66,10 @@ _COMMANDS = {
         "show ip eigrp topology",
         "show ip eigrp neighbors detail",
         "show ip bgp",
+        _NXOS_BGP_VRF_ALL,
+        _NXOS_ROUTE_SUMMARY_VRF_ALL,
+        _NXOS_OSPF_DB_SUMMARY,
+        _EIGRP_TOPO_SUMMARY,
     ],
     # VyOS runs FRR, so the show syntax is close to IOS but has no EIGRP.
     "vyos": [
@@ -55,7 +88,12 @@ _COMMANDS = {
         "show routing protocol bgp summary",
     ],
 }
-_DEFAULT_COMMANDS = _COMMANDS["cisco_ios"]
+# Unknown platforms get the global-table commands only; the VPNv4, vrf-all
+# and scale forms are Cisco-specific and would only add rejected-command noise.
+_DEFAULT_COMMANDS = [c for c in _COMMANDS["cisco_ios"]
+                     if c not in (_VPNV4_SUMMARY, _VPNV4_NEIGHBORS,
+                                  _VPNV4_SUMMARY_OLD, _VPNV4_NEIGHBORS_OLD,
+                                  _OSPF_DB_SUMMARY, _EIGRP_TOPO_SUMMARY)]
 
 
 _NTC_PLATFORM_MAP = {"cisco_xe": "cisco_ios", "cisco_xr": "cisco_ios"}
@@ -140,39 +178,170 @@ def _parse_ospf_interfaces_regex(raw: str) -> list[dict]:
     return results
 
 
+# Neighbor row shared by IOS, IOS-XE and NX-OS summary tables:
+# "10.0.0.2        4 65002     100     120       50    0    0 01:02:03  300"
+# "10.0.0.3        4 65003      80      90       50    0    0 never    Idle (Admin)"
+# ASNs may be asdot ("1.10").
+_BGP_PEER_ROW_RE = re.compile(
+    r"^\s*(\d+\.\d+\.\d+\.\d+)\s+\d+\s+(\d+(?:\.\d+)?)"  # neighbor, version, ASN
+    r"\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+"              # MsgRcvd MsgSent TblVer InQ OutQ
+    r"\s+(\S+)\s+(\S.*?)\s*$"                               # Up/Down, State/PfxRcd
+)
+
+# IOS VPNv4 output may group neighbors under RD headers:
+# "Route Distinguisher: 64500:1 (default for vrf CUST-A)"
+_RD_VRF_RE = re.compile(r"Route Distinguisher:.*\(default for vrf (\S+?)\)")
+_AF_HEADER_RE = re.compile(r"^\s*For address family:\s*(.+?)\s*$")
+# "BGP neighbor is 192.0.2.1,  vrf CUST-A,  remote AS 64496, external link"
+_NEIGHBOR_VRF_RE = re.compile(
+    r"BGP neighbor is (\S+?),\s+(?:vrf (\S+?),\s+)?remote AS (\S+?),"
+)
+# NX-OS: "BGP summary information for VRF CUST-A, address family IPv4 Unicast"
+_NXOS_VRF_HEADER_RE = re.compile(
+    r"BGP summary information for VRF (\S+?), address family (.+?)\s*$"
+)
+
+DEFAULT_VRF = "default"
+
+
+def _peer_from_row(m, vrf=DEFAULT_VRF, address_family="IPv4 Unicast"):
+    state_or_pfx = m.group(4)
+    # If last field is a number, it's prefixes_received; otherwise state
+    try:
+        prefixes = int(state_or_pfx)
+        state = "Established"
+    except ValueError:
+        prefixes = 0
+        state = state_or_pfx
+    return {
+        "neighbor": m.group(1),
+        "asn": m.group(2),
+        "state": state,
+        "prefixes_received": prefixes,
+        "up_down": m.group(3),
+        "vrf": vrf,
+        "address_family": address_family,
+    }
+
+
 def _parse_bgp_summary_regex(raw: str) -> list[dict]:
-    """Regex fallback for 'show ip bgp summary'."""
+    """Regex fallback for 'show ip bgp summary' (global table)."""
     results = []
     for line in raw.splitlines():
-        # Neighbor lines:
-        # "10.0.0.2        4 65002     100     120       50    0    0 01:02:03  300"
-        # "10.0.0.3        4 65003      80      90       50    0    0 00:45:00  Active"
-        m = re.match(
-            r"^\s*(\d+\.\d+\.\d+\.\d+)\s+\d+\s+(\d+)"  # neighbor, version, ASN
-            r"\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+"           # MsgRcvd MsgSent TblVer InQ OutQ
-            r"\s+(\S+)\s+(\S+)\s*$",                      # Up/Down, State/PfxRcd
-            line,
-        )
+        m = _BGP_PEER_ROW_RE.match(line)
         if m:
-            neighbor = m.group(1)
-            asn = m.group(2)
-            up_down = m.group(3)
-            state_or_pfx = m.group(4)
-            # If last field is a number, it's prefixes_received; otherwise state
-            try:
-                prefixes = int(state_or_pfx)
-                state = "Established"
-            except ValueError:
-                prefixes = 0
-                state = state_or_pfx
-            results.append({
-                "neighbor": neighbor,
-                "asn": asn,
-                "state": state,
-                "prefixes_received": prefixes,
-                "up_down": up_down,
-            })
+            results.append(_peer_from_row(m))
     return results
+
+
+def _parse_vpnv4_neighbor_vrfs(raw: str) -> dict:
+    """Map neighbor address -> list of VRF names, in output order.
+
+    The same CE address can exist in several VRFs, so each occurrence is
+    kept; global-table VPNv4 sessions map to the default VRF.
+    """
+    vrfs = {}
+    for line in (raw or "").splitlines():
+        m = _NEIGHBOR_VRF_RE.search(line)
+        if m:
+            vrfs.setdefault(m.group(1), []).append(m.group(2) or DEFAULT_VRF)
+    return vrfs
+
+
+def _parse_vpnv4_summary(raw: str, neighbor_vrfs=None) -> list[dict]:
+    """Parse 'show bgp vpnv4 unicast all summary' (or the older
+    'show ip bgp vpnv4 all summary') so each peer carries its VRF.
+
+    The VRF comes from an RD header when the output has one, else from the
+    neighbors-header mapping, else the peer is a global VPNv4 session.
+    """
+    remaining = {k: list(v) for k, v in (neighbor_vrfs or {}).items()}
+    results = []
+    current_vrf = None
+    for line in (raw or "").splitlines():
+        if _AF_HEADER_RE.match(line):
+            current_vrf = None
+            continue
+        rd = _RD_VRF_RE.search(line)
+        if rd:
+            current_vrf = rd.group(1)
+            continue
+        m = _BGP_PEER_ROW_RE.match(line)
+        if not m:
+            continue
+        neighbor = m.group(1)
+        mapped = remaining.get(neighbor)
+        mapped_vrf = mapped.pop(0) if mapped else None
+        vrf = current_vrf or mapped_vrf or DEFAULT_VRF
+        results.append(_peer_from_row(m, vrf=vrf, address_family="VPNv4 Unicast"))
+    return results
+
+
+def _parse_nxos_bgp_vrf_all(raw: str) -> list[dict]:
+    """Parse NX-OS 'show bgp vrf all all summary'."""
+    results = []
+    vrf = DEFAULT_VRF
+    af = "IPv4 Unicast"
+    for line in (raw or "").splitlines():
+        h = _NXOS_VRF_HEADER_RE.search(line)
+        if h:
+            vrf, af = h.group(1), h.group(2)
+            continue
+        m = _BGP_PEER_ROW_RE.match(line)
+        if m:
+            results.append(_peer_from_row(m, vrf=vrf, address_family=af))
+    return results
+
+
+def _merge_bgp_peers(base: list[dict], extra: list[dict]) -> list[dict]:
+    """Append peers from extra that base lacks, keyed on (vrf, neighbor).
+
+    A peer active in several address families is one session, so only its
+    first appearance is kept.
+    """
+    merged = list(base)
+    seen = {(p.get("vrf") or DEFAULT_VRF, p.get("neighbor")) for p in base}
+    for p in extra:
+        key = (p.get("vrf") or DEFAULT_VRF, p.get("neighbor"))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(p)
+    return merged
+
+
+def _parse_nxos_route_summary_vrf_all(raw: str) -> dict:
+    """Parse NX-OS 'show ip route summary vrf all' into {vrf: [{source, count}]}.
+
+    IP Route Table for VRF "CUST-A"
+    ...
+    Best paths per protocol:      Backup paths per protocol:
+      direct         : 3
+      bgp-64500      : 4
+    """
+    result = {}
+    vrf = None
+    in_best = False
+    for line in (raw or "").splitlines():
+        h = re.search(r'IP Route Table for VRF "([^"]+)"', line)
+        if h:
+            vrf = h.group(1)
+            result.setdefault(vrf, [])
+            in_best = False
+            continue
+        if vrf is None:
+            continue
+        if "Best paths per protocol" in line:
+            in_best = True
+            continue
+        if not line.strip() or "per mask-length" in line:
+            in_best = False
+            continue
+        if in_best:
+            m = re.match(r"^\s+(\S+)\s*:\s*(\d+)", line)
+            if m:
+                result[vrf].append({"source": m.group(1), "count": int(m.group(2))})
+    return result
 
 
 def _parse_eigrp_topology_regex(raw: str) -> list[dict]:
@@ -277,8 +446,118 @@ def _normalize_bgp_ntc(entries: list[dict]) -> list[dict]:
             "state": state,
             "prefixes_received": prefixes,
             "up_down": e.get("up_down", ""),
+            "vrf": e.get("vrf") or DEFAULT_VRF,
+            "address_family": "IPv4 Unicast",
         })
     return results
+
+
+# "OSPF Router with ID (192.0.2.1) (Process ID 1)"            IOS / IOS-XE
+# "OSPF Router with ID (192.0.2.11) (Process ID 10 VRF CUST-A)"  NX-OS
+_OSPF_DB_PROCESS_RE = re.compile(
+    r"OSPF Router with ID \((\S+?)\)\s+\(Process ID (\S+?)(?:,?\s+VRF\s+(\S+?))?\)")
+# "Area 0 database summary" / " Area 0.0.0.0 database summary"
+_OSPF_DB_AREA_RE = re.compile(r"^\s*Area\s+(\S+)\s+database summary", re.I)
+# "Process 1 database summary"
+_OSPF_DB_PROC_TOTAL_RE = re.compile(r"^\s*Process\s+(\S+)\s+database summary", re.I)
+# "  Router        3        0        0" / "  Summary Network 3"
+_OSPF_DB_COUNT_RE = re.compile(r"^\s+([A-Za-z][A-Za-z0-9 -]*?)\s+(\d+)(?:\s+\d+)*\s*$")
+
+
+def _parse_ospf_db_summary(raw: str) -> list[dict]:
+    """Parse 'show ip ospf database database-summary' (IOS, IOS-XE, NX-OS).
+
+    One entry per area plus one per process ("scope": "process"), each with
+    LSA counts by type and the area subtotal / process total.
+    """
+    results = []
+    router_id = process = ""
+    vrf = DEFAULT_VRF
+    current = None
+    for line in (raw or "").splitlines():
+        m = _OSPF_DB_PROCESS_RE.search(line)
+        if m:
+            router_id, process = m.group(1), m.group(2)
+            vrf = m.group(3) or DEFAULT_VRF
+            current = None
+            continue
+        m = _OSPF_DB_AREA_RE.match(line)
+        if m:
+            current = {"process_id": process, "router_id": router_id,
+                       "vrf": vrf, "scope": "area", "area": m.group(1),
+                       "counts": {}, "total": 0}
+            results.append(current)
+            continue
+        m = _OSPF_DB_PROC_TOTAL_RE.match(line)
+        if m:
+            current = {"process_id": m.group(1) or process,
+                       "router_id": router_id, "vrf": vrf, "scope": "process",
+                       "area": "", "counts": {}, "total": 0}
+            results.append(current)
+            continue
+        if current is None:
+            continue
+        stripped = line.strip()
+        if stripped.lower().startswith(("lsa type", "prefixes redistributed")):
+            continue
+        m = _OSPF_DB_COUNT_RE.match(line)
+        if not m:
+            continue
+        label, count = m.group(1).strip(), int(m.group(2))
+        if label.lower() in ("subtotal", "total"):
+            current["total"] = count
+        else:
+            current["counts"][label] = count
+    for entry in results:
+        if not entry["total"]:
+            entry["total"] = sum(v for k, v in entry["counts"].items()
+                                 if k.lower() != "non-self")
+    return results
+
+
+# "EIGRP-IPv4 Topology Table for AS(100)/ID(192.0.2.1)"
+# "EIGRP-IPv4 VR(CORE) Topology Table for AS(100)/ID(192.0.2.1)"
+# "IP-EIGRP topology summary for AS(100)/ID(192.0.2.11) VRF default"  NX-OS
+_EIGRP_TOPO_HEADER_RE = re.compile(
+    r"AS\((\d+)\)\s*/\s*ID\((\S+?)\)(?:.*?VRF[\s(]+([^)\s]+))?", re.I)
+
+
+def _parse_eigrp_topology_summary(raw: str) -> list[dict]:
+    """Parse 'show ip eigrp topology summary' into one entry per AS/VRF."""
+    results = []
+    current = None
+    for line in (raw or "").splitlines():
+        if "topology" in line.lower():
+            m = _EIGRP_TOPO_HEADER_RE.search(line)
+            if m:
+                current = {"as_number": m.group(1), "router_id": m.group(2),
+                           "vrf": m.group(3) or DEFAULT_VRF, "routes": 0,
+                           "pending_replies": 0, "interfaces": 0,
+                           "neighbors": 0}
+                results.append(current)
+                continue
+        if current is None:
+            continue
+        m = re.search(r"(\d+)\s+routes?,\s+(\d+)\s+pending repl", line)
+        if m:
+            current["routes"] = int(m.group(1))
+            current["pending_replies"] = int(m.group(2))
+            continue
+        m = re.search(r"enabled on (\d+) interfaces?,\s+(\d+) neighbors?", line)
+        if m:
+            current["interfaces"] = int(m.group(1))
+            current["neighbors"] = int(m.group(2))
+    return results
+
+
+def _usable(raw_outputs: dict, *commands) -> str:
+    """Return the first command output that is neither empty nor a CLI
+    rejection. Lets an older-syntax command stand in for a newer one."""
+    for cmd in commands:
+        out = raw_outputs.get(cmd, "")
+        if out and out.strip() and not is_error_output(out):
+            return out
+    return ""
 
 
 class RoutingDetailCollector(BaseCollector):
@@ -323,6 +602,24 @@ class RoutingDetailCollector(BaseCollector):
         else:
             bgp_summary = _parse_bgp_summary_regex(bgp_raw)
 
+        # --- bgp peers outside the global table ---
+        if device_type in ("cisco_ios", "cisco_xe"):
+            vpnv4_raw = _usable(raw_outputs, _VPNV4_SUMMARY, _VPNV4_SUMMARY_OLD)
+            nbr_raw = _usable(raw_outputs, _VPNV4_NEIGHBORS, _VPNV4_NEIGHBORS_OLD)
+            vpnv4_peers = _parse_vpnv4_summary(
+                vpnv4_raw, _parse_vpnv4_neighbor_vrfs(nbr_raw))
+            bgp_summary = _merge_bgp_peers(bgp_summary, vpnv4_peers)
+        elif device_type == "cisco_nxos":
+            vrf_all_raw = _usable(raw_outputs, _NXOS_BGP_VRF_ALL)
+            bgp_summary = _merge_bgp_peers(
+                bgp_summary, _parse_nxos_bgp_vrf_all(vrf_all_raw))
+
+        # --- per-VRF route summary (NX-OS has a vrf-all form) ---
+        vrf_route_summary = {}
+        if device_type == "cisco_nxos":
+            vrf_route_summary = _parse_nxos_route_summary_vrf_all(
+                _usable(raw_outputs, _NXOS_ROUTE_SUMMARY_VRF_ALL))
+
         # --- eigrp topology ---
         eigrp_topo_cmd = "show ip eigrp topology"
         eigrp_topo_raw = raw_outputs.get(eigrp_topo_cmd, "")
@@ -344,11 +641,20 @@ class RoutingDetailCollector(BaseCollector):
         if not bgp_table:
             bgp_table = _parse_bgp_table_regex(bgp_table_raw)
 
+        # --- LSDB and EIGRP topology size ---
+        ospf_db_summary = _parse_ospf_db_summary(
+            _usable(raw_outputs, _NXOS_OSPF_DB_SUMMARY, _OSPF_DB_SUMMARY))
+        eigrp_topology_summary = _parse_eigrp_topology_summary(
+            _usable(raw_outputs, _EIGRP_TOPO_SUMMARY))
+
         return {
+            "ospf_db_summary": ospf_db_summary,
+            "eigrp_topology_summary": eigrp_topology_summary,
             "route_summary": route_summary,
             "ospf_processes": ospf_processes,
             "ospf_interfaces": ospf_interfaces,
             "bgp_summary": bgp_summary,
+            "vrf_route_summary": vrf_route_summary,
             "bgp_table": bgp_table,
             "eigrp_topology": eigrp_topology,
             "eigrp_neighbors": eigrp_neighbors,

@@ -93,6 +93,33 @@ def test_extract_all_merges_and_dedupes_by_ip():
     assert "10.0.0.9" in ips
 
 
+def test_extract_all_keeps_parallel_links_to_one_peer():
+    """Regression: merging on address alone folded two links into one."""
+    dev = _device({
+        "cdp_lldp": {"parsed": {"neighbors": [
+            {"remote_device": "LEAF-A", "remote_ip": "192.0.2.21",
+             "local_intf": "Te1/1/1", "remote_intf": "Ethernet49/1"},
+            {"remote_device": "LEAF-A", "remote_ip": "192.0.2.21",
+             "local_intf": "Te1/1/2", "remote_intf": "Ethernet50/1"}]}},
+        "l3_routing": {"parsed": {
+            "neighbors": [{"remote_ip": "192.0.2.21", "protocol": "OSPF"}]}},
+    })
+    refs = [r for r in extract_all(dev) if r["remote_ip"] == "192.0.2.21"]
+    assert len(refs) == 2
+    assert {r["remote_intf"] for r in refs} == {"Ethernet49/1", "Ethernet50/1"}
+    # The OSPF sighting folds into one of them rather than a third entry.
+    assert sum("routing_adjacency" in r["seen_via"] for r in refs) == 1
+
+
+def test_extract_all_same_link_spelled_two_ways_merges():
+    dev = _device({"cdp_lldp": {"parsed": {"neighbors": [
+        {"remote_device": "SW2", "remote_ip": "192.0.2.2",
+         "local_intf": "GigabitEthernet1/0/1", "remote_intf": "Gi0/1"},
+        {"remote_device": "SW2.example.net", "remote_ip": "192.0.2.2",
+         "local_intf": "Gi1/0/1", "remote_intf": "GigabitEthernet0/1"}]}}})
+    assert len(extract_all(dev)) == 1
+
+
 def test_next_hop_is_off_by_default():
     """A routing table names far more gateways than a site owns, and each
     costs a login attempt -- so next-hop crawling is opt-in."""

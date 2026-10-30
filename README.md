@@ -23,6 +23,10 @@
 - **SNMP Fallback** -- When SSH and Telnet both fail, SNMP v2c or v3 identifies the device and collects interfaces, addressing, routes, ARP and neighbours from the standard MIBs. Reaches gear that never accepts a CLI session, such as firewalls shipped with SSH disabled
 - **Add to a Previous Scan** -- Continue an earlier scan instead of starting over. Devices already collected are skipped, ones that failed are retried, and results merge into a new scan. The original is never modified
 - **Device Provenance** -- Every device records how it was found (`login`, `cdp_lldp`, `routing_adjacency`, `snmp`, ...), whether login succeeded, and why it failed. A device seen only in a neighbour table is never mistaken for one that was fully collected
+- **Failure Classification** -- Every failed login is classified as timeout, refused, auth, legacy crypto, no telnet driver, or other, with a remediation hint. Reasons show in the scan console and in a Failed Devices sheet. SSH negotiation failures are retried once with legacy key exchange and cipher algorithms
+- **Controller-managed Devices** -- ACI fabric nodes and UCS Fabric Interconnects authenticate against their controller, so they are recorded and skipped instead of burning a failed login (override with `collect_controller_managed`). Meraki gear is recorded as a neighbour and never logged into
+- **Neighbour Accuracy** -- LLDP detail is parsed per record, neighbour type comes from the LLDP system description, parallel links between the same pair stay separate, and interface names are canonicalized (`Gi1/0/1` and `GigabitEthernet1/0/1` are one port)
+- **Scan Timing** -- Per-device and per-collector timings are recorded, and the slowest devices and collectors are listed in the console when a scan finishes
 
 ### Multi-Vendor Support
 Cisco IOS / IOS-XE / NX-OS / IOS-XR, Cisco AireOS WLC, Arista EOS, Juniper JunOS, Palo Alto PAN-OS, WatchGuard Firebox (Fireware), VyOS, MikroTik RouterOS, Fortinet FortiGate, HPE Comware / ProCurve, Aruba OS-CX, Dell OS10, Extreme ExtremeXOS / VOSS, Ubiquiti EdgeOS
@@ -37,22 +41,26 @@ All collectors run automatically on every device -- no pre-selection needed.
 | Collector | Data Gathered |
 |-----------|--------------|
 | CDP/LLDP | Neighbor adjacencies and protocols |
-| Interfaces | Port status, descriptions, IP assignments, etherchannel |
-| Device Inventory | Version, hardware modules, serial numbers, stack members |
-| Config | Running configuration backup |
-| ARP | ARP table entries with interface mappings |
+| Interfaces | Port status, descriptions, IP assignments, etherchannel, interface VRF |
+| Device Inventory | Version, hardware modules, serial numbers, stack members, StackWise Virtual / VSS / vPC, uptime, last reload reason, image, licensing, call-home |
+| Config | Running configuration backup, secrets redacted by default |
+| ARP | ARP table entries with interface mappings, per-VRF tables, incomplete entries flagged |
 | MAC Table | MAC address to port mappings |
 | STP/VLAN | Root bridges, blocked ports, VLAN list, VTP status |
 | STP Detail | Port roles, costs, topology change counts, inconsistent ports |
-| L3 Routing | OSPF/EIGRP/BGP/ISIS neighbors and route tables |
-| Routing Detail | Protocol summaries, route counts, EIGRP topology, BGP full table |
+| L3 Routing | OSPF/EIGRP/BGP/ISIS neighbors and route tables, BGP peers inside VRFs |
+| Routing Detail | Protocol summaries, per-VRF route counts, OSPF LSDB and EIGRP topology size, routing processes, redistribution |
 | VRF | VRF definitions and interface assignments |
 | Switchport | Port-security, BPDU guard, storm-control, trunk config |
 | HSRP | HSRP/VRRP state, virtual IPs, active/standby roles |
-| Edge Services | ACLs, applied ACLs per interface, proxy-ARP, uRPF |
+| Edge Services | ACLs and what references them, applied ACLs per interface, NAT, proxy-ARP, uRPF |
 | NTP/Logging | NTP sync, logging config, SNMP settings (credentials redacted) |
 
 Parsing uses [NTC Templates](https://github.com/networktocode/ntc-templates) (TextFSM) with regex fallbacks for vendor-aware structured output.
+
+Command output is checked for CLI errors (`% Invalid input`, a caret under the bad token) before parsing. A rejected command is recorded as an error and listed in the Collection Errors sheet, never parsed as data. Switching collectors are skipped on routers.
+
+**Secret redaction.** With `redact_secrets` on (the default), SNMP communities, enable and user secrets, AAA server keys, routing protocol keys and VPN pre-shared keys are replaced with `<REDACTED>` before the config is stored. Only the secret token is swapped, so line counts and diffs still line up. The config archive includes a `SUMMARY.txt` stating whether secrets were redacted and naming any config collected with redaction off.
 
 ### Reports Tab
 A dedicated **Reports** tab serves as the single destination for all report generation. After a discovery completes, a targeted scan finishes, or a saved scan is loaded, the UI automatically switches to the Reports tab showing a summary stat bar (devices, failed, elapsed time, scan date) and available report cards grouped by category with format selectors. Old inventories without summary metadata display gracefully with `--` placeholders.
@@ -60,22 +68,31 @@ A dedicated **Reports** tab serves as the single destination for all report gene
 | Report | Formats | Description |
 |--------|---------|-------------|
 | Topology Map | HTML | Interactive D3.js network diagram with color-coded device types |
-| Device Inventory | XLSX, JSON, CSV, XML | Device summary with provenance (discovery source, whether login succeeded, why it failed), stack members, modules and line cards |
+| Device Inventory | XLSX, JSON, CSV, XML | Device summary with provenance (discovered via, collection status, failure reason), redundancy (stack, StackWise Virtual, VSS, vPC), uptime, last reload reason, image, license, stack members, modules and line cards. Licenses and Failed Devices sheets |
 | Link Inventory | XLSX, JSON, CSV, XML | All discovered neighbor links (CDP/LLDP + L3) |
 | L2/L3 Diagram Data | XLSX, JSON, CSV, XML | Node and edge lists for drawing diagrams: device details, deduplicated L2 links, L3 adjacencies, subnets |
 | Interface Summary | XLSX, JSON, CSV, XML | Port status, descriptions, IP assignments |
-| ARP Summary | XLSX, JSON, CSV, XML | ARP entries by device with summary and detail tabs |
+| ARP Summary | XLSX, JSON, CSV, XML | ARP entries by device and VRF with summary and detail tabs, incomplete entries flagged |
 | MAC Table | XLSX, JSON, CSV, XML | MAC-to-port mappings per device |
-| L2 Discovery | XLSX, JSON, CSV, XML | VLANs, STP topology, routed interfaces, anomaly findings |
-| L3 Routing & IP | XLSX, JSON, CSV, XML | Protocol neighbors, route tables, OSPF topology, FHRP status, IP audit, ARP/MAC map, VRF summary, and a Collection Errors sheet listing any command a device rejected |
-| Internet Edge | XLSX, JSON, CSV, XML | BGP peering, NAT overview, ACL audit, FHRP status, edge interface security |
+| L2 Discovery | XLSX, JSON, CSV, XML | VLANs, STP topology and root bridges, trunk and interface status with neighbors, routed interfaces, anomaly findings |
+| L3 Routing & IP | XLSX, JSON, CSV, XML | Protocol neighbors, route tables, per-VRF route summary, OSPF topology, Routing Scale (OSPF LSDB, EIGRP topology), Routing Processes, Redistribution, FHRP status, IP audit, ARP/MAC map, VRF summary, and a Collection Errors sheet listing any command a device rejected |
+| Internet Edge | XLSX, JSON, CSV, XML | Edge Devices (and why each qualifies), BGP peering across VRFs, Public Addresses, NAT overview, ACL audit by usage, FHRP status, edge interface security |
 | EOX Lifecycle | XLSX | Hardware/software end-of-life dates, module EOX status (requires Cisco API credentials) |
 | Config Archive | ZIP | Running configs as individual text files |
 
-### Targeted Scan
-Connect to a specific list of devices without BFS crawling. Designed for edge assessments where you know exactly which devices to audit (firewalls, border routers). Enter one device per line in the format `IP [device_type]` — device type is optional (auto-detect if omitted).
+**Findings.** The L2, L3 and Internet Edge reports rate findings on one scale. Critical is a reachability, redundancy or security exposure backed by collected data (a BGP session down, overlapping subnets). Warning is something usually wrong that may be intentional (`permit ip any any` on an interface filter). Info is documentation grade (an unreferenced ACL, an EIGRP stub peer). When one check fires on more than half the devices, an Info note says so, since that is more often a miscalibrated check than a network-wide defect.
 
-A supplied device type is authoritative: no other platform is tried against that host. Optionally the scan can also discover onward from each target, with its own crawl depth and device-type filters.
+**Internet edge.** A device counts as edge when it has BGP to a public AS, a public address on an interface, NAT configured, or a static default pointing outside the IGP, and the Edge Devices sheet says which. The ACL audit classifies each ACL by what references it in the running config (interface filter, management, QoS, route-map, NAT, crypto, or unreferenced), so a QoS class-map ACL with zero hits is not reported as dead. A device with no NAT config reads "not configured" rather than 0 translations.
+
+### Targeted Scan
+Connect to a specific list of devices without BFS crawling. Designed for edge assessments where you know exactly which devices to audit (firewalls, border routers). Enter one device per line in the format `host [device_type]`, where host is an IPv4 address, hostname or FQDN. Device type is optional (auto-detect if omitted).
+
+- **Hostnames** are resolved before the scan starts. Names that don't resolve are listed in the console and skipped
+- **Upload** a `.txt` (same format as the text box) or a `.csv` with a header row. CSV needs a `hostname` and/or `ip` column (`host`, `fqdn`, `address`, `mgmt_ip` and similar also work) and may carry a `device_type` column. Pasted and uploaded hosts are combined
+- **Duplicates** are collected once, even when two entries reach the same device
+- **Crawl from targets** optionally discovers onward from each target, with its own crawl depth and device-type filters
+
+A supplied device type is authoritative: no other platform is tried against that host.
 
 ### Saved Scans
 - Every discovery saves a JSON scan data file (raw command output + parsed data)
@@ -183,6 +200,23 @@ the run continues it rather than starting empty:
 - results are written to a **new** scan that records what it continued from, so
   the original is never modified
 
+### Running from a Restricted Management Network
+
+Most networks only accept SSH and SNMP from a management subnet, enforced with
+a vty `access-class` and SNMP community ACLs. If the host running wiremap isn't
+in that subnet, devices refuse the connection and the scan fills up with
+"Connection refused" failures.
+
+After the seed is collected, wiremap checks the address it used to reach the
+seed against the seed's vty and SNMP ACLs. If either denies it, the console
+warns straight away, since the rest of the network usually shares the seed's
+management ACL. When three or more devices refuse the connection during a
+scan, the console points at the vty ACLs again. The fix is to run wiremap from
+a permitted management host or add its address to the ACL.
+
+The check is IPv4 only and conservative: object-groups or anything it can't
+parse count as unknown and never raise a warning.
+
 ## Configuration
 
 ### Cisco EOX API (for EOX Lifecycle Report)
@@ -211,9 +245,25 @@ device_types:
 
 ### Discovery Settings
 
-Configure concurrent worker count from the **Settings** tab under **Discovery Settings**. The setting is persisted to `config/discovery.json` and used by all scan types.
+Set from the **Settings** tab under **Discovery Settings**. Values are persisted to `config/discovery.json` and used by all scan types.
 
-`disable_autodetect` is also stored there. With it on, a device type must be supplied for every host and no platform fallback is attempted.
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `max_workers` | 10 | Concurrent device workers (1-20) |
+| `disable_autodetect` | off | Require a device type for every host. No platform fallback is attempted |
+| `site_rules` | none | Ordered hostname-to-site rules, see below |
+| `redact_secrets` | on | Replace secrets in collected configs with `<REDACTED>` before they are stored |
+| `collect_controller_managed` | off | Log into ACI fabric nodes and UCS Fabric Interconnects anyway instead of skipping them |
+| `max_logins_per_minute` | 0 | Cap on login attempts per minute across all workers (SSH, Telnet and the legacy SSH retry), so a large run doesn't trip TACACS+/ISE throttling. 0 means no limit, max 600 |
+
+**Site mapping.** Every report has a Site/Location column. By default the site is the first hyphen-delimited token of the short hostname (`AB001-IDF-SWA-01` maps to `AB001`). When a naming convention doesn't fit that, enter one `regex => SITE` rule per line. Rules are matched in order, case-insensitive, against the hostname as collected (FQDN included), and the site can use group references:
+
+```
+^sw\d+\.(\w+)\.example\.net$ => \1
+^core- => DC1
+```
+
+Lines starting with `#` are comments. A hostname that matches no rule falls back to the default.
 
 ### SNMP
 
@@ -258,6 +308,11 @@ wiremap/
 │   ├── device_facts.py       # Serial/model/version extraction
 │   ├── snmp_probe.py         # SNMP identification (v2c/v3)
 │   ├── snmp_tables.py        # Standard-MIB table collection
+│   ├── failures.py           # Login failure classification and hints
+│   ├── source_access.py      # Source-host check against vty/SNMP ACLs
+│   ├── target_list.py        # Targeted-scan host lists, DNS, CSV import
+│   ├── site_mapping.py       # Hostname-to-site rules
+│   ├── redact.py             # Config secret redaction
 │   ├── mock_devices.py       # Demo mode simulator (opt-in)
 │   ├── collectors/           # 15 modular data collectors
 │   ├── neighbors/            # Neighbour sources and crawl scope

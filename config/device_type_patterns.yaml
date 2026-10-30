@@ -13,6 +13,8 @@ device_types:
       - n5k
       - n3k
       - n2k
+      # UCS Fabric Interconnects run NX-OS underneath UCS Manager
+      - ucs-fi
     system_descriptions:
       - "Cisco Nexus Operating System"
       - "NX-OS"
@@ -30,9 +32,12 @@ device_types:
       - c9200
       - csr1000
       - catalyst 9
+      - c9800
     system_descriptions:
       - "IOS-XE"
       - "Cisco IOS XE"
+      # IOS-XE LLDP descriptions read "Cisco IOS Software [...] (CAT9K_IOSXE)"
+      - "IOSXE"
     priority: 90
     
   # Cisco IOS-XR
@@ -208,6 +213,7 @@ device_types:
     system_descriptions:
       - "Aruba"
       - "ArubaOS-CX"
+      - "AOS-CX"
     priority: 79
   
   # Ubiquiti (EdgeOS, UniFi)
@@ -304,6 +310,37 @@ device_types:
       - "WatchGuard"
       - "Fireware"
     priority: 87
+
+  # Cisco Meraki (cloud-managed; recorded as a neighbour, never logged into).
+  # Highest priority so "Meraki MX" is not read as a Juniper MX.
+  meraki:
+    platforms:
+      - meraki
+    system_descriptions:
+      - "Meraki"
+    priority: 120
+
+# Controller-managed devices. Their CLI accounts belong to the controller
+# (APIC, UCS Manager), so a network credential fails auth on every run.
+# They are kept in the inventory and topology but not logged into unless
+# "collect controller-managed devices" is enabled.
+#   platforms:      substrings of the CDP/LLDP platform (all lowercase)
+#   hostname_regex: optional; must also match the neighbour's name
+#   device_category: optional category override for the device record
+controller_managed:
+  aci:
+    platforms:
+      - n9k-
+    hostname_regex: '^(leaf|spine)[-_]?\d+(\W|$)'
+  ucsm:
+    platforms:
+      - ucs-fi-
+    device_category: fabric-interconnect
+
+# Device types recognised from CDP/LLDP that have no usable CLI. They stay in
+# the inventory as neighbours but are not queued for login.
+non_collectible_types:
+  - meraki
 
 # Device capability filtering
 # Only crawl devices with these capabilities

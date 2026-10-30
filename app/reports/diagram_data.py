@@ -17,11 +17,16 @@ from openpyxl import Workbook
 
 from .base import BaseReport
 from .xlsx_utils import create_sheet
+from .l2_discovery import _derive_site
 
 try:
     from app.device_facts import extract_device_facts
+    from app.identity import normalize_hostname
+    from app.ifname import canonical_ifname
 except ImportError:
     from device_facts import extract_device_facts
+    from identity import normalize_hostname
+    from ifname import canonical_ifname
 
 
 def _role(device):
@@ -94,7 +99,7 @@ class DiagramDataReport(BaseReport):
                 device.get("device_category") or "",
                 serial,
                 version,
-                hostname.split("-")[0] if "-" in hostname else "",
+                _derive_site(hostname),
                 device.get("discovery_source") or "",
                 "Yes" if device.get("login_succeeded") else "No",
                 device.get("login_error") or "",
@@ -113,8 +118,10 @@ class DiagramDataReport(BaseReport):
                 remote_intf = n.get("remote_intf") or ""
                 # One physical link is reported from both ends; a diagram
                 # wants one edge.
-                key = tuple(sorted([f"{hostname}:{local_intf}",
-                                    f"{remote}:{remote_intf}"]))
+                key = tuple(sorted([
+                    f"{normalize_hostname(hostname)}:{canonical_ifname(local_intf)}",
+                    f"{normalize_hostname(remote)}:{canonical_ifname(remote_intf)}",
+                ]))
                 if key in seen:
                     continue
                 seen.add(key)
