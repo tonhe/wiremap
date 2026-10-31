@@ -91,6 +91,8 @@ def test_generate_xlsx_modules_sheet(sample_inventory):
     assert ws.cell(row=2, column=3).value == "3"
     assert ws.cell(row=2, column=4).value == "FRULink 1G Module"
     assert ws.cell(row=2, column=5).value == "C3KX-NM-1G"
+    # The Ports header explains why counts differ across IOS versions.
+    assert "15.2(7)E" in ws.cell(row=1, column=8).comment.text
 
 
 def test_modules_sheet_uses_inventory_fallback(sample_inventory):

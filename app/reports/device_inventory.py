@@ -7,6 +7,7 @@ import io
 import re
 from collections import OrderedDict
 from openpyxl import Workbook
+from openpyxl.comments import Comment
 
 from .base import BaseReport
 from .xlsx_utils import create_sheet
@@ -175,6 +176,13 @@ def _is_real_module(model, mod_type):
 
 _MODULE_HEADERS = ["Hostname", "Mgmt IP", "Slot", "Type",
                    "Model", "Serial", "Status", "Ports"]
+
+_PORTS_NOTE = (
+    "As the device reports it. Stack members are counted by the show version "
+    "switch table, and IOS 15.2(7)E counts two more ports than earlier code "
+    "on the same 2960-X model (30 vs 28, 54 vs 52), so a difference here is "
+    "not a hardware difference. For port utilisation use the interface "
+    "counts, not this column.")
 
 # show inventory names that point at a show platform slot:
 # "module R0", "module 0", "SPA subslot 0/0", "NIM subslot 1/0"
@@ -837,6 +845,8 @@ class DeviceInventoryReport(BaseReport):
     def _build_modules_sheet(self, wb, inventory_data):
         create_sheet(wb, "Modules", list(_MODULE_HEADERS),
                      _module_rows(inventory_data))
+        header = wb["Modules"].cell(row=1, column=_MODULE_HEADERS.index("Ports") + 1)
+        header.comment = Comment(_PORTS_NOTE, "wiremap")
 
 
 
