@@ -238,11 +238,21 @@ def _inventory_skipped(it):
             or "chassis" in name)
 
 
+# "8x10G Uplink Module", "2x1G 2x10G Uplink Module", "4x1GE"
+_PORT_GROUP_RE = re.compile(r"\b(\d+)\s*x\s*\d+\s*G", re.I)
+
+
+def _ports_from_description(descr):
+    """Port count spelled out in a module description, or ""."""
+    groups = _PORT_GROUP_RE.findall(descr or "")
+    return str(sum(int(n) for n in groups)) if groups else ""
+
+
 def _inventory_row(hostname, mgmt_ip, it, status):
-    return [hostname, mgmt_ip, it.get("name") or "",
-            it.get("descr") or it.get("description") or "",
+    descr = it.get("descr") or it.get("description") or ""
+    return [hostname, mgmt_ip, it.get("name") or "", descr,
             it.get("pid") or "", it.get("sn") or it.get("serial_number") or "",
-            status, ""]
+            status, _ports_from_description(descr)]
 
 
 def _module_rows(inventory_data):

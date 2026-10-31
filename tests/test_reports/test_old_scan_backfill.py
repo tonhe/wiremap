@@ -277,10 +277,21 @@ def test_fru_uplink_modules_listed_and_follow_their_member():
              "pid": "C9300-NM-8X", "sn": "FOC0000X0AC"},
             {"name": "Switch 2 FRU Uplink Module 1", "descr": "8x10G Uplink Module",
              "pid": "C9300-NM-8X", "sn": "FOC0000X0AD"}]})
-    status = {r[2]: r[6] for r in _modules_sheet(device)}
+    rows = _modules_sheet(device)
+    ports = {r[2]: r[7] for r in rows}
+    assert ports["Switch 1 FRU Uplink Module 1"] == "8"
+    status = {r[2]: r[6] for r in rows}
     assert status == {"Switch 1 FRU Uplink Module 1": "Ready",
                       "Switch 2 FRU Uplink Module 1": "Removed",
                       "Switch 1": "Ready", "Switch 2": "Removed"}
+
+
+def test_uplink_port_count_read_from_description():
+    from app.reports.device_inventory import _ports_from_description
+    assert _ports_from_description("2x1G 2x10G Uplink Module") == "4"
+    assert _ports_from_description("8x10G Uplink Module") == "8"
+    assert _ports_from_description("Stacking Module") == ""
+    assert _ports_from_description("1000BaseSX SFP") == ""
 
 
 def test_svl_pair_uplink_modules_take_the_chassis_state():
