@@ -111,6 +111,13 @@
         .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
         .form-row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }
 
+        /* Additional credential sets */
+        .cred-extra { display: grid; grid-template-columns: 1fr 1fr auto; gap: 12px; align-items: end; margin-bottom: 12px; }
+        .cred-extra .form-group { margin-bottom: 0; }
+        .cred-extra .btn-sm { padding: 9px 12px; }
+        .cred-actions { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+        .cred-actions .helper-text { margin-bottom: 0; }
+
         input, select {
             background: var(--bg-input);
             color: var(--text-bright);
@@ -163,6 +170,11 @@
             background: rgba(6, 214, 160, 0.08);
             border-left-color: var(--success);
             color: var(--success);
+        }
+        .alert-warning {
+            background: rgba(251, 191, 36, 0.08);
+            border-left-color: var(--warning);
+            color: var(--warning);
         }
 
         /* Tabs */
@@ -510,7 +522,7 @@
         }
 
         @media (max-width: 768px) {
-            .form-row, .form-row-3 { grid-template-columns: 1fr; }
+            .form-row, .form-row-3, .cred-extra { grid-template-columns: 1fr; }
             .checkbox-grid { grid-template-columns: 1fr; }
             .stat-grid { grid-template-columns: 1fr 1fr; }
         }
@@ -601,7 +613,7 @@
                             <select id="protocol" name="protocol">
                                 <option value="ssh">SSH</option>
                                 <option value="telnet">Telnet</option>
-                                <option value="auto" selected>Auto (SSH, fallback Telnet)</option>
+                                <option value="auto" selected>Auto (SSH; Telnet if allowed in Settings)</option>
                             </select>
                         </div>
 
@@ -630,8 +642,13 @@
                         </div>
                         <div class="form-group">
                             <label for="password">Password *</label>
-                            <input type="password" id="password" name="password" placeholder="********" required>
+                            <input type="password" id="password" name="password" placeholder="********" required autocomplete="off">
                         </div>
+                    </div>
+                    <div class="cred-sets" data-prefix="disc"></div>
+                    <div class="cred-actions">
+                        <button type="button" class="btn-sm cred-add" data-prefix="disc">+ Add credentials</button>
+                        <span class="helper-text">Up to 5 sets, tried in order. The next set is only tried when a device rejects the login.</span>
                     </div>
 
                     <div class="form-group">
@@ -653,6 +670,157 @@
                         </div>
                     </div>
 
+                    <div class="form-group">
+                        <label>Discover Neighbours Via</label>
+                        <div class="checkbox-grid">
+                            {% for src in neighbor_sources %}
+                            <label title="{{ src.description }}">
+                                <input type="checkbox" name="neighbor_sources" value="{{ src.name }}"
+                                       {% if src.enabled_by_default %}checked{% endif %}> {{ src.label }}
+                            </label>
+                            {% endfor %}
+                        </div>
+                        <p style="font-size: 12px; color: var(--text-muted); margin: 6px 0 0 0;">
+                            Route next-hops are off by default &mdash; a routing table names far more
+                            gateways than a site owns, and each one costs a login attempt.
+                        </p>
+                    </div>
+
+                    <details style="margin-bottom: 16px;">
+                        <summary style="cursor: pointer; font-size: 13px; color: var(--text-muted);">
+                            Crawl boundaries
+                        </summary>
+                        <div style="margin-top: 10px;">
+                            <div class="form-group">
+                                <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                                    <input type="checkbox" name="scope_private_only" value="true" checked
+                                           style="width: auto; margin-right: 8px; accent-color: var(--accent);">
+                                    Private address space only (RFC1918)
+                                </label>
+                                <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 24px;">
+                                    Keeps next-hop crawling from walking out into transit and ISP space.
+                                </p>
+                            </div>
+                            <div class="form-group">
+                                <label for="scope_allow">Restrict to CIDRs</label>
+                                <input type="text" name="scope_allow" id="scope_allow"
+                                       placeholder="10.1.0.0/16, 10.2.0.0/16">
+                                <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 0;">
+                                    Optional. When set this is the entire scope, replacing the private-only default.
+                                </p>
+                            </div>
+                            <div class="form-group">
+                                <label for="scope_deny">Never crawl CIDRs</label>
+                                <input type="text" name="scope_deny" id="scope_deny"
+                                       placeholder="10.99.0.0/16">
+                            </div>
+                            <div class="form-group">
+                                <label for="max_devices">Device ceiling</label>
+                                <input type="number" name="max_devices" id="max_devices" min="0"
+                                       placeholder="unlimited">
+                                <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 0;">
+                                    Stops queueing new devices once reached. Anything skipped is reported, not silently dropped.
+                                </p>
+                            </div>
+                        </div>
+                    </details>
+
+
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" name="snmp_enabled" id="disc_snmp_enabled" value="true"
+                                   class="snmp-toggle" data-prefix="disc"
+                                   style="width: auto; margin-right: 8px; accent-color: var(--accent);">
+                            Fall back to SNMP when login fails
+                        </label>
+                        <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 24px;">
+                            Tried only after SSH and telnet both fail. Identifies the device
+                            (name, platform, version) but does not collect from it.
+                        </p>
+                    </div>
+
+                    <div id="disc_snmp_options" style="display: none;">
+                        <div class="form-group">
+                            <label for="disc_snmp_version">SNMP Version</label>
+                            <select name="snmp_version" id="disc_snmp_version"
+                                    class="snmp-version" data-prefix="disc">
+                                <option value="v2c" selected>v2c</option>
+                                <option value="v3">v3</option>
+                            </select>
+                        </div>
+                        <div id="disc_snmp_v2c">
+                            <div class="form-group">
+                                <label for="disc_snmp_community">Community String</label>
+                                <input type="password" name="snmp_community" id="disc_snmp_community"
+                                       autocomplete="off">
+                            </div>
+                        </div>
+                        <div id="disc_snmp_v3" style="display: none;">
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                                <div class="form-group">
+                                    <label for="disc_snmp_username">v3 Username</label>
+                                    <input type="text" name="snmp_username" id="disc_snmp_username"
+                                           autocomplete="off">
+                                </div>
+                                <div class="form-group">
+                                    <label for="disc_snmp_auth_protocol">Auth Protocol</label>
+                                    <select name="snmp_auth_protocol" id="disc_snmp_auth_protocol">
+                                        <option value="sha" selected>SHA</option>
+                                        <option value="md5">MD5</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                                <div class="form-group">
+                                    <label for="disc_snmp_auth_key">Auth Passphrase</label>
+                                    <input type="password" name="snmp_auth_key" id="disc_snmp_auth_key"
+                                           autocomplete="off">
+                                </div>
+                                <div class="form-group">
+                                    <label for="disc_snmp_priv_protocol">Privacy Protocol</label>
+                                    <select name="snmp_priv_protocol" id="disc_snmp_priv_protocol">
+                                        <option value="aes" selected>AES</option>
+                                        <option value="des">DES</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="disc_snmp_priv_key">Privacy Passphrase</label>
+                                <input type="password" name="snmp_priv_key" id="disc_snmp_priv_key"
+                                       autocomplete="off">
+                            </div>
+                        </div>
+                    </div>
+
+
+                    <div class="form-group">
+                        <label for="disc_source_ip">Source IP (optional)</label>
+                        <input type="text" name="source_ip" id="disc_source_ip"
+                               class="mono" placeholder="learned from the seed session"
+                               autocomplete="off">
+                        <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 0;">
+                            The address devices see this host as, used to check the seed's vty and SNMP ACLs.
+                            Blank uses the Settings value, else asks the seed which address our session came from.
+                        </p>
+                    </div>
+
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" id="disc_continue_toggle" value="true"
+                                   class="continue-toggle" data-prefix="disc"
+                                   style="width: auto; margin-right: 8px; accent-color: var(--accent);">
+                            Add results to a previous scan
+                        </label>
+                        <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 24px;">
+                            Devices already collected are skipped, ones that failed are retried,
+                            and findings merge into a new scan. The original is left untouched.
+                        </p>
+                        <select name="continue_from" id="disc_continue_from"
+                                class="continue-select" style="display: none; margin-top: 8px;">
+                            <option value="">Select a previous scan...</option>
+                        </select>
+                    </div>
+
                     <button type="submit" class="btn-primary">Run Discovery</button>
                 </form>
             </div>
@@ -664,11 +832,25 @@
                         <label for="host_list">Host List</label>
                         <textarea name="host_list" id="host_list" rows="10"
                                   style="width: 100%; font-family: 'JetBrains Mono', monospace; font-size: 13px; background: var(--bg-input); color: var(--text-bright); border: 1px solid var(--border); padding: 10px; resize: vertical;"
-                                  placeholder="# One device per line: IP [device_type]
+                                  placeholder="# One device per line: IP or hostname [device_type]
 10.1.1.1
 10.1.1.2 cisco_ios
-10.1.1.3 paloalto_panos
-10.1.1.4 paloalto_panos"></textarea>
+sw1.example.com
+fw1.example.com paloalto_panos"></textarea>
+                        <div style="display: flex; align-items: center; gap: 12px; margin-top: 6px; font-size: 13px;">
+                            <label class="upload-link" style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); cursor: pointer; margin-bottom: 0; font-weight: normal;">
+                                <span style="font-size: 15px;">&#8593;</span> Upload host list (.txt or .csv)
+                                <input type="file" name="host_file" id="ts_host_file" accept=".txt,.csv,text/plain,text/csv" style="display: none;">
+                            </label>
+                            <span id="ts_host_file_name" class="mono" style="color: var(--text-bright);"></span>
+                            <a href="#" id="ts_host_file_clear" style="display: none; color: var(--text-muted);">clear</a>
+                        </div>
+                        <p class="helper-text" style="margin-top: 4px;">
+                            Hostnames are resolved before the scan starts; names that do not resolve are listed
+                            and skipped. CSV files need a header with a <span class="mono">hostname</span> and/or
+                            <span class="mono">ip</span> column, plus optional <span class="mono">device_type</span>.
+                            Pasted and uploaded hosts are combined.
+                        </p>
                         <details style="margin-top: 6px; font-size: 12px; color: var(--text-muted);">
                             <summary style="cursor: pointer;">Supported device types</summary>
                             <div class="mono" style="margin-top: 6px; line-height: 1.8;">
@@ -685,8 +867,13 @@
                         </div>
                         <div class="form-group">
                             <label for="ts_password">Password *</label>
-                            <input type="password" name="password" id="ts_password" required>
+                            <input type="password" name="password" id="ts_password" required autocomplete="off">
                         </div>
+                    </div>
+                    <div class="cred-sets" data-prefix="ts"></div>
+                    <div class="cred-actions">
+                        <button type="button" class="btn-sm cred-add" data-prefix="ts">+ Add credentials</button>
+                        <span class="helper-text">Up to 5 sets, tried in order. The next set is only tried when a device rejects the login.</span>
                     </div>
                     <div style="display: grid; grid-template-columns: 1fr; gap: 12px;">
                         <div class="form-group">
@@ -698,6 +885,144 @@
                             </select>
                         </div>
                     </div>
+
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" name="crawl_from_targets" id="ts_crawl" value="true"
+                                   style="width: auto; margin-right: 8px; accent-color: var(--accent);">
+                            Also discover neighbours of each target
+                        </label>
+                        <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 24px;">
+                            Off by default: the scan visits exactly the hosts listed. When on, discovery
+                            continues outward from each target. Already-scanned hosts are never revisited.
+                        </p>
+                    </div>
+
+                    <div id="ts_crawl_options" style="display: none;">
+                        <div class="form-group">
+                            <label for="ts_max_depth">Crawl Depth</label>
+                            <select id="ts_max_depth" name="max_depth">
+                                <option value="1" selected>1 hop</option>
+                                <option value="2">2 hops</option>
+                                <option value="3">3 hops</option>
+                                <option value="4">4 hops</option>
+                                <option value="5">5 hops</option>
+                                <option value="6">6 hops</option>
+                                <option value="7">7 hops</option>
+                                <option value="8">8 hops</option>
+                                <option value="9">9 hops</option>
+                                <option value="10">10 hops</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Device Types to Crawl</label>
+                            <div class="checkbox-grid">
+                                <label><input type="checkbox" name="include_routers" value="true" checked> Routers</label>
+                                <label><input type="checkbox" name="include_switches" value="true" checked> Switches</label>
+                                <label><input type="checkbox" name="include_phones" value="true"> IP Phones</label>
+                                <label><input type="checkbox" name="include_servers" value="true"> Servers</label>
+                                <label><input type="checkbox" name="include_aps" value="true"> Access Points</label>
+                                <label><input type="checkbox" name="include_other" value="true"> Other Devices</label>
+                            </div>
+                        </div>
+                    </div>
+
+
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" name="snmp_enabled" id="ts_snmp_enabled" value="true"
+                                   class="snmp-toggle" data-prefix="ts"
+                                   style="width: auto; margin-right: 8px; accent-color: var(--accent);">
+                            Fall back to SNMP when login fails
+                        </label>
+                        <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 24px;">
+                            Tried only after SSH and telnet both fail. Identifies the device
+                            (name, platform, version) but does not collect from it.
+                        </p>
+                    </div>
+
+                    <div id="ts_snmp_options" style="display: none;">
+                        <div class="form-group">
+                            <label for="ts_snmp_version">SNMP Version</label>
+                            <select name="snmp_version" id="ts_snmp_version"
+                                    class="snmp-version" data-prefix="ts">
+                                <option value="v2c" selected>v2c</option>
+                                <option value="v3">v3</option>
+                            </select>
+                        </div>
+                        <div id="ts_snmp_v2c">
+                            <div class="form-group">
+                                <label for="ts_snmp_community">Community String</label>
+                                <input type="password" name="snmp_community" id="ts_snmp_community"
+                                       autocomplete="off">
+                            </div>
+                        </div>
+                        <div id="ts_snmp_v3" style="display: none;">
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                                <div class="form-group">
+                                    <label for="ts_snmp_username">v3 Username</label>
+                                    <input type="text" name="snmp_username" id="ts_snmp_username"
+                                           autocomplete="off">
+                                </div>
+                                <div class="form-group">
+                                    <label for="ts_snmp_auth_protocol">Auth Protocol</label>
+                                    <select name="snmp_auth_protocol" id="ts_snmp_auth_protocol">
+                                        <option value="sha" selected>SHA</option>
+                                        <option value="md5">MD5</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                                <div class="form-group">
+                                    <label for="ts_snmp_auth_key">Auth Passphrase</label>
+                                    <input type="password" name="snmp_auth_key" id="ts_snmp_auth_key"
+                                           autocomplete="off">
+                                </div>
+                                <div class="form-group">
+                                    <label for="ts_snmp_priv_protocol">Privacy Protocol</label>
+                                    <select name="snmp_priv_protocol" id="ts_snmp_priv_protocol">
+                                        <option value="aes" selected>AES</option>
+                                        <option value="des">DES</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="ts_snmp_priv_key">Privacy Passphrase</label>
+                                <input type="password" name="snmp_priv_key" id="ts_snmp_priv_key"
+                                       autocomplete="off">
+                            </div>
+                        </div>
+                    </div>
+
+
+                    <div class="form-group">
+                        <label for="ts_source_ip">Source IP (optional)</label>
+                        <input type="text" name="source_ip" id="ts_source_ip"
+                               class="mono" placeholder="learned from the seed session"
+                               autocomplete="off">
+                        <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 0;">
+                            The address devices see this host as, used to check the seed's vty and SNMP ACLs.
+                            Blank uses the Settings value, else asks the seed which address our session came from.
+                        </p>
+                    </div>
+
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" id="ts_continue_toggle" value="true"
+                                   class="continue-toggle" data-prefix="ts"
+                                   style="width: auto; margin-right: 8px; accent-color: var(--accent);">
+                            Add results to a previous scan
+                        </label>
+                        <p style="font-size: 12px; color: var(--text-muted); margin: 4px 0 0 24px;">
+                            Devices already collected are skipped, ones that failed are retried,
+                            and findings merge into a new scan. The original is left untouched.
+                        </p>
+                        <select name="continue_from" id="ts_continue_from"
+                                class="continue-select" style="display: none; margin-top: 8px;">
+                            <option value="">Select a previous scan...</option>
+                        </select>
+                    </div>
+
                     <button type="submit" class="btn-primary">Start Scan</button>
                 </form>
             </div>
@@ -705,6 +1030,20 @@
             <!-- Saved Scans Tab -->
             <div id="tab-load" class="tab-content">
                 <div class="inventory-list" id="inventory-list">
+                </div>
+
+                <div id="merge-bar" style="display: none; align-items: center; gap: 12px;
+                            margin-top: 12px; padding: 12px; background: var(--bg-card-alt);
+                            border: 1px solid var(--border); border-radius: var(--radius);">
+                    <span id="merge-count" class="mono" style="color: var(--text-bright);"></span>
+                    <span class="text-muted" style="font-size: 12px; flex: 1;">
+                        Combines them into a new scan. Devices seen in more than one keep the
+                        fullest record. The originals are left in place.
+                    </span>
+                    <button type="button" id="merge-btn" class="btn-sm"
+                            onclick="mergeSelectedScans()"
+                            style="background: var(--accent); color: #fff; border: none;
+                                   padding: 8px 16px; cursor: pointer;">Merge selected</button>
                 </div>
                 <div style="margin-top: 16px; text-align: center;">
                     <label class="upload-link" style="display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-muted); cursor: pointer; margin-bottom: 0;">
@@ -772,6 +1111,57 @@
                             <option value="">Loading...</option>
                         </select>
                     </div>
+                    <div class="form-group">
+                        <label for="settings-max-logins">Max Logins per Minute</label>
+                        <p class="helper-text">Login attempts per minute across all workers, including SSH, telnet and legacy-algorithm retries. Keeps large runs under TACACS+/ISE throttling. 0 = no limit (0-600).</p>
+                        <input type="number" id="settings-max-logins" min="0" max="600" step="1" value="0">
+                    </div>
+                    <div class="form-group">
+                        <label for="settings-source-ip">Source IP</label>
+                        <p class="helper-text">The address devices see wiremap as, for the vty and SNMP ACL check on the seed. Set it when wiremap sits behind NAT or in a container. Blank = learn it from the seed session (<span class="mono">show users</span> / <span class="mono">show tcp brief</span>). A scan form value overrides this.</p>
+                        <input type="text" id="settings-source-ip" class="mono" placeholder="learned from the seed session" autocomplete="off">
+                    </div>
+                    <div class="form-group">
+                        <label for="settings-site-rules">Site Mapping Rules</label>
+                        <p class="helper-text">One rule per line: <span class="mono">regex =&gt; SITE</span>. Checked in order against the hostname (case-insensitive); the first match wins and <span class="mono">\1</span> inserts a captured group. Unmatched names use the first hyphen-delimited token of the short hostname.</p>
+                        <textarea id="settings-site-rules" rows="5"
+                                  style="width: 100%; font-family: 'JetBrains Mono', monospace; font-size: 13px; background: var(--bg-input); color: var(--text-bright); border: 1px solid var(--border); padding: 10px; resize: vertical;"
+                                  placeholder="# regex =&gt; SITE
+^AB001- =&gt; HQ
+\.east\.example\.net$ =&gt; EAST
+^([A-Z]{2})[0-9]{3}- =&gt; \1"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <div class="plugin-card-header">
+                            <label for="settings-redact-secrets">Redact Secrets</label>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="settings-redact-secrets" checked>
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <p class="helper-text">Replace SNMP communities, passwords and keys in collected configs with &lt;REDACTED&gt; before they are saved. Applies to new scans.</p>
+                    </div>
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" id="settings-collect-controller-managed" style="width: auto; margin-right: 8px; accent-color: var(--accent);">
+                            Collect controller-managed devices
+                        </label>
+                        <p class="helper-text">ACI leaf/spine switches and UCS Fabric Interconnects take their CLI accounts from APIC or UCS Manager, so they are recorded from neighbour data but not logged into. Enable to try the network credential on them anyway.</p>
+                    </div>
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" id="settings-allow-telnet" style="width: auto; margin-right: 8px; accent-color: var(--accent);">
+                            Allow telnet fallback
+                        </label>
+                        <p class="helper-text">Try telnet on discovered devices when SSH fails. Off by default: most networks only accept SSH, and each telnet try adds a timeout and a failed login. Scans with the Telnet protocol selected always use telnet.</p>
+                    </div>
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
+                            <input type="checkbox" id="settings-expand-non-cdp" style="width: auto; margin-right: 8px; accent-color: var(--accent);">
+                            Crawl neighbours not seen by CDP/LLDP
+                        </label>
+                        <p class="helper-text">Addresses from routing adjacencies, next-hops and HSRP/VRRP are crawled only when CDP/LLDP also sees them or an ARP entry shows a network-vendor MAC. BGP peers and OSPF neighbours on shared segments always need CDP/LLDP. Enable to attempt all of them; skipped addresses are listed as not attempted.</p>
+                    </div>
                     <div class="plugin-actions">
                         <button type="button" class="btn-primary" onclick="saveDiscoverySettings()">Save</button>
                     </div>
@@ -803,6 +1193,138 @@
     var _discoveredCount = 0;
     var _failedCount = 0;
 
+    // Crawl depth and device-type filters only matter when the targeted scan
+    // is allowed to continue past its host list.
+    (function () {
+        var toggle = document.getElementById('ts_crawl');
+        if (!toggle) return;
+        toggle.addEventListener('change', function () {
+            document.getElementById('ts_crawl_options').style.display =
+                toggle.checked ? 'block' : 'none';
+        });
+    })();
+
+    // SNMP fields stay hidden until the fallback is enabled, and the v2c/v3
+    // halves are mutually exclusive.
+    (function () {
+        document.querySelectorAll('.snmp-toggle').forEach(function (toggle) {
+            toggle.addEventListener('change', function () {
+                var box = document.getElementById(toggle.dataset.prefix + '_snmp_options');
+                if (box) box.style.display = toggle.checked ? 'block' : 'none';
+            });
+        });
+        document.querySelectorAll('.snmp-version').forEach(function (sel) {
+            sel.addEventListener('change', function () {
+                var p = sel.dataset.prefix;
+                var isV3 = sel.value === 'v3';
+                document.getElementById(p + '_snmp_v2c').style.display = isV3 ? 'none' : 'block';
+                document.getElementById(p + '_snmp_v3').style.display = isV3 ? 'block' : 'none';
+            });
+        });
+    })();
+
+    // "Add to a previous scan" -- the picker only appears when enabled, and
+    // the list is fetched on first use so it always reflects saved scans.
+    (function () {
+        var loaded = false;
+
+        function populate() {
+            if (loaded) return;
+            loaded = true;
+            fetch('/inventories')
+                .then(function (r) { return r.json(); })
+                .then(function (items) {
+                    document.querySelectorAll('.continue-select').forEach(function (sel) {
+                        items.forEach(function (inv) {
+                            var opt = document.createElement('option');
+                            opt.value = inv.filename;
+                            opt.textContent = inv.discovery_id + '  (' +
+                                inv.device_count + ' devices)';
+                            sel.appendChild(opt);
+                        });
+                    });
+                })
+                .catch(function () { loaded = false; });
+        }
+
+        document.querySelectorAll('.continue-toggle').forEach(function (toggle) {
+            toggle.addEventListener('change', function () {
+                var sel = document.getElementById(toggle.dataset.prefix + '_continue_from');
+                if (!sel) return;
+                sel.style.display = toggle.checked ? 'block' : 'none';
+                if (toggle.checked) populate();
+                else sel.value = '';
+            });
+        });
+    })();
+
+    // Extra credential sets 2..5, posted as username_N / password_N.
+    // Nothing here is saved: no settings, no localStorage.
+    (function () {
+        var MAX_SETS = 5;
+
+        function renumber(container) {
+            var rows = container.querySelectorAll('.cred-extra');
+            rows.forEach(function (row, i) {
+                var n = i + 2;
+                var prefix = container.dataset.prefix;
+                var user = row.querySelector('input[type=text]');
+                var pass = row.querySelector('input[type=password]');
+                var labels = row.querySelectorAll('label');
+                user.name = 'username_' + n;
+                user.id = prefix + '_username_' + n;
+                pass.name = 'password_' + n;
+                pass.id = prefix + '_password_' + n;
+                labels[0].htmlFor = user.id;
+                labels[0].textContent = 'Username (set ' + n + ')';
+                labels[1].htmlFor = pass.id;
+                labels[1].textContent = 'Password (set ' + n + ')';
+            });
+            var add = document.querySelector('.cred-add[data-prefix="' + container.dataset.prefix + '"]');
+            if (add) add.style.display = rows.length + 1 >= MAX_SETS ? 'none' : '';
+        }
+
+        function field(type) {
+            var group = document.createElement('div');
+            group.className = 'form-group';
+            var label = document.createElement('label');
+            var input = document.createElement('input');
+            input.type = type;
+            input.autocomplete = 'off';
+            if (type === 'password') input.placeholder = '********';
+            group.appendChild(label);
+            group.appendChild(input);
+            return group;
+        }
+
+        function addRow(container) {
+            if (container.querySelectorAll('.cred-extra').length + 1 >= MAX_SETS) return;
+            var row = document.createElement('div');
+            row.className = 'cred-extra';
+            row.appendChild(field('text'));
+            row.appendChild(field('password'));
+            var remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'btn-sm';
+            remove.textContent = '×';
+            remove.title = 'Remove this credential set';
+            remove.addEventListener('click', function () {
+                row.remove();
+                renumber(container);
+            });
+            row.appendChild(remove);
+            container.appendChild(row);
+            renumber(container);
+            row.querySelector('input[type=text]').focus();
+        }
+
+        document.querySelectorAll('.cred-add').forEach(function (btn) {
+            var container = document.querySelector('.cred-sets[data-prefix="' + btn.dataset.prefix + '"]');
+            if (!container) return;
+            btn.addEventListener('click', function () { addRow(container); });
+        });
+    })();
+
     function startScan(formEl, scanType) {
         var formData = new FormData(formEl);
         formData.append('scan_type', scanType);
@@ -822,11 +1344,45 @@
                 clearReportsTab();
                 showProgressPanel(scanType === 'targeted' ? 'TARGETED SCAN IN PROGRESS' : 'DISCOVERY IN PROGRESS');
                 openEventStream(data.scan_id);
+                logTargetResolution(data);
             })
             .catch(function(err) {
                 alert('Error: ' + err.message);
             });
     }
+
+    function logTargetResolution(data) {
+        if (data.target_count === undefined) return;
+        var msg = data.target_count + ' target(s)';
+        if (data.resolved) msg += ', ' + data.resolved + ' hostname(s) resolved';
+        logEvent(msg, 'muted');
+        (data.warnings || []).forEach(function(w) { logEvent('Warning: ' + w, 'fail'); });
+        var unresolved = data.unresolved || [];
+        if (unresolved.length) {
+            logEvent(unresolved.length + ' hostname(s) did not resolve and will be skipped:', 'fail');
+            unresolved.forEach(function(u) {
+                logEvent('  ' + u.input + (u.error ? ' (' + u.error + ')' : ''), 'fail');
+            });
+        }
+    }
+
+    (function () {
+        var input = document.getElementById('ts_host_file');
+        var label = document.getElementById('ts_host_file_name');
+        var clear = document.getElementById('ts_host_file_clear');
+        if (!input) return;
+        input.addEventListener('change', function () {
+            var name = input.files.length ? input.files[0].name : '';
+            label.textContent = name;
+            clear.style.display = name ? '' : 'none';
+        });
+        clear.addEventListener('click', function (e) {
+            e.preventDefault();
+            input.value = '';
+            label.textContent = '';
+            clear.style.display = 'none';
+        });
+    })();
 
     function showProgressPanel(title) {
         document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); });
@@ -858,7 +1414,27 @@
         _eventSource = new EventSource('/scan/' + scanId + '/stream');
 
         _eventSource.addEventListener('scan_started', function(e) {
+            var d = JSON.parse(e.data);
             logEvent('Scan started', 'muted');
+            if (d.source_ip) logEvent('Source address: ' + d.source_ip +
+                (d.source_ip_method ? ' (' + d.source_ip_method + ')' : ''), 'muted');
+            if (d.max_logins_per_minute) logEvent('Login rate limited to ' + d.max_logins_per_minute + '/min', 'muted');
+        });
+        _eventSource.addEventListener('source_ip_learned', function(e) {
+            var d = JSON.parse(e.data);
+            logEvent('Source address learned from ' + d.ip + ': ' + d.source_ip, 'muted');
+        });
+        _eventSource.addEventListener('source_access', function(e) {
+            var d = JSON.parse(e.data);
+            logEvent(d.message, 'muted');
+        });
+        _eventSource.addEventListener('source_access_warning', function(e) {
+            var d = JSON.parse(e.data);
+            logEvent('WARNING: ' + d.message, 'warn');
+        });
+        _eventSource.addEventListener('refused_hint', function(e) {
+            var d = JSON.parse(e.data);
+            logEvent('HINT: ' + d.message, 'warn');
         });
         _eventSource.addEventListener('device_connecting', function(e) {
             var d = JSON.parse(e.data);
@@ -866,7 +1442,9 @@
         });
         _eventSource.addEventListener('device_authenticated', function(e) {
             var d = JSON.parse(e.data);
-            logEvent('Authenticated to ' + d.ip + ' (' + d.protocol + ')', 'ok');
+            var who = (d.credential_set && d.credential_set > 1)
+                ? ', ' + d.login_user + ' (set ' + d.credential_set + ')' : '';
+            logEvent('Authenticated to ' + d.ip + ' (' + d.protocol + who + ')', 'ok');
         });
         _eventSource.addEventListener('connection_fallback', function(e) {
             var d = JSON.parse(e.data);
@@ -894,7 +1472,23 @@
             var d = JSON.parse(e.data);
             _failedCount++;
             document.getElementById('prog-failed').textContent = _failedCount;
-            logEvent(d.ip + ' \u2717 ' + d.error, 'fail');
+            var who = d.hostname ? d.hostname + ' (' + d.ip + ')' : d.ip;
+            var why = d.reason ? '[' + d.reason + '] ' : '';
+            var snmp = (d.snmp && d.snmp !== 'no credentials') ? ' (SNMP: ' + d.snmp + ')' : '';
+            logEvent(who + ' \u2717 ' + why + d.error + snmp, 'fail');
+        });
+        _eventSource.addEventListener('device_snmp_identified', function(e) {
+            var d = JSON.parse(e.data);
+            logEvent(d.hostname + ' (' + d.ip + ') login failed, collected via SNMP' +
+                     (d.snmp ? ' (' + d.snmp + ')' : ''), 'warn');
+        });
+        _eventSource.addEventListener('snmp_fallback_summary', function(e) {
+            logEvent(JSON.parse(e.data).message, 'muted');
+        });
+        _eventSource.addEventListener('device_skipped', function(e) {
+            var d = JSON.parse(e.data);
+            logEvent((d.hostname || d.ip) + ' (' + d.ip + ') not logged into \u2014 managed by ' +
+                     (d.managed_by === 'aci' ? 'APIC' : d.managed_by === 'ucsm' ? 'UCS Manager' : d.managed_by), 'muted');
         });
         _eventSource.addEventListener('layer_complete', function(e) {
             var d = JSON.parse(e.data);
@@ -928,11 +1522,54 @@
         var color = 'var(--text-muted)';
         if (type === 'ok') color = 'var(--status-ok, #22c55e)';
         if (type === 'fail') color = 'var(--danger, #f43f5e)';
+        if (type === 'warn') color = 'var(--warning, #fbbf24)';
         var line = document.createElement('div');
         line.style.color = color;
+        if (type === 'warn') line.style.fontWeight = '600';
         line.textContent = ts + '  ' + message;
         log.appendChild(line);
         log.scrollTop = log.scrollHeight;
+    }
+
+    /* One line per failure class: count, then the likely cause and fix. */
+    function logFailureReasons(reasons) {
+        (reasons || []).forEach(function(r) {
+            logEvent('  ' + r.count + ' × ' + (r.label || r.reason) + ' — ' + r.hint, 'fail');
+        });
+    }
+
+    function fmtMs(ms) {
+        return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms + 'ms';
+    }
+
+    /* Where the time went: slowest devices, then the costliest collectors. */
+    function logSlowest(slowest) {
+        if (!slowest) return;
+        var devs = slowest.devices || [];
+        if (devs.length) {
+            logEvent('Slowest devices:', 'muted');
+            devs.forEach(function(d) {
+                var extra = 'login ' + fmtMs(d.connect_ms || 0);
+                if (d.login_wait_ms) extra += ', rate-limit wait ' + fmtMs(d.login_wait_ms);
+                logEvent('  ' + d.hostname + ' ' + fmtMs(d.total_ms || 0) + ' (' + extra + ')', 'muted');
+            });
+        }
+        var cols = slowest.collectors || [];
+        if (cols.length) {
+            logEvent('Costliest collectors:', 'muted');
+            cols.forEach(function(c) {
+                logEvent('  ' + c.collector + ' ' + fmtMs(c.total_ms || 0) + ' total, max ' +
+                         fmtMs(c.max_ms || 0) + ' on ' + c.max_device, 'muted');
+            });
+        }
+    }
+
+    function logSourceAccess(data) {
+        if (data.source_access_line) logEvent(data.source_access_line, 'muted');
+        (data.source_access_warnings || []).forEach(function(w) {
+            logEvent('WARNING: ' + w.message, 'warn');
+        });
+        if (data.refused_hint) logEvent('HINT: ' + data.refused_hint, 'warn');
     }
 
     function onScanFinished(title, data) {
@@ -941,7 +1578,14 @@
         if (_elapsedInterval) clearInterval(_elapsedInterval);
         document.getElementById('progress-title').textContent = title;
         document.getElementById('cancel-btn').style.display = 'none';
-        logEvent(title + ' \u2014 ' + (data.total_devices || 0) + ' devices, ' + (data.failed_count || 0) + ' failed', 'muted');
+        var line = title + ' \u2014 ' + (data.total_devices || 0) + ' devices, ' + (data.failed_count || 0) + ' failed';
+        if (data.skipped_count) line += ', ' + data.skipped_count + ' controller-managed not logged into';
+        if (data.not_attempted_count) line += ', ' + data.not_attempted_count + ' non-CDP neighbour address(es) not attempted';
+        logEvent(line, 'muted');
+        if (data.target_summary) logEvent(data.target_summary, 'muted');
+        logFailureReasons(data.failure_reasons);
+        logSourceAccess(data);
+        logSlowest(data.slowest);
 
         if (data.inventory_key) {
             fetch('/api/reports/available/' + encodeURIComponent(data.inventory_key))
@@ -1015,6 +1659,7 @@
 
         addTile('DEVICES', s.device_count != null ? s.device_count : '--', 'var(--cyan)');
         addTile('FAILED', s.failed_count != null ? s.failed_count : '--', 'var(--danger)');
+        if (s.skipped_count) addTile('CONTROLLER-MANAGED', s.skipped_count, 'var(--text-muted)');
 
         var elapsedStr = '--';
         if (s.elapsed != null) {
@@ -1022,7 +1667,7 @@
             var secs = Math.round(s.elapsed % 60);
             elapsedStr = String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
         }
-        addTile('ELAPSED', elapsedStr, 'var(--cyan)');
+        addTile(s.elapsed_summed ? 'ELAPSED (SUMMED)' : 'ELAPSED', elapsedStr, 'var(--cyan)');
 
         var dateStr = '--';
         if (s.timestamp) {
@@ -1034,6 +1679,59 @@
         addTile('SCAN DATE', dateStr, 'var(--text)');
 
         contentEl.appendChild(statsRow);
+
+        /* Why devices failed, with the likely fix for each class */
+        if (s.failure_reasons && s.failure_reasons.length) {
+            var reasonsEl = document.createElement('div');
+            reasonsEl.className = 'alert alert-error';
+            reasonsEl.style.marginBottom = '20px';
+            s.failure_reasons.forEach(function(r) {
+                var row = document.createElement('div');
+                var strong = document.createElement('strong');
+                strong.textContent = r.count + ' × ' + (r.label || r.reason);
+                row.appendChild(strong);
+                row.appendChild(document.createTextNode(' — ' + r.hint));
+                reasonsEl.appendChild(row);
+            });
+            contentEl.appendChild(reasonsEl);
+        }
+
+        /* Management ACLs on the seed that do not permit this host */
+        var accessNotes = (s.source_access_warnings || []).map(function(w) { return w.message; });
+        if (s.refused_hint) accessNotes.push(s.refused_hint);
+        if (accessNotes.length) {
+            var accessEl = document.createElement('div');
+            accessEl.className = 'alert alert-warning';
+            accessEl.style.marginBottom = '20px';
+            accessNotes.forEach(function(msg) {
+                var row = document.createElement('div');
+                row.textContent = msg;
+                accessEl.appendChild(row);
+            });
+            contentEl.appendChild(accessEl);
+        }
+
+        /* Source address and what the seed's ACLs make of it */
+        if (s.source_access_line) {
+            var sourceEl = document.createElement('div');
+            sourceEl.className = 'helper-text';
+            sourceEl.style.marginBottom = '12px';
+            sourceEl.textContent = s.source_access_line;
+            contentEl.appendChild(sourceEl);
+        }
+
+        /* Slowest devices, so a long run can be explained */
+        var slowDevs = (s.slowest && s.slowest.devices) || [];
+        if (slowDevs.length) {
+            var slowEl = document.createElement('div');
+            slowEl.className = 'helper-text';
+            slowEl.style.marginBottom = '20px';
+            slowEl.textContent = 'Slowest: ' + slowDevs.map(function(d) {
+                return d.hostname + ' ' + fmtMs(d.total_ms || 0);
+            }).join(', ');
+            if (s.source_ip && !s.source_access_line) slowEl.textContent += '  \u00b7  source ' + s.source_ip;
+            contentEl.appendChild(slowEl);
+        }
 
         var availableSet = {};
         availableReports.forEach(function(name) { availableSet[name] = true; });
@@ -1183,6 +1881,16 @@
                     row.addEventListener('click', function() {
                         loadScan(inv.filename);
                     });
+                    var pick = document.createElement('input');
+                    pick.type = 'checkbox';
+                    pick.className = 'merge-pick';
+                    pick.value = inv.filename;
+                    pick.title = 'Select for merge';
+                    pick.style.cssText = 'width:auto;margin-right:10px;accent-color:var(--accent);';
+                    pick.addEventListener('click', function(e) { e.stopPropagation(); });
+                    pick.addEventListener('change', updateMergeBar);
+                    row.appendChild(pick);
+
                     var info = document.createElement('div');
                     info.className = 'inv-info';
                     var ip = document.createElement('span');
@@ -1201,6 +1909,35 @@
                     ts.style.marginLeft = '12px';
                     ts.textContent = inv.timestamp.split('T')[0];
                     info.appendChild(ts);
+
+                    if (inv.merged_from && inv.merged_from.length) {
+                        var badge = document.createElement('span');
+                        badge.className = 'mono';
+                        badge.style.cssText = 'margin-left:12px;font-size:11px;' +
+                            'padding:2px 8px;border-radius:3px;' +
+                            'background:var(--accent-muted);color:var(--accent);';
+                        badge.textContent = 'merged \u00d7' + inv.merged_from.length;
+                        badge.title = 'Merged from:\n' + inv.merged_from.map(
+                            function (m) {
+                                return '  ' + m.discovery_id + '  (' +
+                                    m.device_count + ' devices, seed ' +
+                                    m.seed_ip + ')';
+                            }).join('\n') +
+                            (inv.merge_conflict_count
+                                ? '\n\n' + inv.merge_conflict_count +
+                                  ' device(s) appeared in more than one scan'
+                                : '');
+                        info.appendChild(badge);
+                    } else if (inv.continued_from) {
+                        var cont = document.createElement('span');
+                        cont.className = 'mono';
+                        cont.style.cssText = 'margin-left:12px;font-size:11px;' +
+                            'padding:2px 8px;border-radius:3px;' +
+                            'background:var(--cyan-muted);color:var(--cyan);';
+                        cont.textContent = 'continued';
+                        cont.title = 'Continued from ' + inv.continued_from;
+                        info.appendChild(cont);
+                    }
                     row.appendChild(info);
                     var actions = document.createElement('div');
                     actions.className = 'inv-actions';
@@ -1223,6 +1960,47 @@
                     row.appendChild(actions);
                     list.appendChild(row);
                 });
+                updateMergeBar();
+            });
+    }
+
+    /* Merge saved scans */
+    function updateMergeBar() {
+        var picked = document.querySelectorAll('.merge-pick:checked');
+        var bar = document.getElementById('merge-bar');
+        var label = document.getElementById('merge-count');
+        if (!bar) return;
+        bar.style.display = picked.length >= 2 ? 'flex' : 'none';
+        if (label) label.textContent = picked.length + ' scans selected';
+    }
+
+    function mergeSelectedScans() {
+        var picked = Array.prototype.map.call(
+            document.querySelectorAll('.merge-pick:checked'),
+            function(el) { return el.value; });
+        if (picked.length < 2) return;
+
+        var btn = document.getElementById('merge-btn');
+        btn.disabled = true;
+        btn.textContent = 'Merging...';
+
+        fetch('/inventories/merge', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filenames: picked })
+        })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                btn.disabled = false;
+                btn.textContent = 'Merge selected';
+                if (data.error) { alert('Merge failed: ' + data.error); return; }
+                loadInventoryList();
+                loadScan(data.filename);
+            })
+            .catch(function(err) {
+                btn.disabled = false;
+                btn.textContent = 'Merge selected';
+                alert('Merge failed: ' + err.message);
             });
     }
 
@@ -1368,6 +2146,22 @@
                     if (i === settings.max_workers) opt.selected = true;
                     select.appendChild(opt);
                 }
+                document.getElementById('settings-site-rules').value =
+                    (settings.site_rules || []).map(function(r) {
+                        return r.pattern + ' => ' + r.site;
+                    }).join('\n');
+                document.getElementById('settings-redact-secrets').checked =
+                    settings.redact_secrets !== false;
+                document.getElementById('settings-collect-controller-managed').checked =
+                    !!settings.collect_controller_managed;
+                document.getElementById('settings-expand-non-cdp').checked =
+                    !!settings.expand_non_cdp_neighbors;
+                document.getElementById('settings-max-logins').value =
+                    settings.max_logins_per_minute || 0;
+                document.getElementById('settings-allow-telnet').checked =
+                    !!settings.allow_telnet;
+                document.getElementById('settings-source-ip').value =
+                    settings.source_ip || '';
             })
             .catch(function() {});
     }
@@ -1377,7 +2171,16 @@
         fetch('/api/settings/discovery', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({max_workers: maxWorkers})
+            body: JSON.stringify({
+                max_workers: maxWorkers,
+                site_rules: document.getElementById('settings-site-rules').value,
+                redact_secrets: document.getElementById('settings-redact-secrets').checked,
+                collect_controller_managed: document.getElementById('settings-collect-controller-managed').checked,
+                expand_non_cdp_neighbors: document.getElementById('settings-expand-non-cdp').checked,
+                max_logins_per_minute: parseInt(document.getElementById('settings-max-logins').value || '0', 10),
+                allow_telnet: document.getElementById('settings-allow-telnet').checked,
+                source_ip: document.getElementById('settings-source-ip').value.trim()
+            })
         })
         .then(function(r) { return r.json(); })
         .then(function(data) {

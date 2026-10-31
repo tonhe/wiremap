@@ -13,15 +13,24 @@ import requests
 from device_detector import DeviceTypeDetector
 from discovery_engine import DiscoveryEngine, DiscoveryError
 from inventory import DiscoveryInventory
+from inventory_merge import claim_unused_id, merge_inventories as merge_inventory_dicts
+from neighbors import CrawlScope, get_registry as get_neighbor_sources
+from snmp_probe import SnmpCredentials
 from scan_manager import ScanManager
 from plugins import get_plugin_config, save_plugin_config, get_plugin_status, list_plugins
 from settings import get_discovery_settings, save_discovery_settings
+from source_access import clean_source_ip
+from target_list import WARN_TARGET_COUNT, parse_targets, resolve_targets
 try:
     from app.collectors import get_registry as get_collector_registry
     from app.reports import get_registry as get_report_registry, get_report
 except ImportError:
     from collectors import get_registry as get_collector_registry
     from reports import get_registry as get_report_registry, get_report
+try:
+    from app.credentials import parse_credential_form
+except ImportError:
+    from credentials import parse_credential_form
 
 # Read version
 VERSION = "0.2"
@@ -72,15 +81,25 @@ DEVICE_TYPES = [
     ('extreme', 'Extreme ExtremeXOS'),
     ('extreme_vsp', 'Extreme VOSS'),
     ('ubiquiti_edge', 'Ubiquiti EdgeOS'),
-    ('barracuda', 'Barracuda'),
+    # 'barracuda' was offered here but is not a netmiko platform in any
+    # version -- selecting it could only ever raise ValueError.
+    ('vyos', 'VyOS'),
+    ('cisco_wlc', 'Cisco AireOS WLC'),
+    ('watchguard_fireware', 'WatchGuard Firebox'),
 ]
 
 
 @app.route('/')
 def index():
     """Main page with discovery form"""
+    sources = [
+        {"name": s.name, "label": s.label, "description": s.description,
+         "enabled_by_default": s.enabled_by_default}
+        for s in sorted(get_neighbor_sources().values(), key=lambda s: s.name)
+    ]
     return render_template('index.html', device_types=DEVICE_TYPES, version=VERSION,
-                         report_registry=_get_report_info())
+                         report_registry=_get_report_info(),
+                         neighbor_sources=sources)
 
 
 @app.route('/scan/start', methods=['POST'])
@@ -90,22 +109,36 @@ def scan_start():
         return jsonify({"error": "A scan is already running"}), 409
 
     scan_type = request.form.get('scan_type', 'discovery')
-    username = request.form.get('username', '').strip()
-    password = request.form.get('password', '')
     protocol = request.form.get('protocol', 'ssh')
     disc_settings = get_discovery_settings()
     max_workers = disc_settings.get("max_workers", 10)
+    disable_autodetect = disc_settings.get("disable_autodetect", False)
+    collect_controller_managed = bool(
+        disc_settings.get("collect_controller_managed", False))
+    max_logins_per_minute = int(disc_settings.get("max_logins_per_minute") or 0)
+    allow_telnet = bool(disc_settings.get("allow_telnet", False))
+    # Per-scan source address overrides the saved one; blank learns it.
+    try:
+        source_ip = (clean_source_ip(request.form.get('source_ip', ''))
+                     or clean_source_ip(disc_settings.get('source_ip') or ''))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
-    if not username or not password:
-        return jsonify({"error": "Username and password are required"}), 400
+    # Up to five sets: username/password, then username_2/password_2 ...
+    try:
+        credentials = parse_credential_form(request.form)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
+    target_resolution = None
     if scan_type == 'targeted':
-        host_list_raw = request.form.get('host_list', '').strip()
-        if not host_list_raw:
+        has_file = bool(getattr(request.files.get('host_file'), 'filename', ''))
+        if not request.form.get('host_list', '').strip() and not has_file:
             return jsonify({"error": "Host list is required"}), 400
         valid_types = {dt[0] for dt in DEVICE_TYPES}
         try:
-            target_hosts = _parse_host_list(host_list_raw, valid_types)
+            target_hosts, target_resolution = _build_target_hosts(
+                request.form, request.files, valid_types)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
         seed_ip = target_hosts[0][0]
@@ -118,6 +151,41 @@ def scan_start():
         target_hosts = None
 
     max_depth = int(request.form.get('max_depth', 3))
+    crawl_from_targets = request.form.get('crawl_from_targets') == 'true'
+
+    # Neighbour sources: which sightings are allowed to feed the crawl.
+    submitted_sources = request.form.getlist('neighbor_sources')
+    neighbor_sources = set(submitted_sources) if submitted_sources else None
+
+    try:
+        crawl_scope = CrawlScope(
+            allow_cidrs=_split_cidrs(request.form.get('scope_allow', '')),
+            deny_cidrs=_split_cidrs(request.form.get('scope_deny', '')),
+            rfc1918_only=request.form.get('scope_private_only', 'true') != 'false',
+            max_devices=int(request.form.get('max_devices') or 0) or None,
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    # SNMP is a fallback for hosts that refuse SSH and telnet, so credentials
+    # are supplied per run alongside the login credentials.
+    try:
+        snmp_credentials = _build_snmp_credentials(request.form)
+    except ValueError as e:
+        return jsonify({"error": f"SNMP: {e}"}), 400
+
+    # Adding to a previous scan: load it and hand it to the engine, which
+    # treats its collected devices as already visited.
+    base_inventory = None
+    continue_from = request.form.get('continue_from', '').strip()
+    if continue_from:
+        base_path = os.path.join(INVENTORY_DIR, os.path.basename(continue_from))
+        if not os.path.exists(base_path):
+            return jsonify({"error": f"Previous scan not found: {continue_from}"}), 400
+        try:
+            base_inventory = DiscoveryInventory.load(base_path)
+        except Exception as e:
+            return jsonify({"error": f"Could not load previous scan: {e}"}), 400
     filters = {
         'include_routers': request.form.get('include_routers') == 'true',
         'include_switches': request.form.get('include_switches') == 'true',
@@ -125,15 +193,16 @@ def scan_start():
         'include_servers': request.form.get('include_servers') == 'true',
         'include_aps': request.form.get('include_aps') == 'true',
         'include_other': request.form.get('include_other') == 'true',
-    } if scan_type == 'discovery' else None
+    } if (scan_type == 'discovery' or crawl_from_targets) else None
 
     def run_scan(progress_cb, cancelled):
         det = DeviceTypeDetector()
         engine = DiscoveryEngine(
             seed_ip=seed_ip,
             seed_device_type=seed_type,
-            username=username,
-            password=password,
+            username=credentials[0].username,
+            password=credentials[0].password,
+            credentials=credentials,
             max_depth=max_depth,
             protocol=protocol,
             filters=filters,
@@ -143,6 +212,19 @@ def scan_start():
             target_hosts=target_hosts,
             progress_callback=progress_cb,
             cancelled=cancelled,
+            disable_autodetect=disable_autodetect,
+            crawl_from_targets=crawl_from_targets,
+            neighbor_sources=neighbor_sources,
+            crawl_scope=crawl_scope,
+            expand_non_cdp_neighbors=bool(
+                disc_settings.get("expand_non_cdp_neighbors", False)),
+            snmp_credentials=snmp_credentials,
+            base_inventory=base_inventory,
+            target_resolution=target_resolution,
+            collect_controller_managed=collect_controller_managed,
+            max_logins_per_minute=max_logins_per_minute,
+            allow_telnet=allow_telnet,
+            source_ip=source_ip or None,
         )
         inventory = engine.discover()
         inventory.save(INVENTORY_DIR)
@@ -152,7 +234,13 @@ def scan_start():
     if scan_id is None:
         return jsonify({"error": "A scan is already running"}), 409
 
-    return jsonify({"scan_id": scan_id})
+    response = {"scan_id": scan_id}
+    if target_resolution:
+        response["target_count"] = len(target_hosts)
+        response["resolved"] = len(target_resolution["targets"])
+        response["unresolved"] = target_resolution["unresolved"]
+        response["warnings"] = target_resolution["warnings"]
+    return jsonify(response)
 
 
 @app.route('/scan/<scan_id>/stream')
@@ -194,6 +282,51 @@ def list_inventories():
     except FileNotFoundError:
         inventories = []
     return jsonify(inventories)
+
+
+@app.route('/inventories/merge', methods=['POST'])
+def merge_inventories_route():
+    """Merge two or more saved scans into a new one.
+
+    The sources are left in place -- a merge adds a scan, it never consumes
+    the ones it was built from.
+    """
+    payload = request.get_json(silent=True) or {}
+    filenames = payload.get('filenames') or request.form.getlist('filenames')
+    if not isinstance(filenames, list) or len(filenames) < 2:
+        return jsonify({"error": "Select at least two scans to merge"}), 400
+
+    loaded = []
+    for name in filenames:
+        path = os.path.join(INVENTORY_DIR, os.path.basename(name))
+        if not os.path.exists(path):
+            return jsonify({"error": f"Scan not found: {name}"}), 404
+        try:
+            loaded.append(DiscoveryInventory.load(path).to_dict())
+        except Exception as e:
+            return jsonify({"error": f"Could not read {name}: {e}"}), 400
+
+    try:
+        merged_data = merge_inventory_dicts(
+            loaded, filenames=[os.path.basename(n) for n in filenames])
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    claim_unused_id(merged_data, INVENTORY_DIR)
+    merged = DiscoveryInventory(merged_data)
+    merged.save(INVENTORY_DIR)
+
+    registry = get_report_registry()
+    available = [r.name for r in registry.values() if r.can_generate(merged_data)]
+
+    return jsonify({
+        "inventory_key": merged.discovery_id,
+        "filename": f"{merged.discovery_id}.json",
+        "device_count": len(merged.devices),
+        "merged_from": merged_data.get("merged_from", []),
+        "merge_conflicts": merged_data.get("merge_conflicts", []),
+        "available_reports": available,
+    })
 
 
 @app.route('/inventories/<filename>', methods=['DELETE'])
@@ -419,37 +552,80 @@ def api_save_discovery_settings():
 
 # --- Helpers ---
 
-def _parse_host_list(raw_text, valid_types):
-    """Parse textarea host list into [(ip, device_type_or_None), ...].
+def _build_snmp_credentials(form):
+    """Build SNMP credentials from a scan form, or None when not enabled."""
+    if form.get('snmp_enabled') != 'true':
+        return None
+    version = (form.get('snmp_version') or 'v2c').strip()
+    return SnmpCredentials(
+        version=version,
+        community=form.get('snmp_community', '').strip(),
+        username=form.get('snmp_username', '').strip(),
+        auth_key=form.get('snmp_auth_key', ''),
+        priv_key=form.get('snmp_priv_key', ''),
+        auth_protocol=form.get('snmp_auth_protocol', 'sha'),
+        priv_protocol=form.get('snmp_priv_protocol', 'aes'),
+    )
 
-    Each line: IP [device_type]. Blank lines and # comments ignored.
+
+def _split_cidrs(raw_text):
+    """Split a comma or newline separated CIDR list."""
+    if not raw_text:
+        return []
+    parts = raw_text.replace("\n", ",").split(",")
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _parse_host_list(raw_text, valid_types, filename=None):
+    """Parse a pasted or uploaded host list into unresolved host entries.
+
+    Text: one `host [device_type]` per line, host an IPv4 address or a
+    hostname/FQDN; blank lines and # comments ignored. CSV (by .csv name or
+    a recognisable header): hostname and/or ip column, optional device_type.
     """
-    hosts = []
-    seen_ips = set()
-    for lineno, line in enumerate(raw_text.splitlines(), 1):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        parts = stripped.split()
-        ip = parts[0]
-        octets = ip.split(".")
-        if len(octets) != 4:
-            raise ValueError(f"Line {lineno}: invalid IP address '{ip}'")
-        for octet in octets:
-            if not octet.isdigit() or not 0 <= int(octet) <= 255:
-                raise ValueError(f"Line {lineno}: invalid IP address '{ip}'")
-        if ip in seen_ips:
-            continue
-        seen_ips.add(ip)
-        device_type = None
-        if len(parts) >= 2:
-            device_type = parts[1]
-            if device_type not in valid_types:
-                raise ValueError(f"Line {lineno}: unknown device type '{device_type}'")
-        hosts.append((ip, device_type))
-    if not hosts:
+    return parse_targets(raw_text, valid_types, filename=filename)
+
+
+MAX_HOST_FILE_BYTES = 5 * 1024 * 1024
+
+
+def _read_host_file(storage):
+    """Return (text, filename) from an uploaded host file, or ('', None)."""
+    if storage is None or not storage.filename:
+        return "", None
+    data = storage.read(MAX_HOST_FILE_BYTES + 1)
+    if len(data) > MAX_HOST_FILE_BYTES:
+        raise ValueError("Host file is larger than 5 MB")
+    return data.decode("utf-8-sig", errors="replace"), storage.filename
+
+
+def _build_target_hosts(form, files, valid_types):
+    """Parse paste and upload, resolve names. Returns (hosts, resolution)."""
+    entries = []
+    pasted = form.get('host_list', '').strip()
+    if pasted:
+        entries.extend(_parse_host_list(pasted, valid_types))
+    file_text, filename = _read_host_file(files.get('host_file'))
+    if file_text.strip():
+        try:
+            entries.extend(_parse_host_list(file_text, valid_types, filename))
+        except ValueError as e:
+            raise ValueError(f"{filename}: {e}")
+    if not entries:
         raise ValueError("No valid hosts provided")
-    return hosts
+    hosts, targets, unresolved = resolve_targets(entries)
+    resolution = {"targets": targets, "unresolved": unresolved,
+                  "warnings": []}
+    # Recorded in the scan params so a report says which list it ran from.
+    resolution["targets_file"] = os.path.basename(filename) if filename else None
+    if len(hosts) > WARN_TARGET_COUNT:
+        resolution["warnings"].append(
+            f"{len(hosts)} targets is more than {WARN_TARGET_COUNT}; "
+            f"check the list is network devices only")
+    if not hosts:
+        names = ", ".join(u["input"] for u in unresolved[:10])
+        raise ValueError(f"No hosts resolved: {names}")
+    return hosts, resolution
 
 def _get_report_info():
     """Return list of report dicts for the UI, grouped by category."""

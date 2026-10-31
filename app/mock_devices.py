@@ -4,9 +4,15 @@ Simulates network devices for testing without real hardware
 """
 
 import logging
+import os
 from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+
+class MockAuthenticationException(Exception):
+    """A mock login refused for its username. The class name is what
+    app.failures recognises as an authentication failure."""
 
 
 class MockNetworkDevice:
@@ -695,8 +701,11 @@ Cisco IOS Software, C2960X Software
         },
 
         # L3-only WAN router — no CDP/LLDP, only reachable via BGP from CORE-NX-01
+        # Only accepts the backup-admin account, so a scan needs a second
+        # credential set to log in here (see accepted_usernames).
         "10.0.0.1": {
             "hostname": "WAN-ROUTER-01",
+            "accepted_usernames": ["backup-admin"],
             "device_type": "cisco_ios",
             "platform": "Cisco ISR4451-X/K9",
             "cdp_output": "",
@@ -734,6 +743,11 @@ BGP neighbor is 192.168.1.1,  remote AS 65000, ebgp link,  Peer index 1
             raise Exception(f"Mock device {host} not found. Available: {', '.join(self.MOCK_DEVICES.keys())}")
         
         self.device_config = self.MOCK_DEVICES[host]
+        # Devices without accepted_usernames take any login.
+        accepted = self.device_config.get("accepted_usernames")
+        if accepted and username not in accepted:
+            raise MockAuthenticationException(
+                f"Authentication failed for user {username}")
         logger.info(f"[MOCK] Connected to {self.device_config['hostname']} ({host})")
     
     def find_prompt(self) -> str:
@@ -766,8 +780,19 @@ BGP neighbor is 192.168.1.1,  remote AS 65000, ebgp link,  Peer index 1
         logger.info(f"[MOCK] Disconnected from {self.device_config['hostname']}")
 
 
+def mock_mode_enabled() -> bool:
+    return os.environ.get("WIREMAP_MOCK", "").strip() == "1"
+
+
 def is_mock_mode(host: str) -> bool:
-    """Check if this IP should use mock mode"""
+    """Check if this IP should use mock mode.
+
+    Mock mode is opt-in via WIREMAP_MOCK=1. Without it no host is ever
+    mocked -- MOCK_DEVICES sits on 192.168.1.0/24, which is a real range
+    on real customer networks.
+    """
+    if not mock_mode_enabled():
+        return False
     return host in MockNetworkDevice.MOCK_DEVICES
 
 

@@ -3,12 +3,26 @@ Device Type Detector
 Uses YAML configuration to map CDP/LLDP platform info to Netmiko device types
 """
 
+import re
 import yaml
 import logging
 from pathlib import Path
 from typing import Optional, Dict, List
 
+try:
+    from app.device_role import category_for_model
+except ImportError:
+    from device_role import category_for_model
+
 logger = logging.getLogger(__name__)
+
+# Used when the patterns file predates the controller_managed section.
+_DEFAULT_CONTROLLER_MANAGED = {
+    'aci': {'platforms': ['n9k-'],
+            'hostname_regex': r'^(leaf|spine)[-_]?\d+(\W|$)'},
+    'ucsm': {'platforms': ['ucs-fi-'],
+             'device_category': 'fabric-interconnect'},
+}
 
 
 class DeviceTypeDetector:
@@ -36,7 +50,7 @@ class DeviceTypeDetector:
             logger.error(f"Error loading config: {e}, using defaults")
             return self._get_default_patterns()
     
-    def detect_from_cdp(self, platform: str, capabilities: str = "", filters: dict = None) -> Optional[str]:
+    def detect_from_cdp(self, platform: str, capabilities: str = "", filters: dict = None, fallback=True) -> Optional[str]:
         """
         Detect device type from CDP platform and capabilities
         
@@ -48,11 +62,11 @@ class DeviceTypeDetector:
         Returns:
             Netmiko device type string or None if no match found
         """
-        device_type = self._match_patterns(platform, "")
+        device_type = self._match_patterns(platform, "", fallback)
         logger.debug(f"CDP platform '{platform}' detected as '{device_type}'")
         return device_type
     
-    def detect_from_lldp(self, system_desc: str, capabilities: str = "", filters: dict = None) -> Optional[str]:
+    def detect_from_lldp(self, system_desc: str, capabilities: str = "", filters: dict = None, fallback=True) -> Optional[str]:
         """
         Detect device type from LLDP system description
         
@@ -64,7 +78,7 @@ class DeviceTypeDetector:
         Returns:
             Netmiko device type string or None if no match found
         """
-        device_type = self._match_patterns("", system_desc)
+        device_type = self._match_patterns("", system_desc, fallback)
         logger.debug(f"LLDP description detected as '{device_type}'")
         return device_type
     
@@ -138,6 +152,12 @@ class DeviceTypeDetector:
         if any(keyword in text_to_check for keyword in firewall_keywords):
             return ('firewall', has_routing)
 
+        # A known hardware model beats the capability bits: an ISR4351 doing
+        # CUBE advertises Switch, a VG310 advertises Router.
+        by_model = category_for_model(platform)
+        if by_model:
+            return (by_model, has_routing)
+
         # Access Point detection (check BEFORE bridge, since Trans-Bridge = AP)
         if any(c in caps for c in ['WLAN', 'W', 'AP']):
             return ('access_point', has_routing)
@@ -169,14 +189,22 @@ class DeviceTypeDetector:
         # Default to other
         return ('other', has_routing)
     
-    def _match_patterns(self, platform: str, system_desc: str) -> str:
+    def is_collectible(self, device_type) -> bool:
+        """False for device types that are seen as neighbours but cannot be
+        logged into (cloud-managed gear such as Meraki)."""
+        skip = self.patterns.get('non_collectible_types', []) or []
+        return device_type not in skip
+
+    def _match_patterns(self, platform: str, system_desc: str, fallback=True) -> Optional[str]:
         """
         Match platform/description against configured patterns
-        
+
         Args:
             platform: Platform string to match
             system_desc: System description to match
-            
+            fallback: Return the default type when nothing matches; when
+                False, return None so the caller can try other evidence
+
         Returns:
             Best matching device type
         """
@@ -210,9 +238,33 @@ class DeviceTypeDetector:
             matches.sort(key=lambda x: x[1], reverse=True)
             return matches[0][0]
         
+        if not fallback:
+            return None
         logger.debug(f"No pattern matched, using default: {self.default_type}")
         return self.default_type
     
+    def detect_controller_managed(self, platform: str, hostname: str = "") -> Optional[Dict]:
+        """Return {"managed_by", "device_category"} for a controller-managed
+        neighbour (ACI fabric node, UCS Fabric Interconnect), else None.
+
+        device_category is None when the capability-based category stands.
+        """
+        platform_lower = str(platform or "").lower()
+        name = str(hostname or "").strip()
+        rules = self.patterns.get('controller_managed') or _DEFAULT_CONTROLLER_MANAGED
+        for managed_by, rule in rules.items():
+            if not any(str(p).lower() in platform_lower
+                       for p in rule.get('platforms', [])):
+                continue
+            regex = rule.get('hostname_regex')
+            if regex and not re.match(regex, name, re.IGNORECASE):
+                continue
+            return {
+                "managed_by": managed_by,
+                "device_category": rule.get('device_category'),
+            }
+        return None
+
     def reload_config(self):
         """Reload patterns from configuration file"""
         self.patterns = self._load_patterns()

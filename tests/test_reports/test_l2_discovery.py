@@ -50,7 +50,7 @@ def l2_inventory():
                             ],
                             "vlans": [
                                 {"vlan_id": "10", "name": "MGMT"},
-                                {"vlan_id": "20", "name": "WBC_USERS"},
+                                {"vlan_id": "20", "name": "CORP_USERS"},
                                 {"vlan_id": "30", "name": "SERVERS"},
                             ],
                             "vtp_status": [],
@@ -123,7 +123,7 @@ def l2_inventory():
                     "config": {
                         "raw": {},
                         "parsed": {
-                            "config": "hostname CORE-SW-01\n!\nspanning-tree portfast bpduguard default\n!",
+                            "config": "hostname CORE-SW-01\n!\nspanning-tree portfast default\nspanning-tree portfast bpduguard default\n!",
                         },
                     },
                 },
@@ -160,7 +160,7 @@ def l2_inventory():
                             ],
                             "vlans": [
                                 {"vlan_id": "10", "name": "MGMT"},
-                                {"vlan_id": "20", "name": "WBC_USER"},
+                                {"vlan_id": "20", "name": "CORP_USER"},
                                 {"vlan_id": "30", "name": "SERVERS"},
                             ],
                             "vtp_status": [],
@@ -319,13 +319,13 @@ def test_is_default_name():
     assert _is_default_name("VLAN10") is True
     assert _is_default_name("VLAN0001") is True
     assert _is_default_name("MGMT") is False
-    assert _is_default_name("WBC_USERS") is False
+    assert _is_default_name("CORP_USERS") is False
 
 
 def test_names_are_similar():
-    assert _names_are_similar("WBC_USERS", "WBC_USERS") is True
-    assert _names_are_similar("WBC_USERS", "WBC_USER") is True
-    assert _names_are_similar("WBC_USERS", "WIRELESS_NETWORK") is False
+    assert _names_are_similar("CORP_USERS", "CORP_USERS") is True
+    assert _names_are_similar("CORP_USERS", "CORP_USER") is True
+    assert _names_are_similar("CORP_USERS", "WIRELESS_NETWORK") is False
     assert _names_are_similar("VLAN0020", "VLAN20") is True
 
 
@@ -502,7 +502,7 @@ def test_generate_xlsx_sheets(l2_inventory):
     assert "STP Topology" in wb.sheetnames
     assert "Port Security" in wb.sheetnames
     assert "Trunk Summary" in wb.sheetnames
-    assert len(wb.sheetnames) == 7
+    assert len(wb.sheetnames) == 8
 
 
 def test_generate_summary_tab(l2_inventory):
@@ -581,6 +581,9 @@ def test_generate_findings(l2_inventory):
     data = r.generate(l2_inventory)
     wb = load_workbook(io.BytesIO(data))
     ws = wb["Findings"]
+    assert [ws.cell(row=1, column=c).value for c in range(1, 6)] == [
+        "Severity", "Finding", "Details", "Device count", "Devices"]
+    ws = wb["Findings (detail)"]
     assert ws.cell(row=1, column=1).value == "Hostname"
     assert ws.cell(row=1, column=2).value == "Site/Location"
     assert ws.cell(row=1, column=3).value == "Port"
@@ -675,6 +678,20 @@ def test_generate_trunk_summary_tab(l2_inventory):
     assert found_dist_trunk
 
 
+def test_trunk_neighbor_joins_short_switchport_to_long_cdp_name(l2_inventory):
+    """Regression: switchport lists Gi0/1, CDP says GigabitEthernet0/1, and
+    a plain lowercase compare left the Neighbor column blank."""
+    cdp = l2_inventory["devices"]["CORE-SW-01"]["collector_data"]["cdp_lldp"]
+    cdp["parsed"]["neighbors"] = [
+        {"remote_device": "DIST-SW-01", "local_intf": "GigabitEthernet0/1",
+         "remote_intf": "GigabitEthernet0/24", "protocols": ["CDP"]},
+    ]
+    sheets = L2DiscoveryReport().generate_tabular_data(l2_inventory)
+    headers, rows = sheets["Trunk Summary"]
+    core = [r for r in rows if r[0] == "CORE-SW-01" and r[2] == "Gi0/1"]
+    assert core and core[0][5] == "DIST-SW-01"
+
+
 def test_conditional_sheets_absent_without_data():
     """STP Topology, Port Security, Trunk Summary not added without data."""
     inv = {
@@ -703,4 +720,4 @@ def test_conditional_sheets_absent_without_data():
     assert "STP Topology" not in wb.sheetnames
     assert "Port Security" not in wb.sheetnames
     assert "Trunk Summary" not in wb.sheetnames
-    assert len(wb.sheetnames) == 4
+    assert len(wb.sheetnames) == 5

@@ -143,3 +143,48 @@ def test_snmp_no_secrets(collector):
     assert result["snmp"]["communities_detected"] is True
     assert result["snmp"]["contact"] == "admin@example.com"
     assert result["snmp"]["location"] == "DC1-Row5-Rack12"
+
+
+class _EchoConnection:
+    def send_command(self, cmd, **kwargs):
+        return f"output of {cmd}"
+
+
+@pytest.mark.parametrize("device_type", [
+    "cisco_ios", "cisco_nxos", "vyos", "cisco_wlc",
+    "watchguard_fireware", "paloalto_panos",
+])
+def test_collect_redacts_by_command_on_every_platform(collector, device_type):
+    raw = collector.collect(_EchoConnection(), device_type)["raw"]
+    assert set(raw) == set(collector.get_commands(device_type))
+    for cmd, out in raw.items():
+        if cmd == "show snmp" or "running-config" in cmd:
+            assert out == "<REDACTED>"
+        else:
+            assert out == f"output of {cmd}"
+
+
+class _SlowBufferConnection:
+    """Answers a large log buffer only when given more than netmiko's
+    default 10 second read timeout, as a slow link does."""
+
+    BUFFER = "\n".join(
+        f"*Oct 31 10:{i // 60:02d}:{i % 60:02d}: %LINK-3-UPDOWN: Interface "
+        f"GigabitEthernet1/0/{i % 48 + 1}, changed state to up" for i in range(3000))
+
+    def send_command(self, cmd, read_timeout=10, **kwargs):
+        if cmd.startswith("show log"):
+            if read_timeout <= 10:
+                raise TimeoutError("Pattern not detected in output")
+            return "Syslog logging: enabled\nLog Buffer (512000 bytes):\n" + self.BUFFER
+        return ""
+
+
+@pytest.mark.parametrize("device_type", ["cisco_ios", "cisco_xe", "cisco_nxos",
+                                         "vyos", "paloalto_panos"])
+def test_full_log_buffer_is_kept(collector, device_type):
+    raw = collector.collect(_SlowBufferConnection(), device_type)["raw"]
+    logs = [cmd for cmd in raw if cmd.startswith("show log")]
+    assert logs
+    for cmd in logs:
+        assert raw[cmd].endswith(_SlowBufferConnection.BUFFER)

@@ -56,3 +56,164 @@ def test_generate_xlsx_with_routing_detail(sample_inventory):
 
     ws2 = wb["OSPF Topology"]
     assert ws2.cell(row=2, column=3).value == "1"  # Process ID
+
+
+def test_collect_collector_errors_finds_failures():
+    from app.reports.routing_summary import _collect_collector_errors
+    inventory = {
+        "devices": {
+            "SW1": {
+                "hostname": "SW1",
+                "collector_data": {
+                    "routing_detail": {
+                        "parsed": {
+                            "collector_failed": True,
+                            "collector_error": "% Invalid input detected",
+                        }
+                    }
+                },
+            },
+            "SW2": {
+                "hostname": "SW2",
+                "collector_data": {
+                    "routing_detail": {"parsed": {"ospf_processes": []}}
+                },
+            },
+        }
+    }
+    errors = _collect_collector_errors(inventory)
+    assert ("SW1", "routing_detail", "not applicable",
+            "% Invalid input detected") in errors
+    assert len(errors) == 1
+
+
+def test_collect_collector_errors_empty_when_clean():
+    from app.reports.routing_summary import _collect_collector_errors
+    inventory = {"devices": {"SW1": {"collector_data": {}}}}
+    assert _collect_collector_errors(inventory) == []
+
+
+def test_failed_collector_produces_no_ospf_rows():
+    """Regression: error text was tokenised into Area/Interface/Cost columns."""
+    from app.reports.routing_summary import _build_ospf_topology_sheet
+    from openpyxl import Workbook
+    wb = Workbook()
+    wb.remove(wb.active)
+    inventory = {
+        "devices": {
+            "CORE-DR-02": {
+                "collector_data": {
+                    "routing_detail": {
+                        "parsed": {
+                            "collector_failed": True,
+                            "collector_error": "% Invalid input detected",
+                        }
+                    }
+                },
+            }
+        }
+    }
+    _build_ospf_topology_sheet(wb, inventory)
+    ws = wb["OSPF Topology"]
+    assert ws.max_row == 1
+
+
+def _rs_device(hostname, rd=None, vrf_routes=None):
+    return {"hostname": hostname, "collector_data": {
+        "routing_detail": {"raw": {}, "parsed": rd or {}},
+        "vrf": {"raw": {}, "parsed": {"vrfs": [], "vrf_interfaces": [],
+                                       "vrf_routes": vrf_routes or {}}},
+    }}
+
+
+def test_route_summary_rows_per_vrf():
+    from app.reports.routing_summary import _route_summary_rows
+    inv = {"devices": {
+        "RTR-A": _rs_device("RTR-A", rd={
+            "route_summary": [{"source": "connected", "count": 4}],
+        }, vrf_routes={"CUST-A": [
+            {"protocol": "C", "network": "10.1.0.0/24"},
+            {"protocol": "L", "network": "10.1.0.1/32"},
+            {"protocol": "B", "network": "10.2.0.0/16"},
+            {"protocol": "S*", "network": "0.0.0.0/0"},
+        ]}),
+        "RTR-B": _rs_device("RTR-B", rd={
+            "route_summary": [],
+            "vrf_route_summary": {
+                "default": [{"source": "direct", "count": 3}],
+                "INET": [{"source": "direct", "count": 1},
+                         {"source": "bgp-64500", "count": 4},
+                         {"source": "am", "count": 2}],
+            },
+        }),
+    }}
+    rows = {(r[0], r[2]): r for r in _route_summary_rows(inv)}
+    assert rows[("RTR-A", "default")][3] == 4
+    cust = rows[("RTR-A", "CUST-A")]
+    # Connected, Static, OSPF, EIGRP, BGP, Other, Total
+    assert cust[3:] == [2, 1, 0, 0, 1, 0, 4]
+    inet = rows[("RTR-B", "INET")]
+    assert inet[3:] == [1, 0, 0, 0, 4, 2, 7]
+    # NX-OS default VRF duplicates the global summary, so it is not repeated
+    assert ("RTR-B", "default") not in rows
+
+
+def test_route_summary_tab_has_vrf_column(sample_inventory):
+    sheets = RoutingSummaryReport().generate_tabular_data(sample_inventory)
+    assert sheets["Route Summary"][0][2] == "VRF"
+
+
+def test_bgp_down_finding_names_vrf():
+    from app.reports.routing_summary import _analyze_l3
+    inv = {"devices": {"RTR-A": _rs_device("RTR-A", rd={"bgp_summary": [
+        {"neighbor": "192.0.2.1", "asn": "64496", "state": "Idle", "vrf": "INET"},
+    ]})}}
+    findings = _analyze_l3(inv)["findings"]
+    assert findings[0]["title"] == "BGP peer not Established"
+    assert "VRF INET" in findings[0]["description"]
+    assert findings[0]["type"] == "BGP peer not Established"
+
+
+def test_l3_overfire_note():
+    from app.reports.findings import OVERFIRE_TYPE
+    from app.reports.routing_summary import _analyze_l3
+    peer_down = {"bgp_summary": [{"neighbor": "192.0.2.1", "asn": "64496",
+                                  "state": "Active"}]}
+    inv = {"devices": {h: _rs_device(h, rd=peer_down)
+                       for h in ("RTR-A", "RTR-B", "RTR-C", "RTR-D")}}
+    meta = [f for f in _analyze_l3(inv)["findings"] if f["type"] == OVERFIRE_TYPE]
+    assert len(meta) == 1
+    assert meta[0]["about"] == "BGP peer not Established"
+
+
+def _static_and_ospf(hostname, statics):
+    return {"hostname": hostname, "collector_data": {
+        "routing_detail": {"raw": {}, "parsed": {"route_summary": [
+            {"source": "ospf 1", "count": 10},
+            {"source": "static", "count": statics},
+        ]}},
+    }}
+
+
+def test_findings_aggregate_static_routes_across_devices():
+    inv = {"devices": {h: _static_and_ospf(h, n)
+                       for h, n in (("SW1", 2), ("SW2", 7), ("SW3", 3))}}
+    r = RoutingSummaryReport()
+    sheets = r.generate_tabular_data(inv)
+    headers, rows = sheets["Findings"]
+    assert headers[:2] == ["Severity", "Finding"]
+    static = [row for row in rows
+              if row[1] == "Static routes alongside dynamic protocol"]
+    assert len(static) == 1
+    assert static[0][3:] == [3, "SW1, SW2, SW3"]
+    _dh, drows = sheets["Findings (detail)"]
+    assert [row[0] for row in drows
+            if row[3] == "Static routes alongside dynamic protocol"] == ["SW1", "SW2", "SW3"]
+    summary = dict(sheets["Summary"][1])
+    assert summary["Warning Findings"] == 3
+    assert summary["Warning Findings (distinct)"] == 1
+
+    wb = load_workbook(io.BytesIO(r.generate(inv)))
+    assert wb.sheetnames.index("Findings (detail)") == wb.sheetnames.index("Findings") + 1
+    ws = wb["Findings"]
+    assert ws.cell(row=2, column=4).value == 3

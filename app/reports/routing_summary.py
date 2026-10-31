@@ -7,7 +7,9 @@ Tabs:
   3. Routes -- full routing table per device
   4. Routed Interfaces -- non-SVI routed interfaces
   5. Route Summary -- route counts by protocol per device
+     Routing Scale -- OSPF LSDB and EIGRP topology size
   6. OSPF Topology -- OSPF process, area, interface detail
+     Routing Processes / Redistribution -- parsed show ip protocols
   7. IP Address Audit -- all IPs with overlap detection
   8. ARP/MAC Map -- ARP entries correlated with MAC table
   9. VRF Summary -- VRF definitions and interface assignments
@@ -24,6 +26,11 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from .base import BaseReport
+from .findings import (
+    CRITICAL, WARNING, INFO, AGGREGATE_HEADERS, DETAIL_SHEET,
+    make_finding, overfire_check, aggregate_rows, summary_count_rows,
+)
+from .fhrp import FHRP_HEADERS, fhrp_rows, fhrp_state_findings, has_fhrp_data
 from .l2_discovery import (
     _extract_ip_interfaces,
     _get_interface_description,
@@ -31,6 +38,12 @@ from .l2_discovery import (
     _derive_site,
     _has_collector_data,
 )
+try:
+    from app.collectors.routing_detail import (
+        normalize_route_summary, parse_ospf_interfaces_brief as _parse_ospf_interfaces_brief)
+except ImportError:
+    from collectors.routing_detail import (
+        normalize_route_summary, parse_ospf_interfaces_brief as _parse_ospf_interfaces_brief)
 
 # ---------------------------------------------------------------------------
 # Styling (mirrors L2 discovery report palette)
@@ -147,32 +160,28 @@ def _analyze_l3(inventory_data):
                 # The raw state comes through in the neighbor dict
                 state = n.get("state", "")
                 if state and "full" not in state.lower() and "dr" not in state.lower():
-                    findings.append({
-                        "hostname": hostname,
-                        "severity": "Critical",
-                        "title": "OSPF neighbor not FULL",
-                        "description": (
+                    findings.append(make_finding(
+                        hostname, CRITICAL, "OSPF neighbor not FULL",
+                        (
                             f"Neighbor {n.get('remote_ip', '?')} state: {state}"
                         ),
-                    })
+                    ))
 
         # --- EIGRP stub check ---
         rd_parsed = cd.get("routing_detail", {}).get("parsed", {})
         for en in rd_parsed.get("eigrp_neighbors", []):
             if en.get("stub"):
                 # Stub is informational unless it's unexpected on a core router
-                findings.append({
-                    "hostname": hostname,
-                    "severity": "Info",
-                    "title": "EIGRP stub peer",
-                    "description": (
+                findings.append(make_finding(
+                    hostname, INFO, "EIGRP stub peer",
+                    (
                         f"Neighbor {en.get('neighbor', '?')} on {en.get('interface', '?')} "
                         f"is stub ({en.get('stub_flags', 'unknown flags')})"
                     ),
-                })
+                ))
 
         # --- Route summary: static routes alongside dynamic ---
-        route_summary = rd_parsed.get("route_summary", [])
+        route_summary = normalize_route_summary(rd_parsed.get("route_summary"))
         has_dynamic = False
         has_static = False
         static_count = 0
@@ -192,15 +201,15 @@ def _analyze_l3(inventory_data):
                 static_count = count
 
         if has_dynamic and has_static:
-            findings.append({
-                "hostname": hostname,
-                "severity": "Warning",
-                "title": "Static routes alongside dynamic protocol",
-                "description": (
+            findings.append(make_finding(
+                hostname, WARNING, "Static routes alongside dynamic protocol",
+                (
                     f"{static_count} static route(s) present despite dynamic "
                     f"routing protocol(s) -- potential oversight"
                 ),
-            })
+                aggregate_key=("Static routes present despite dynamic routing "
+                               "protocol(s) -- potential oversight"),
+            ))
 
         # --- /32 host route leak check ---
         routes = l3_parsed.get("routes", [])
@@ -210,44 +219,33 @@ def _analyze_l3(inventory_data):
             if mask in ("32", "255.255.255.255", "/32"):
                 host_routes += 1
         if host_routes > 20:
-            findings.append({
-                "hostname": hostname,
-                "severity": "Warning",
-                "title": "Large number of /32 host routes",
-                "description": (
+            findings.append(make_finding(
+                hostname, WARNING, "Large number of /32 host routes",
+                (
                     f"{host_routes} host routes detected -- "
                     f"possible redistribution leak"
                 ),
-            })
+                aggregate_key="More than 20 host routes -- possible redistribution leak",
+            ))
 
         # --- BGP peer state check ---
         for bp in rd_parsed.get("bgp_summary", []):
             state = bp.get("state", "")
             if state and state != "Established":
-                findings.append({
-                    "hostname": hostname,
-                    "severity": "Critical",
-                    "title": "BGP peer not Established",
-                    "description": (
+                findings.append(make_finding(
+                    hostname, CRITICAL, "BGP peer not Established",
+                    (
                         f"Neighbor {bp.get('neighbor', '?')} "
-                        f"AS {bp.get('asn', '?')} state: {state}"
+                        f"AS {bp.get('asn', '?')} (VRF {bp.get('vrf') or 'default'}) "
+                        f"state: {state}"
                     ),
-                })
+                ))
+
+        # --- Mutual redistribution without a route-map ---
+        findings.extend(_redistribution_findings(hostname, device))
 
         # --- FHRP state check ---
-        hsrp_parsed = cd.get("hsrp", {}).get("parsed", {})
-        for e in hsrp_parsed.get("entries", []):
-            state = e.get("state", "")
-            if state and state.lower() not in ("active", "standby", "listen", ""):
-                findings.append({
-                    "hostname": hostname,
-                    "severity": "Warning",
-                    "title": "FHRP group in unexpected state",
-                    "description": (
-                        f"Interface {e.get('interface', '?')} group {e.get('group', '?')} "
-                        f"VIP {e.get('virtual_ip', '?')} state: {state}"
-                    ),
-                })
+        findings.extend(fhrp_state_findings(hostname, device, make_finding, WARNING))
 
         # --- Collect IP subnets for overlap detection ---
         ip_interfaces = _extract_ip_interfaces(device)
@@ -264,7 +262,7 @@ def _analyze_l3(inventory_data):
                         pass
 
         # --- Collect OSPF neighbors for asymmetry check ---
-        ospf_intfs = rd_parsed.get("ospf_interfaces", [])
+        ospf_intfs = _ospf_interfaces(device.get("collector_data", {}).get("routing_detail", {}))
         if ospf_intfs:
             ospf_neighbors_by_device[hostname] = ospf_intfs
 
@@ -286,15 +284,13 @@ def _analyze_l3(inventory_data):
                 # size subnets are the real problem
                 if net_a == net_b:
                     continue
-                findings.append({
-                    "hostname": host_a,
-                    "severity": "Critical",
-                    "title": "Overlapping IP subnet",
-                    "description": (
+                findings.append(make_finding(
+                    host_a, CRITICAL, "Overlapping IP subnet",
+                    (
                         f"{host_a} {intf_a} ({ip_a}) overlaps with "
                         f"{host_b} {intf_b} ({ip_b})"
                     ),
-                })
+                ))
 
     # --- Asymmetric OSPF cost detection ---
     # Check if interfaces in same area have wildly different costs
@@ -315,16 +311,16 @@ def _analyze_l3(inventory_data):
         costs = [e[2] for e in entries]
         min_cost, max_cost = min(costs), max(costs)
         if max_cost > 0 and min_cost > 0 and max_cost / min_cost > 100:
-            findings.append({
-                "hostname": entries[0][0],
-                "severity": "Warning",
-                "title": f"Asymmetric OSPF costs in area {area}",
-                "description": (
+            findings.append(make_finding(
+                entries[0][0], WARNING, f"Asymmetric OSPF costs in area {area}",
+                (
                     f"Cost range {min_cost}-{max_cost} across "
                     f"{len(entries)} interfaces in area {area}"
                 ),
-            })
+                finding_type="Asymmetric OSPF costs",
+            ))
 
+    overfire_check(findings, len(devices))
     return {"findings": findings}
 
 
@@ -351,18 +347,11 @@ def _build_summary_sheet(wb, analysis, inventory_data):
         total_routes += len(l3.get("routes", []))
 
     # Finding counts
-    critical = sum(1 for f in analysis["findings"] if f.get("severity") == "Critical")
-    warning = sum(1 for f in analysis["findings"] if f.get("severity") == "Warning")
-    info = sum(1 for f in analysis["findings"] if f.get("severity") == "Info")
-
     metrics = [
         ("Total Devices", device_count),
         ("Routed Devices", routed_count),
         ("Total Routes", total_routes),
-        ("Critical Findings", critical),
-        ("Warning Findings", warning),
-        ("Info Findings", info),
-    ]
+    ] + [tuple(r) for r in summary_count_rows(analysis["findings"])]
 
     row = 2
     for metric, value in metrics:
@@ -466,101 +455,353 @@ def _build_routed_interfaces_sheet(wb, inventory_data):
     _finalize(ws, "RoutedInterfaces", len(headers), row - 1)
 
 
+_ROUTE_SUMMARY_HEADERS = ["Device", "Site/Location", "VRF", "Connected", "Static",
+                          "OSPF", "EIGRP", "BGP", "Other", "Total"]
+
+# First letter of an IOS route code -> Route Summary bucket.
+_ROUTE_CODE_BUCKET = {"C": "connected", "L": "connected", "S": "static",
+                      "O": "ospf", "D": "eigrp", "B": "bgp"}
+
+
+def _route_bucket(source):
+    source = str(source).lower()
+    if "connected" in source or source in ("direct", "local"):
+        return "connected"
+    for bucket in ("static", "ospf", "eigrp", "bgp"):
+        if bucket in source:
+            return bucket
+    return "other"
+
+
+def _route_counts_row(hostname, vrf, pairs):
+    """pairs: iterable of (bucket, count)."""
+    counts = {"connected": 0, "static": 0, "ospf": 0, "eigrp": 0, "bgp": 0, "other": 0}
+    total = 0
+    for bucket, count in pairs:
+        if not isinstance(count, int):
+            try:
+                count = int(count)
+            except (ValueError, TypeError):
+                count = 0
+        counts[bucket] += count
+        total += count
+    return [
+        hostname, _derive_site(hostname), vrf,
+        counts["connected"], counts["static"], counts["ospf"],
+        counts["eigrp"], counts["bgp"], counts["other"], total,
+    ]
+
+
+def _route_summary_rows(inventory_data):
+    """Route counts per device and VRF.
+
+    The global table comes from show ip route summary. Other VRFs come from
+    the NX-OS vrf-all summary when present, else are counted from the VRF
+    collector's per-VRF route tables.
+    """
+    rows = []
+    for hostname, device in sorted(inventory_data.get("devices", {}).items()):
+        cd = device.get("collector_data", {})
+        rd_parsed = cd.get("routing_detail", {}).get("parsed", {})
+        route_summary = normalize_route_summary(rd_parsed.get("route_summary"))
+        if route_summary:
+            rows.append(_route_counts_row(hostname, "default", (
+                (_route_bucket(rs.get("source", "")), rs.get("count", 0))
+                for rs in route_summary)))
+
+        vrf_summary = rd_parsed.get("vrf_route_summary") or {}
+        for vrf in sorted(vrf_summary):
+            if vrf == "default":
+                continue
+            rows.append(_route_counts_row(hostname, vrf, (
+                (_route_bucket(e.get("source", "")), e.get("count", 0))
+                for e in vrf_summary[vrf])))
+
+        vrf_routes = cd.get("vrf", {}).get("parsed", {}).get("vrf_routes") or {}
+        for vrf in sorted(vrf_routes):
+            if vrf in vrf_summary or vrf == "default":
+                continue
+            rows.append(_route_counts_row(hostname, vrf, (
+                (_ROUTE_CODE_BUCKET.get(str(r.get("protocol", ""))[:1], "other"), 1)
+                for r in vrf_routes[vrf])))
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Routing processes, redistribution and scale
+# ---------------------------------------------------------------------------
+_DYNAMIC_PROTOCOLS = {"ospf", "ospfv3", "eigrp", "bgp", "isis", "rip"}
+_PROCESS_PROTOCOLS = {"ospf", "ospfv3", "eigrp", "bgp", "isis"}
+
+_ROUTER_LINE_RE = re.compile(r"^router\s+(\S+)(?:\s+(\S+))?")
+_REDIST_LINE_RE = re.compile(r"^\s+redistribute\s+(\S+)(?:\s+(\S+))?(.*)$")
+
+
+def _proto_key(proto, process=""):
+    proto = str(proto or "").lower()
+    if proto not in _PROCESS_PROTOCOLS or not process:
+        return proto
+    return f"{proto} {str(process).lower()}"
+
+
+def _norm_key(name):
+    parts = str(name or "").lower().split()
+    if not parts:
+        return ""
+    return _proto_key(parts[0], parts[1] if len(parts) > 1 else "")
+
+
+def _config_redistribution(config):
+    """{(to, from): route_map} from 'redistribute' lines in running-config.
+
+    show ip protocols does not print route-maps for EIGRP or BGP
+    redistribution, so the config, when collected, fills them in.
+    """
+    result = {}
+    current = None
+    for line in (config or "").splitlines():
+        if not line.strip() or line.lstrip().startswith("!"):
+            continue
+        if not line[0].isspace():
+            m = _ROUTER_LINE_RE.match(line)
+            current = _proto_key(m.group(1), m.group(2)) if m else None
+            continue
+        if current is None:
+            continue
+        # Named EIGRP: the AS number is on the address-family line.
+        asn = re.search(r"autonomous-system\s+(\d+)", line)
+        if asn and current.startswith("eigrp"):
+            current = f"eigrp {asn.group(1)}"
+            continue
+        m = _REDIST_LINE_RE.match(line)
+        if not m:
+            continue
+        proto = m.group(1).lower()
+        second = m.group(2) or ""
+        process = second if second and not second.startswith(("route-map", "metric", "subnets")) else ""
+        rm = re.search(r"route-map\s+(\S+)", line)
+        result[(current, _proto_key(proto, process))] = rm.group(1) if rm else ""
+    return result
+
+
+def _device_redistribution(device):
+    """Redistribution points on one device: list of dicts with to, from,
+    route_map, metric, filter, source."""
+    cd = device.get("collector_data", {})
+    processes = cd.get("l3_routing", {}).get("parsed", {}).get("ip_protocols") or []
+    config = cd.get("config", {}).get("parsed", {}).get("config", "")
+    from_config = _config_redistribution(config) if config else {}
+    points = []
+    for proc in processes:
+        to = _norm_key(proc.get("name"))
+        for red in proc.get("redistribute") or []:
+            src = _norm_key(red.get("from"))
+            route_map = red.get("route_map") or from_config.get((to, src), "")
+            points.append({
+                "to": to,
+                "from": src,
+                "route_map": route_map,
+                "metric": red.get("metric", ""),
+                "filter": proc.get("outgoing_filter", ""),
+                "source": ("show ip protocols + config"
+                           if (to, src) in from_config else "show ip protocols"),
+            })
+    return points, bool(config)
+
+
+_REDISTRIBUTION_HEADERS = ["Device", "Site/Location", "Into Protocol",
+                           "From Protocol", "Route-Map", "Metric",
+                           "Outbound Filter", "Source"]
+
+
+def _redistribution_rows(inventory_data):
+    rows = []
+    for hostname, device in sorted(inventory_data.get("devices", {}).items()):
+        points, _ = _device_redistribution(device)
+        site = _derive_site(hostname)
+        for p in points:
+            rows.append([hostname, site, p["to"], p["from"], p["route_map"],
+                         p["metric"], p["filter"], p["source"]])
+    return rows
+
+
+_PROCESS_HEADERS = ["Device", "Site/Location", "Protocol", "Process / AS",
+                    "Router ID", "Networks", "Passive Interfaces", "Distance",
+                    "Maximum Paths", "Redistributes From"]
+
+
+def _routing_process_rows(inventory_data):
+    rows = []
+    for hostname, device in sorted(inventory_data.get("devices", {}).items()):
+        processes = (device.get("collector_data", {}).get("l3_routing", {})
+                     .get("parsed", {}).get("ip_protocols") or [])
+        site = _derive_site(hostname)
+        for proc in processes:
+            rows.append([
+                hostname, site,
+                proc.get("protocol", ""),
+                proc.get("process", ""),
+                proc.get("router_id", ""),
+                "\n".join(proc.get("networks") or []),
+                ", ".join(proc.get("passive_interfaces") or []),
+                proc.get("distance", ""),
+                proc.get("maximum_paths", ""),
+                ", ".join(r.get("from", "") for r in proc.get("redistribute") or []),
+            ])
+    return rows
+
+
+_SCALE_HEADERS = ["Device", "Site/Location", "Protocol", "Process / AS", "VRF",
+                  "Scope", "Router ID", "Entries", "Detail"]
+
+
+def _routing_scale_rows(inventory_data):
+    """LSDB size per OSPF area and process, EIGRP topology size per AS."""
+    rows = []
+    for hostname, device in sorted(inventory_data.get("devices", {}).items()):
+        rd = (device.get("collector_data", {}).get("routing_detail", {})
+              .get("parsed", {}))
+        site = _derive_site(hostname)
+        for e in rd.get("ospf_db_summary") or []:
+            scope = (f"Area {e.get('area', '')}" if e.get("scope") == "area"
+                     else "Process total")
+            detail = ", ".join(f"{k} {v}" for k, v in (e.get("counts") or {}).items()
+                               if v)
+            rows.append([hostname, site, "OSPF LSAs", e.get("process_id", ""),
+                         e.get("vrf", "default"), scope, e.get("router_id", ""),
+                         e.get("total", 0), detail])
+        for e in rd.get("eigrp_topology_summary") or []:
+            detail = (f"{e.get('neighbors', 0)} neighbor(s) on "
+                      f"{e.get('interfaces', 0)} interface(s)")
+            if e.get("pending_replies"):
+                detail += f", {e['pending_replies']} pending replies"
+            rows.append([hostname, site, "EIGRP topology", e.get("as_number", ""),
+                         e.get("vrf", "default"), "Topology table",
+                         e.get("router_id", ""), e.get("routes", 0), detail])
+    return rows
+
+
+def _redistribution_findings(hostname, device):
+    """Mutual redistribution between two dynamic protocols with no
+    route-map in either direction: routes learned from A go into B and can
+    come back into A with a better administrative distance or metric."""
+    points, have_config = _device_redistribution(device)
+    edges = {}
+    for p in points:
+        if p["to"].split(" ")[0] in _DYNAMIC_PROTOCOLS and \
+                p["from"].split(" ")[0] in _DYNAMIC_PROTOCOLS:
+            edges[(p["to"], p["from"])] = p["route_map"]
+    findings = []
+    done = set()
+    for (a, b), rm_ab in sorted(edges.items()):
+        if a == b or (b, a) not in edges or frozenset((a, b)) in done:
+            continue
+        done.add(frozenset((a, b)))
+        if rm_ab or edges[(b, a)]:
+            continue
+        note = "" if have_config else (
+            " EIGRP and BGP route-maps are not shown by show ip protocols;"
+            " collect running-config to confirm.")
+        findings.append(make_finding(
+            hostname, WARNING, "Mutual redistribution without route-map",
+            (f"{a} redistributes {b} and {b} redistributes {a} with no "
+             f"route-map in either direction. Without tagging or filtering, "
+             f"routes can feed back into the protocol they came from and "
+             f"loop.{note}"),
+        ))
+    return findings
+
+
+def _has_ip_protocols(inventory_data):
+    return any(
+        (d.get("collector_data", {}).get("l3_routing", {}).get("parsed", {})
+         .get("ip_protocols"))
+        for d in inventory_data.get("devices", {}).values())
+
+
+def _build_rows_sheet(wb, title, table_name, headers, rows):
+    ws = wb.create_sheet(title=title)
+    _write_header_row(ws, headers)
+    row = 2
+    for values in rows:
+        _write_row(ws, row, values)
+        row += 1
+    _finalize(ws, table_name, len(headers), row - 1)
+
+
 def _build_route_summary_sheet(wb, inventory_data):
     ws = wb.create_sheet(title="Route Summary")
-    headers = ["Device", "Site/Location", "Connected", "Static",
-               "OSPF", "EIGRP", "BGP", "Other", "Total"]
+    headers = _ROUTE_SUMMARY_HEADERS
     _write_header_row(ws, headers)
 
     row = 2
-    for hostname, device in sorted(inventory_data.get("devices", {}).items()):
-        rd_parsed = device.get("collector_data", {}).get("routing_detail", {}).get("parsed", {})
-        route_summary = rd_parsed.get("route_summary", [])
-        if not route_summary:
-            continue
-
-        site = _derive_site(hostname)
-        counts = {"connected": 0, "static": 0, "ospf": 0, "eigrp": 0, "bgp": 0, "other": 0}
-        total = 0
-
-        for rs in route_summary:
-            source = str(rs.get("source", "")).lower()
-            count = rs.get("count", 0)
-            if not isinstance(count, int):
-                try:
-                    count = int(count)
-                except (ValueError, TypeError):
-                    count = 0
-
-            if "connected" in source:
-                counts["connected"] += count
-            elif "static" in source:
-                counts["static"] += count
-            elif "ospf" in source:
-                counts["ospf"] += count
-            elif "eigrp" in source:
-                counts["eigrp"] += count
-            elif "bgp" in source:
-                counts["bgp"] += count
-            else:
-                counts["other"] += count
-            total += count
-
-        _write_row(ws, row, [
-            hostname, site,
-            counts["connected"], counts["static"], counts["ospf"],
-            counts["eigrp"], counts["bgp"], counts["other"], total,
-        ])
+    for values in _route_summary_rows(inventory_data):
+        _write_row(ws, row, values)
         row += 1
 
     _finalize(ws, "RouteSummary", len(headers), row - 1)
 
 
-def _build_ospf_topology_sheet(wb, inventory_data):
-    ws = wb.create_sheet(title="OSPF Topology")
-    headers = ["Device", "Site/Location", "Process ID", "Router ID",
-               "Area", "Interface", "Cost", "State", "Neighbors"]
-    _write_header_row(ws, headers)
+_OSPF_TOPOLOGY_HEADERS = ["Device", "Site/Location", "Process ID", "Router ID",
+                          "Area", "Interface", "Cost", "State", "Neighbors"]
 
-    row = 2
+
+def _ospf_interfaces(rd):
+    """OSPF interface rows, re-read from the raw brief output when it was
+    saved. Scans parsed before the brief parser was fixed stored rows with
+    every column from Area onward shifted one place."""
+    raw = (rd.get("raw") or {}).get("show ip ospf interface brief", "")
+    if raw:
+        rows = _parse_ospf_interfaces_brief(raw)
+        if rows:
+            return rows
+    return rd.get("parsed", {}).get("ospf_interfaces", []) or []
+
+
+def _ospf_topology_rows(inventory_data):
+    rows = []
     for hostname, device in sorted(inventory_data.get("devices", {}).items()):
-        rd_parsed = device.get("collector_data", {}).get("routing_detail", {}).get("parsed", {})
-        ospf_procs = rd_parsed.get("ospf_processes", [])
-        ospf_intfs = rd_parsed.get("ospf_interfaces", [])
-        site = _derive_site(hostname)
-
+        rd = device.get("collector_data", {}).get("routing_detail", {})
+        rd_parsed = rd.get("parsed", {})
+        ospf_procs = rd_parsed.get("ospf_processes", []) or []
+        ospf_intfs = _ospf_interfaces(rd)
         if not ospf_procs and not ospf_intfs:
             continue
-
-        # Build process/area lookup
-        proc_id = ""
-        router_id = ""
-        proc_areas = []
-        if ospf_procs:
-            p = ospf_procs[0]
-            proc_id = p.get("process_id", "")
-            router_id = p.get("router_id", "")
-            proc_areas = p.get("areas", [])
+        site = _derive_site(hostname)
+        router_ids = {str(p.get("process_id", "")): p.get("router_id", "")
+                      for p in ospf_procs}
+        first = ospf_procs[0] if ospf_procs else {}
 
         if ospf_intfs:
             for oi in ospf_intfs:
-                _write_row(ws, row, [
-                    hostname, site, proc_id, router_id,
+                proc_id = str(oi.get("process") or first.get("process_id", ""))
+                rows.append([
+                    hostname, site, proc_id,
+                    router_ids.get(proc_id, first.get("router_id", "")),
                     oi.get("area", ""),
                     oi.get("interface", ""),
                     oi.get("cost", ""),
                     oi.get("state", ""),
                     oi.get("neighbors", oi.get("nbrs_full", "")),
                 ])
-                row += 1
-        elif ospf_procs:
+        else:
             # No interface detail, just list process + areas
-            for area in proc_areas:
-                _write_row(ws, row, [
-                    hostname, site, proc_id, router_id,
-                    area, "", "", "", "",
-                ])
-                row += 1
+            for p in ospf_procs:
+                for area in p.get("areas", []):
+                    rows.append([hostname, site, p.get("process_id", ""),
+                                 p.get("router_id", ""), area, "", "", "", ""])
+    return rows
+
+
+def _build_ospf_topology_sheet(wb, inventory_data):
+    ws = wb.create_sheet(title="OSPF Topology")
+    headers = _OSPF_TOPOLOGY_HEADERS
+    _write_header_row(ws, headers)
+
+    row = 2
+    for values in _ospf_topology_rows(inventory_data):
+        _write_row(ws, row, values)
+        row += 1
 
     _finalize(ws, "OSPFTopology", len(headers), row - 1)
 
@@ -715,66 +956,116 @@ def _build_vrf_sheet(wb, inventory_data):
 
 def _build_fhrp_sheet(wb, inventory_data):
     ws = wb.create_sheet(title="FHRP Status")
-    headers = ["Device", "Site/Location", "Interface", "Group",
-               "Priority", "State", "Virtual IP"]
+    headers = FHRP_HEADERS
     _write_header_row(ws, headers)
 
     row = 2
-    for hostname, device in sorted(inventory_data.get("devices", {}).items()):
-        hsrp_parsed = device.get("collector_data", {}).get("hsrp", {}).get("parsed", {})
-        entries = hsrp_parsed.get("entries", [])
-        if not entries:
-            continue
-
-        site = _derive_site(hostname)
-        for e in entries:
-            _write_row(ws, row, [
-                hostname, site,
-                e.get("interface", ""),
-                e.get("group", ""),
-                e.get("priority", ""),
-                e.get("state", ""),
-                e.get("virtual_ip", ""),
-            ])
-            row += 1
+    for row_data in fhrp_rows(inventory_data, _derive_site):
+        _write_row(ws, row, row_data)
+        row += 1
 
     _finalize(ws, "FHRPStatus", len(headers), row - 1)
 
 
-def _build_findings_sheet(wb, analysis):
-    ws = wb.create_sheet(title="Findings")
-    headers = ["Device", "Site/Location", "Severity", "Finding", "Details"]
+def _collect_collector_errors(inventory_data):
+    """Return (hostname, collector, kind, error) for every rejected command.
+
+    A device that rejected a command produces no rows in the data sheets,
+    which is indistinguishable from a device that simply had nothing to
+    report. This makes the difference visible. Kind separates commands the
+    platform does not have (not applicable) from ones that should have
+    worked (failed, unauthorized); real failures sort first.
+    """
+    try:
+        from app.collectors.base import command_error_kinds
+        from app.collectors.errors import (
+            KIND_LABELS, FAILED, NOT_APPLICABLE, error_kind)
+    except ImportError:
+        from collectors.base import command_error_kinds
+        from collectors.errors import (
+            KIND_LABELS, FAILED, NOT_APPLICABLE, error_kind)
+
+    rows = []
+    for hostname, device in sorted(inventory_data.get("devices", {}).items()):
+        for cname, cdata in sorted(device.get("collector_data", {}).items()):
+            parsed = cdata.get("parsed", {}) or {}
+            errors = parsed.get("command_errors") or {}
+            kinds = command_error_kinds(parsed)
+            if parsed.get("collector_failed") and not errors:
+                # Older scans: only the first error line was kept.
+                error = parsed.get("collector_error", "")
+                kind = error_kind(error) or FAILED
+                rows.append((hostname, cname, KIND_LABELS[kind], error))
+                continue
+            # A partially failed collector still produced data, but the
+            # rejected commands' sheets are silently short.
+            for cmd, reason in errors.items():
+                kind = kinds.get(cmd) or FAILED
+                rows.append((hostname, cname, KIND_LABELS.get(kind, kind),
+                             f"{cmd}: {reason}"))
+    na_label = KIND_LABELS[NOT_APPLICABLE]
+    rows.sort(key=lambda r: r[2] == na_label)
+    return rows
+
+
+def _build_collection_errors_sheet(wb, inventory_data):
+    rows = _collect_collector_errors(inventory_data)
+    if not rows:
+        return
+    ws = wb.create_sheet(title="Collection Errors")
+    headers = ["Device", "Site/Location", "Collector", "Kind", "Error"]
     _write_header_row(ws, headers)
+    for idx, (hostname, cname, kind, error) in enumerate(rows, start=2):
+        _write_row(ws, idx, [hostname, _derive_site(hostname), cname, kind,
+                             error])
+    _finalize(ws, "CollectionErrors", len(headers), len(rows) + 1)
 
+
+FINDINGS_DETAIL_HEADERS = ["Device", "Site/Location", "Severity", "Finding", "Details"]
+
+
+def findings_detail_rows(findings):
+    return [[f.get("hostname", ""), _derive_site(f.get("hostname", "")),
+             f.get("severity", "Info"), f["title"], f["description"]]
+            for f in findings]
+
+
+def _write_severity_sheet(wb, title, table_name, headers, rows, sev_col):
+    ws = wb.create_sheet(title=title)
+    _write_header_row(ws, headers)
     row = 2
-    for finding in analysis["findings"]:
-        hostname = finding.get("hostname", "")
-        severity = finding.get("severity", "Info")
-        _write_row(ws, row, [
-            hostname,
-            _derive_site(hostname),
-            severity,
-            finding["title"],
-            finding["description"],
-        ])
-        # Color-code by severity
-        if severity == "Critical":
+    for values in rows:
+        _write_row(ws, row, values)
+        severity = values[sev_col]
+        style = {"Critical": (_CRITICAL_FONT, _CRITICAL_FILL),
+                 "Warning": (_WARNING_FONT, _WARNING_FILL)}.get(severity)
+        if style:
             for col in range(1, len(headers) + 1):
                 cell = ws.cell(row=row, column=col)
-                cell.font = _CRITICAL_FONT
-                cell.fill = _CRITICAL_FILL
-        elif severity == "Warning":
-            for col in range(1, len(headers) + 1):
-                cell = ws.cell(row=row, column=col)
-                cell.font = _WARNING_FONT
-                cell.fill = _WARNING_FILL
+                cell.font, cell.fill = style
         row += 1
-
-    if not analysis["findings"]:
+    if not rows:
         ws.cell(row=2, column=1, value="No findings detected.")
         row = 3
+    _finalize(ws, table_name, len(headers), row - 1)
+    return ws
 
-    _finalize(ws, "L3Findings", len(headers), row - 1)
+
+def write_findings_sheets(wb, findings, table_prefix):
+    """Aggregated Findings sheet plus the per-device Findings (detail) sheet."""
+    _write_severity_sheet(wb, "Findings", table_prefix, AGGREGATE_HEADERS,
+                          aggregate_rows(findings), 0)
+    _write_severity_sheet(wb, DETAIL_SHEET, table_prefix + "Detail",
+                          FINDINGS_DETAIL_HEADERS, findings_detail_rows(findings), 2)
+
+
+def findings_tabular_sheets(sheets, findings):
+    sheets["Findings"] = (list(AGGREGATE_HEADERS), aggregate_rows(findings))
+    sheets[DETAIL_SHEET] = (list(FINDINGS_DETAIL_HEADERS), findings_detail_rows(findings))
+
+
+def _build_findings_sheet(wb, analysis):
+    write_findings_sheets(wb, analysis["findings"], "L3Findings")
 
 
 # ---------------------------------------------------------------------------
@@ -813,9 +1104,23 @@ class RoutingSummaryReport(BaseReport):
         if _has_collector_data(inventory_data, "routing_detail"):
             _build_route_summary_sheet(wb, inventory_data)
 
+        # Routing Scale: LSDB / EIGRP topology size
+        scale_rows = _routing_scale_rows(inventory_data)
+        if scale_rows:
+            _build_rows_sheet(wb, "Routing Scale", "RoutingScale",
+                              _SCALE_HEADERS, scale_rows)
+
         # Tab 6: OSPF Topology (if routing_detail data exists)
         if _has_collector_data(inventory_data, "routing_detail"):
             _build_ospf_topology_sheet(wb, inventory_data)
+
+        # Routing processes and redistribution (from show ip protocols)
+        if _has_ip_protocols(inventory_data):
+            _build_rows_sheet(wb, "Routing Processes", "RoutingProcesses",
+                              _PROCESS_HEADERS, _routing_process_rows(inventory_data))
+            _build_rows_sheet(wb, "Redistribution", "Redistribution",
+                              _REDISTRIBUTION_HEADERS,
+                              _redistribution_rows(inventory_data))
 
         # Tab 7: IP Address Audit (if interfaces data exists)
         if _has_collector_data(inventory_data, "interfaces"):
@@ -830,11 +1135,14 @@ class RoutingSummaryReport(BaseReport):
             _build_vrf_sheet(wb, inventory_data)
 
         # Tab 10: FHRP Status (if hsrp data exists)
-        if _has_collector_data(inventory_data, "hsrp"):
+        if _has_collector_data(inventory_data, "hsrp") or has_fhrp_data(inventory_data):
             _build_fhrp_sheet(wb, inventory_data)
 
         # Tab 11: Findings
         _build_findings_sheet(wb, analysis)
+
+        # Tab 12: Collection Errors (only when something failed)
+        _build_collection_errors_sheet(wb, inventory_data)
 
         buf = io.BytesIO()
         wb.save(buf)
@@ -856,20 +1164,13 @@ class RoutingSummaryReport(BaseReport):
                 routed_count += 1
             total_routes += len(l3.get("routes", []))
 
-        critical = sum(1 for f in analysis["findings"] if f.get("severity") == "Critical")
-        warning = sum(1 for f in analysis["findings"] if f.get("severity") == "Warning")
-        info = sum(1 for f in analysis["findings"] if f.get("severity") == "Info")
-
         sheets["Summary"] = (
             ["Metric", "Value"],
             [
                 ["Total Devices", len(devices)],
                 ["Routed Devices", routed_count],
                 ["Total Routes", total_routes],
-                ["Critical Findings", critical],
-                ["Warning Findings", warning],
-                ["Info Findings", info],
-            ],
+            ] + summary_count_rows(analysis["findings"]),
         )
 
         # --- Protocol Neighbors ---
@@ -945,83 +1246,23 @@ class RoutingSummaryReport(BaseReport):
 
         # --- Route Summary (conditional) ---
         if _has_collector_data(inventory_data, "routing_detail"):
-            rs_headers = ["Device", "Site/Location", "Connected", "Static",
-                          "OSPF", "EIGRP", "BGP", "Other", "Total"]
-            rs_rows = []
-            for hostname, device in sorted(devices.items()):
-                rd_parsed = device.get("collector_data", {}).get("routing_detail", {}).get("parsed", {})
-                route_summary = rd_parsed.get("route_summary", [])
-                if not route_summary:
-                    continue
-                site = _derive_site(hostname)
-                counts = {"connected": 0, "static": 0, "ospf": 0,
-                          "eigrp": 0, "bgp": 0, "other": 0}
-                total = 0
-                for rs in route_summary:
-                    source = str(rs.get("source", "")).lower()
-                    count = rs.get("count", 0)
-                    if not isinstance(count, int):
-                        try:
-                            count = int(count)
-                        except (ValueError, TypeError):
-                            count = 0
-                    if "connected" in source:
-                        counts["connected"] += count
-                    elif "static" in source:
-                        counts["static"] += count
-                    elif "ospf" in source:
-                        counts["ospf"] += count
-                    elif "eigrp" in source:
-                        counts["eigrp"] += count
-                    elif "bgp" in source:
-                        counts["bgp"] += count
-                    else:
-                        counts["other"] += count
-                    total += count
-                rs_rows.append([
-                    hostname, site,
-                    counts["connected"], counts["static"], counts["ospf"],
-                    counts["eigrp"], counts["bgp"], counts["other"], total,
-                ])
-            sheets["Route Summary"] = (rs_headers, rs_rows)
+            sheets["Route Summary"] = (list(_ROUTE_SUMMARY_HEADERS),
+                                       _route_summary_rows(inventory_data))
 
         # --- OSPF Topology (conditional) ---
         if _has_collector_data(inventory_data, "routing_detail"):
-            ospf_headers = ["Device", "Site/Location", "Process ID", "Router ID",
-                            "Area", "Interface", "Cost", "State", "Neighbors"]
-            ospf_rows = []
-            for hostname, device in sorted(devices.items()):
-                rd_parsed = device.get("collector_data", {}).get("routing_detail", {}).get("parsed", {})
-                ospf_procs = rd_parsed.get("ospf_processes", [])
-                ospf_intfs = rd_parsed.get("ospf_interfaces", [])
-                site = _derive_site(hostname)
-                if not ospf_procs and not ospf_intfs:
-                    continue
-                proc_id = ""
-                router_id = ""
-                proc_areas = []
-                if ospf_procs:
-                    p = ospf_procs[0]
-                    proc_id = p.get("process_id", "")
-                    router_id = p.get("router_id", "")
-                    proc_areas = p.get("areas", [])
-                if ospf_intfs:
-                    for oi in ospf_intfs:
-                        ospf_rows.append([
-                            hostname, site, proc_id, router_id,
-                            oi.get("area", ""),
-                            oi.get("interface", ""),
-                            oi.get("cost", ""),
-                            oi.get("state", ""),
-                            oi.get("neighbors", oi.get("nbrs_full", "")),
-                        ])
-                elif ospf_procs:
-                    for area in proc_areas:
-                        ospf_rows.append([
-                            hostname, site, proc_id, router_id,
-                            area, "", "", "", "",
-                        ])
-            sheets["OSPF Topology"] = (ospf_headers, ospf_rows)
+            sheets["OSPF Topology"] = (list(_OSPF_TOPOLOGY_HEADERS),
+                                       _ospf_topology_rows(inventory_data))
+
+        scale_rows = _routing_scale_rows(inventory_data)
+        if scale_rows:
+            sheets["Routing Scale"] = (list(_SCALE_HEADERS), scale_rows)
+
+        if _has_ip_protocols(inventory_data):
+            sheets["Routing Processes"] = (list(_PROCESS_HEADERS),
+                                           _routing_process_rows(inventory_data))
+            sheets["Redistribution"] = (list(_REDISTRIBUTION_HEADERS),
+                                        _redistribution_rows(inventory_data))
 
         # --- IP Address Audit (conditional) ---
         if _has_collector_data(inventory_data, "interfaces"):
@@ -1137,39 +1378,11 @@ class RoutingSummaryReport(BaseReport):
             sheets["VRF Summary"] = (vrf_headers, vrf_rows)
 
         # --- FHRP Status (conditional) ---
-        if _has_collector_data(inventory_data, "hsrp"):
-            fhrp_headers = ["Device", "Site/Location", "Interface", "Group",
-                            "Priority", "State", "Virtual IP"]
-            fhrp_rows = []
-            for hostname, device in sorted(devices.items()):
-                hsrp_parsed = device.get("collector_data", {}).get("hsrp", {}).get("parsed", {})
-                entries = hsrp_parsed.get("entries", [])
-                if not entries:
-                    continue
-                site = _derive_site(hostname)
-                for e in entries:
-                    fhrp_rows.append([
-                        hostname, site,
-                        e.get("interface", ""),
-                        e.get("group", ""),
-                        e.get("priority", ""),
-                        e.get("state", ""),
-                        e.get("virtual_ip", ""),
-                    ])
-            sheets["FHRP Status"] = (fhrp_headers, fhrp_rows)
+        if _has_collector_data(inventory_data, "hsrp") or has_fhrp_data(inventory_data):
+            sheets["FHRP Status"] = (list(FHRP_HEADERS),
+                                     fhrp_rows(inventory_data, _derive_site))
 
-        # --- Findings ---
-        findings_headers = ["Device", "Site/Location", "Severity", "Finding", "Details"]
-        findings_rows = []
-        for finding in analysis["findings"]:
-            hostname = finding.get("hostname", "")
-            findings_rows.append([
-                hostname,
-                _derive_site(hostname),
-                finding.get("severity", "Info"),
-                finding["title"],
-                finding["description"],
-            ])
-        sheets["Findings"] = (findings_headers, findings_rows)
+        # --- Findings (aggregated) and Findings (detail) ---
+        findings_tabular_sheets(sheets, analysis["findings"])
 
         return sheets

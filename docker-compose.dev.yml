@@ -1,0 +1,31 @@
+# Development overlay: bind-mount source instead of using the baked image copy.
+#
+# The base compose file mounts only config, logs and inventories, so app code
+# and templates come from the image and a rebuild is needed to see any change.
+# That is right for deployment and painful for iteration.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# Then a code or template change needs only:
+#   docker compose restart wiremap
+#
+# A rebuild is still required when requirements.txt changes, since dependencies
+# are installed into the image.
+services:
+  wiremap:
+    volumes:
+      - ./logs:/app/logs
+      - ./config:/app/config
+      - ./inventories:/app/inventories
+      - ./app:/app
+      - ./templates:/app/templates
+      # VERSION lives at the repo root but app.py reads /app/VERSION, which
+      # the ./app mount above would otherwise hide.
+      - ./VERSION:/app/VERSION:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      # Deliberately no FLASK_DEBUG here. It would arm the Werkzeug
+      # interactive debugger, which is remote code execution for anyone who
+      # can reach the published port -- and compose publishes 8888 on all
+      # interfaces, on a host that sits on customer networks.

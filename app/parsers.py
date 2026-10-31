@@ -4,7 +4,15 @@ Extract neighbor information from show command output
 """
 
 import logging
+import re
 from typing import List, Dict, Optional
+
+try:
+    from app.identity import looks_like_mac, normalize_hostname, split_device_id
+    from app.ifname import canonical_ifname
+except ImportError:
+    from identity import looks_like_mac, normalize_hostname, split_device_id
+    from ifname import canonical_ifname
 
 logger = logging.getLogger(__name__)
 
@@ -23,29 +31,46 @@ def parse_cdp_neighbors_detail(output: str) -> List[Dict[str, str]]:
     """
     neighbors = []
     current = {}
-    
+    in_mgmt = False
+
     for line in output.splitlines():
         line_stripped = line.strip()
-        
+
         # New neighbor entry
         if line_stripped.startswith("Device ID:"):
             if current:
                 neighbors.append(current)
                 current = {}
+            in_mgmt = False
             device_id = line_stripped.split("Device ID:")[1].strip()
+            # NX-OS and MDS report NAME(SERIAL); keep the serial apart so the
+            # name matches the device's own prompt.
+            device_id, serial = split_device_id(device_id)
             # Sometimes includes domain, strip it
             current["remote_device"] = device_id.split('.')[0]
-        
+            if serial:
+                current["remote_serial"] = serial
+
+        # IOS lists "Management address(es):", NX-OS "Mgmt address(es):".
+        elif line_stripped.lower().startswith(("management address",
+                                               "mgmt address")):
+            in_mgmt = True
+        elif line_stripped.lower().startswith(("entry address", "interface",
+                                               "platform:")):
+            in_mgmt = False
+
         # IP address (multiple formats: "IP address:", "IPv4 Address:", etc.)
-        elif "IP address:" in line_stripped or "IPv4 Address:" in line_stripped:
+        if "IP address:" in line_stripped or "IPv4 Address:" in line_stripped:
             # Handle both "IP address: X.X.X.X" and "IPv4 Address: X.X.X.X"
             if "IPv4 Address:" in line_stripped:
                 ip = line_stripped.split("IPv4 Address:")[1].strip()
             else:
                 ip = line_stripped.split("IP address:")[1].strip()
-            
+
             if ip and not ip.startswith("("):  # Skip "(not available)" or similar
                 current["remote_ip"] = ip
+                if in_mgmt:
+                    current.setdefault("remote_mgmt_ip", ip)
         
         # Platform and capabilities
         elif line_stripped.startswith("Platform:"):
@@ -82,96 +107,179 @@ def parse_cdp_neighbors_detail(output: str) -> List[Dict[str, str]]:
     return neighbors
 
 
+# Every field label `show lldp neighbors detail` prints on IOS, IOS-XE and
+# NX-OS. System Description is free text spanning several lines, so it can
+# only be ended by recognising the start of the next field.
+_LLDP_FIELD_LABELS = (
+    "Local Intf", "Local Port id", "Chassis id", "Port id",
+    "Port Description", "System Name", "System Description",
+    "Time remaining", "System Capabilities", "Enabled Capabilities",
+    "Management Address", "Auto Negotiation", "Physical media",
+    "Media Attachment Unit", "Vlan ID", "Peer Source MAC", "Total entries",
+    "MED Information", "Unknown TLV", "Capability codes",
+)
+
+_LLDP_SEPARATOR = re.compile(r"^-{5,}$")
+_LLDP_MGMT_IP = re.compile(r"^IP(?:v4)?:\s*(\S+)", re.I)
+
+# Model strings found in LLDP system descriptions. LLDP has no platform TLV,
+# so this is the only place a model can come from when the chassis id is a MAC.
+_LLDP_MODEL_PATTERNS = (
+    re.compile(r"running on an? Arista(?: Networks)? (\S+)", re.I),
+    re.compile(r"Cisco IOS Software(?: \[[^\]]*\])?, ([A-Za-z]*\d[\w-]*) Software"),
+    re.compile(r"\b(?i:cisco) ((?:WS-|AIR-|IE-)?[A-Za-z]+\d[\w-]*)"),
+    re.compile(r"Juniper Networks, Inc\. (\S+)"),
+    re.compile(r"Palo Alto Networks (PA-\S+)"),
+)
+
+
+def _lldp_label(line):
+    for label in _LLDP_FIELD_LABELS:
+        if line.startswith(label):
+            return label
+    return None
+
+
+def _lldp_value(line):
+    return line.split(":", 1)[1].strip() if ":" in line else ""
+
+
+def _split_lldp_records(output):
+    """Split detail output into one list of lines per neighbour.
+
+    The ---- separator is authoritative where present. Within a chunk a
+    second Chassis id or Local Intf still starts a new record, so output
+    without separators (NX-OS) splits correctly too.
+    """
+    records = []
+    current = []
+    has_chassis = False
+    for raw in output.splitlines():
+        line = raw.strip()
+        if _LLDP_SEPARATOR.match(line):
+            if current:
+                records.append(current)
+            current, has_chassis = [], False
+            continue
+        starts_record = (
+            line.startswith("Chassis id:")
+            or (line.startswith("Local Intf:") and not
+                line.startswith("Local Intf service"))
+        )
+        if starts_record and has_chassis:
+            records.append(current)
+            current, has_chassis = [], False
+        if line.startswith("Chassis id:"):
+            has_chassis = True
+        current.append(line)
+    if current:
+        records.append(current)
+    return records
+
+
+def _platform_from_lldp_description(description):
+    if not description:
+        return ""
+    for pattern in _LLDP_MODEL_PATTERNS:
+        match = pattern.search(description)
+        if match:
+            model = match.group(1).rstrip(",;")
+            if model and not looks_like_mac(model):
+                return model
+    return ""
+
+
+def _parse_lldp_record(lines):
+    fields = {}
+    description = None
+    in_description = False
+    in_mgmt = False
+
+    for line in lines:
+        label = _lldp_label(line)
+        if label:
+            in_description = False
+            in_mgmt = False
+        elif in_description:
+            if line:
+                description.append(line)
+            continue
+        elif in_mgmt:
+            match = _LLDP_MGMT_IP.match(line)
+            if match and "remote_ip" not in fields:
+                fields["remote_ip"] = match.group(1)
+            continue
+        else:
+            continue
+
+        value = _lldp_value(line)
+        if label == "Local Intf":
+            # IOS-XE 17.15 adds "Local Intf service instance: -", which is
+            # not an interface.
+            if line.startswith("Local Intf:") and value:
+                fields["local_intf"] = value
+        elif label == "Local Port id":
+            if value:
+                fields.setdefault("local_intf", value)
+        elif label == "Chassis id":
+            fields["chassis_id"] = value
+        elif label == "Port id":
+            fields["remote_intf"] = value
+        elif label == "System Name":
+            name, serial = split_device_id(value)
+            # Strip domain if present
+            fields["remote_device"] = name.split('.')[0] if name else name
+            if serial:
+                fields["remote_serial"] = serial
+        elif label == "System Description":
+            description = [value] if value else []
+            in_description = True
+        elif label == "System Capabilities":
+            fields["remote_capabilities"] = value
+        elif label == "Management Address":
+            if line.startswith(("Management Addresses:", "Management Address:")):
+                in_mgmt = True
+                # NX-OS puts the address on the same line.
+                if _is_ip(value) and "remote_ip" not in fields:
+                    fields["remote_ip"] = value
+
+    if description is not None:
+        fields["system_description"] = " ".join(description)
+    # LLDP only ever carries a management address, never a link address.
+    if fields.get("remote_ip"):
+        fields["remote_mgmt_ip"] = fields["remote_ip"]
+    return fields
+
+
 def parse_lldp_neighbors_detail(output: str) -> List[Dict[str, str]]:
     """
     Parse 'show lldp neighbors detail' output
-    
+
     Returns list of neighbor dicts with keys:
     - remote_device: Neighbor hostname
-    - remote_ip: Management IP address  
-    - remote_platform: Chassis ID (used as platform identifier)
+    - remote_ip: Management IP address
+    - remote_platform: Model taken from the system description, or ""
+    - chassis_id: LLDP chassis id (usually a MAC)
     - remote_capabilities: System capabilities
     - local_intf: Local interface
     - remote_intf: Remote interface
     - system_description: System description string
     """
     neighbors = []
-    current = {}
-    in_mgmt_addresses = False
-    
-    for line in output.splitlines():
-        line_stripped = line.strip()
-        
-        # New neighbor entry
-        if line_stripped.startswith("Chassis id:"):
-            if current:
-                neighbors.append(current)
-                current = {}
-            in_mgmt_addresses = False
-            current["remote_platform"] = line_stripped.split("Chassis id:")[1].strip()
-        
-        # System Name (hostname)
-        elif line_stripped.startswith("System Name:"):
-            name = line_stripped.split("System Name:")[1].strip()
-            # Strip domain if present
-            current["remote_device"] = name.split('.')[0]
-            in_mgmt_addresses = False
-        
-        # Remote interface
-        elif line_stripped.startswith("Port id:"):
-            current["remote_intf"] = line_stripped.split("Port id:")[1].strip()
-            in_mgmt_addresses = False
-        
-        # Local interface
-        elif line_stripped.startswith("Local Port id:"):
-            current["local_intf"] = line_stripped.split("Local Port id:")[1].strip()
-            in_mgmt_addresses = False
-        
-        # System Description (contains platform info)
-        elif line_stripped.startswith("System Description:"):
-            in_mgmt_addresses = False
-            # Description might continue on next lines
-            current["system_description"] = ""
-        elif "system_description" in current and line_stripped and not line_stripped.startswith(("Time remaining", "System Capabilities", "Enabled Capabilities", "Management", "IP:", "IPv4", "IPv6", "Auto Negotiation", "Physical media", "Vlan ID", "Local Port id")):
-            # Accumulate multi-line description
-            if current["system_description"]:
-                current["system_description"] += " "
-            current["system_description"] += line_stripped
-        
-        # System Capabilities
-        elif line_stripped.startswith("System Capabilities:"):
-            caps = line_stripped.split("System Capabilities:")[1].strip()
-            current["remote_capabilities"] = caps
-            in_mgmt_addresses = False
-        
-        # Management Address section
-        elif line_stripped.startswith("Management Addresses:") or line_stripped.startswith("Management Address:"):
-            logger.info(f"[LLDP] Found Management Addresses section")
-            in_mgmt_addresses = True
-        
-        # IP address in management section
-        elif in_mgmt_addresses and line_stripped.startswith("IP:"):
-            ip_addr = line_stripped.split("IP:")[1].strip()
-            logger.info(f"[LLDP] Extracting IP in mgmt section: '{ip_addr}'")
-            if ip_addr:
-                current["remote_ip"] = ip_addr
-                logger.info(f"[LLDP] Set remote_ip = {ip_addr}")
-        
-        # End of management addresses section
-        elif line_stripped and in_mgmt_addresses:
-            if not any(line_stripped.startswith(x) for x in ["IP", "IPv4", "IPv6", "Other"]):
-                logger.info(f"[LLDP] Ending mgmt section on line: {line_stripped}")
-                in_mgmt_addresses = False
-    
-    # Don't forget the last neighbor
-    if current:
-        neighbors.append(current)
-    
+    for record in _split_lldp_records(output or ""):
+        fields = _parse_lldp_record(record)
+        if not any(fields.get(k) for k in ("chassis_id", "remote_device",
+                                           "remote_intf")):
+            continue
+        fields["remote_platform"] = _platform_from_lldp_description(
+            fields.get("system_description"))
+        neighbors.append(fields)
+
     # Log what we extracted
     logger.info(f"Parsed {len(neighbors)} LLDP neighbors")
     for i, n in enumerate(neighbors):
         logger.debug(f"  LLDP Neighbor {i+1}: {n.get('remote_device', '?')} - IP: {n.get('remote_ip', 'MISSING')}")
-    
+
     return neighbors
 
 
@@ -188,6 +296,9 @@ def parse_ospf_neighbors(output: str) -> List[Dict]:
         if not line or line.startswith('Neighbor') or line.startswith('OSPF') or line.startswith('Total'):
             continue
         # Tabular line: neighbor-id  pri  state  dead-time  address  interface
+        # Point-to-point neighbours print as "FULL/  -"; rejoin the state so
+        # the columns line up.
+        line = re.sub(r'/\s+-(?=\s)', '/-', line)
         parts = line.split()
         if len(parts) < 6:
             continue
@@ -403,18 +514,15 @@ def parse_arp_table(output: str) -> List[Dict]:
 
         # Cisco IOS/XE/Arista tabular format:
         # Internet  <ip>  <age>  <mac>  ARPA  <interface>
-        if len(parts) >= 5 and parts[0] == 'Internet':
+        # An unresolved entry has no MAC and usually no interface:
+        # Internet  <ip>  0  Incomplete  ARPA
+        if len(parts) >= 4 and parts[0] == 'Internet':
             ip = parts[1]
             age = parts[2] if parts[2] != '-' else '0'
             mac_raw = parts[3]
             interface = parts[5] if len(parts) > 5 else ''
             if _is_ip(ip):
-                entries.append({
-                    'ip': ip,
-                    'mac': _normalize_mac(mac_raw),
-                    'age': age,
-                    'interface': interface,
-                })
+                entries.append(_arp_entry(ip, mac_raw, age, interface))
             continue
 
         # Juniper format: <mac>  <ip>  <name>  <interface>  <flags>
@@ -435,15 +543,20 @@ def parse_arp_table(output: str) -> List[Dict]:
             age = parts[idx + 1]
             mac_raw = parts[idx + 2]
             interface = parts[idx + 3] if len(parts) > idx + 3 else ''
-            entries.append({
-                'ip': ip,
-                'mac': _normalize_mac(mac_raw),
-                'age': age,
-                'interface': interface,
-            })
+            entries.append(_arp_entry(ip, mac_raw, age, interface))
 
     logger.info(f"Parsed {len(entries)} ARP entries")
     return entries
+
+
+def _arp_entry(ip, mac_raw, age, interface):
+    # "Incomplete" is ARP state, not a MAC. Left in the mac field it gets
+    # joined against MAC tables and printed as an address.
+    if mac_raw.lower() == 'incomplete':
+        return {'ip': ip, 'mac': '', 'age': age, 'interface': interface,
+                'incomplete': True}
+    return {'ip': ip, 'mac': _normalize_mac(mac_raw), 'age': age,
+            'interface': interface, 'incomplete': False}
 
 
 def _normalize_mac(mac: str) -> str:
@@ -473,71 +586,101 @@ def merge_neighbor_info(cdp_neighbors: List[Dict], lldp_neighbors: List[Dict],
     Prioritize CDP for platform info, but use LLDP if CDP is missing.
     L3 neighbors are deduplicated against L2 entries by IP address.
 
+    One record per link, not per neighbour: two cables to the same switch are
+    two records. A CDP and an LLDP sighting of the same link become one record
+    with protocols ["CDP", "LLDP"].
+
     Returns: Deduplicated list of neighbors with best available info
     """
     merged = {}
 
+    def add_protocol(entry, protocol):
+        entry['protocols'] = sorted(set(entry.get('protocols', [])) | {protocol})
+
     # Process CDP neighbors first (usually more detailed platform info)
     for neighbor in cdp_neighbors:
-        key = neighbor.get('remote_device', '') or neighbor.get('remote_ip', '')
-        if key:
-            merged[key] = neighbor
-            merged[key]['protocols'] = ['CDP']
+        key = neighbor_link_key(neighbor)
+        if not key[1]:
+            continue
+        if key in merged:
+            add_protocol(merged[key], 'CDP')
+            continue
+        entry = dict(neighbor)
+        entry['protocols'] = ['CDP']
+        merged[key] = entry
 
     # Add or merge LLDP neighbors
     for neighbor in lldp_neighbors:
-        key = neighbor.get('remote_device', '') or neighbor.get('remote_ip', '')
-        if not key:
+        key = neighbor_link_key(neighbor)
+        if not key[1]:
             continue
 
-        if key in merged:
-            # Merge: fill in missing fields from LLDP
-            for field in ['remote_ip', 'remote_intf', 'local_intf']:
-                if field not in merged[key] and field in neighbor:
-                    merged[key][field] = neighbor[field]
-            merged[key]['protocols'].append('LLDP')
+        existing = merged.get(key)
+        if existing is None:
+            # LLDP port ids are not always interface names (some peers send a
+            # port description). Same local port to the same neighbour is
+            # still the same link, so attach to a CDP record there.
+            for other_key, entry in merged.items():
+                if (other_key[:2] == key[:2]
+                        and entry.get('protocols') == ['CDP']):
+                    existing = entry
+                    break
 
-            # Use LLDP system description if we don't have good platform info
-            if 'system_description' in neighbor and neighbor['system_description']:
-                merged[key]['system_description'] = neighbor['system_description']
+        if existing is not None:
+            for field in ('remote_ip', 'remote_intf', 'local_intf',
+                          'remote_platform', 'remote_capabilities',
+                          'chassis_id'):
+                if not existing.get(field) and neighbor.get(field):
+                    existing[field] = neighbor[field]
+            if neighbor.get('system_description'):
+                existing['system_description'] = neighbor['system_description']
+            add_protocol(existing, 'LLDP')
         else:
-            # New neighbor only in LLDP
-            neighbor['protocols'] = ['LLDP']
-            merged[key] = neighbor
+            entry = dict(neighbor)
+            entry['protocols'] = ['LLDP']
+            merged[key] = entry
 
     # Merge L3 neighbors
     if l3_neighbors:
-        # Build IP → merged-entry lookup for deduplication
-        ip_index = {}
-        for key, entry in merged.items():
-            ip = entry.get('remote_ip')
-            if ip:
-                ip_index[ip] = key
-
         for neighbor in l3_neighbors:
             protocol = neighbor.get('protocol', 'L3')
             neighbor_ip = neighbor.get('remote_ip')
             neighbor_device = neighbor.get('remote_device')
 
-            # Try to match against existing L2 entry by IP
-            matched_key = ip_index.get(neighbor_ip) if neighbor_ip else None
+            # Match against an existing entry by IP, preferring the link the
+            # adjacency actually runs over when there are parallel links.
+            candidates = [e for e in merged.values()
+                          if neighbor_ip and e.get('remote_ip') == neighbor_ip]
+            local = canonical_ifname(neighbor.get('local_intf'))
+            matched = next((e for e in candidates
+                            if local and canonical_ifname(e.get('local_intf')) == local),
+                           candidates[0] if candidates else None)
 
-            if matched_key:
-                # Already known from L2 — just add the protocol
-                if protocol not in merged[matched_key]['protocols']:
-                    merged[matched_key]['protocols'].append(protocol)
-                logger.debug(f"L3 {protocol} neighbor {neighbor_ip} merged with existing L2 entry {matched_key}")
+            if matched is not None:
+                add_protocol(matched, protocol)
+                logger.debug(f"L3 {protocol} neighbor {neighbor_ip} merged with existing entry")
             else:
                 # L3-only neighbor — add as new entry
-                key = neighbor_ip or neighbor_device
-                if not key:
+                if not (neighbor_ip or neighbor_device):
                     continue
-                neighbor['protocols'] = [protocol]
-                merged[key] = neighbor
-                if neighbor_ip:
-                    ip_index[neighbor_ip] = key
-                logger.debug(f"L3-only {protocol} neighbor added: {key}")
+                entry = dict(neighbor)
+                entry['protocols'] = [protocol]
+                merged[('l3', neighbor_ip or neighbor_device, protocol)] = entry
+                logger.debug(f"L3-only {protocol} neighbor added: {neighbor_ip or neighbor_device}")
 
     result = list(merged.values())
     logger.info(f"Merged to {len(result)} unique neighbors")
     return result
+
+
+def neighbor_link_key(neighbor):
+    """Identity of one link: (local port, neighbour, neighbour port).
+
+    Interface names are canonicalised so CDP's GigabitEthernet1/0/1 and
+    LLDP's Gi1/0/1 agree; the neighbour name drops domain and NX-OS serial
+    suffix for the same reason.
+    """
+    remote = normalize_hostname(neighbor.get('remote_device')) \
+        or (neighbor.get('remote_ip') or '')
+    return (canonical_ifname(neighbor.get('local_intf')), remote,
+            canonical_ifname(neighbor.get('remote_intf')))

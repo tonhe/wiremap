@@ -40,6 +40,22 @@ _COMMANDS = {
         "show interfaces terse",
         "show interfaces descriptions",
     ],
+    "vyos": [
+        "show interfaces",
+        "show interfaces detail",
+    ],
+    "cisco_wlc": [
+        "show interface summary",
+        "show port summary",
+    ],
+    "watchguard_fireware": [
+        "show interface",
+    ],
+    "paloalto_panos": [
+        "show interface logical",
+        "show interface hardware",
+        "show interface management",
+    ],
 }
 _DEFAULT_COMMANDS = [
     "show interfaces status",
@@ -70,6 +86,9 @@ class InterfacesCollector(BaseCollector):
     label = "Interface Status"
     description = "Collect interface status, descriptions, IP assignments, and etherchannel info"
     enabled_by_default = True
+    # Routers reject these; the rest of the collector applies to them.
+    switching_commands = frozenset({"show interfaces status",
+                                    "show interface status"})
 
     def get_commands(self, device_type: str) -> list[str]:
         return _COMMANDS.get(device_type, _DEFAULT_COMMANDS)

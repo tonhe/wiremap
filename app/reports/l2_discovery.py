@@ -15,6 +15,16 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from .base import BaseReport
+from .findings import (
+    CRITICAL, WARNING, INFO, AGGREGATE_HEADERS, DETAIL_SHEET,
+    make_finding, overfire_check, aggregate_rows, summary_count_rows,
+)
+from .neighbor_lookup import neighbors_by_interface
+
+try:
+    from app.ifname import canonical_ifname
+except ImportError:
+    from ifname import canonical_ifname
 
 
 # ---------------------------------------------------------------------------
@@ -30,14 +40,14 @@ def _has_collector_data(inventory_data, collector_name):
 
 
 def _derive_site(hostname):
-    """Extract site code from hostname convention (e.g., 'NYC-CORE-01' -> 'NYC').
+    """Site code for a hostname: the configured site_rules, else the first
+    hyphen-delimited token of the short name ('NYC-CORE-01' -> 'NYC').
     Returns empty string if no pattern detected."""
-    if not hostname:
-        return ""
-    parts = hostname.split("-")
-    if len(parts) >= 2:
-        return parts[0]
-    return ""
+    try:
+        from site_mapping import derive_site
+    except ImportError:
+        from app.site_mapping import derive_site
+    return derive_site(hostname)
 
 
 # ---------------------------------------------------------------------------
@@ -219,12 +229,9 @@ def _get_interface_description(device, iface_name):
 
 def _get_cdp_neighbor(device, iface_name):
     """Look up CDP/LLDP neighbor for an interface."""
-    cdp_data = device.get("collector_data", {}).get("cdp_lldp", {})
-    parsed = cdp_data.get("parsed", {})
-    for n in parsed.get("neighbors", []):
-        if n.get("local_intf", "").lower() == iface_name.lower():
-            return n.get("remote_device", "")
-    return ""
+    # Switchport lists short names (Gi1/0/1) and CDP long ones
+    # (GigabitEthernet1/0/1); only canonical names compare equal.
+    return neighbors_by_interface(device).get(canonical_ifname(iface_name), "")
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +253,19 @@ def _analyze_vlans(inventory_data):
         stp_data = device.get("collector_data", {}).get("stp_vlan", {})
         parsed = stp_data.get("parsed", {})
 
-        for entry in parsed.get("spanning_tree_root", []):
+        root_entries = parsed.get("spanning_tree_root", [])
+        # Inventories collected before the IOS root parser was fixed hold
+        # an empty list; the raw output is still there to re-parse.
+        if not root_entries and device.get("device_type") != "cisco_nxos":
+            raw_root = stp_data.get("raw", {}).get("show spanning-tree root", "")
+            if raw_root.strip():
+                try:
+                    from app.collectors.stp_detail import parse_ios_stp_root
+                except ImportError:
+                    from collectors.stp_detail import parse_ios_stp_root
+                root_entries = parse_ios_stp_root(raw_root)
+
+        for entry in root_entries:
             # Handle both normalized and raw NX-OS field names
             vid = _norm_vid(str(entry.get("vlan_id", "")))
             root_mac = entry.get("root_address", "") or entry.get("root_id", "")
@@ -410,10 +429,15 @@ def _analyze_vlans(inventory_data):
             m = re.match(r"^[Vv]lan(\d+)$", iface)
             if m:
                 vid = m.group(1)
+                state = entry.get("state", "")
+                proto = entry.get("protocol") or "HSRP"
+                if proto != "HSRP":
+                    # The column is headed HSRP VIP; name the other FHRPs.
+                    state = f"{proto} {state}".strip()
                 hsrp_vips[vid].append({
                     "hostname": hostname,
                     "virtual_ip": entry.get("virtual_ip", ""),
-                    "state": entry.get("state", ""),
+                    "state": state,
                     "priority": entry.get("priority", ""),
                     "group": entry.get("group", ""),
                 })
@@ -433,10 +457,15 @@ def _analyze_vlans(inventory_data):
     }
 
 
+# ACI only as its own token: it is a substring of ordinary names (FACILITIES).
+_INFRA_VLAN_RE = re.compile(r"VTEP|INFRA|FABRIC|(?<![A-Z])ACI(?![A-Z])", re.IGNORECASE)
+
+
 def _build_findings(vlans, blocked_ports, svi_ips, inventory_data):
     """Auto-detect anomalies and build findings list.
 
-    Each finding: {title, description}
+    Each finding is built by findings.make_finding (hostname, severity,
+    title, description, type); see findings.py for the severity rubric.
     """
     findings = []
 
@@ -460,7 +489,13 @@ def _build_findings(vlans, blocked_ports, svi_ips, inventory_data):
         title = f"{intf} -- {status_str}{reason_str}"
         desc = (f"{intf} is {status_str}{reason_str}. "
                 f"Affects VLANs: {vlan_str}.")
-        findings.append({"hostname": switch, "title": title, "description": desc})
+        # A plain BLK alternate port is STP doing its job; a broken or
+        # inconsistent port (BKN, *_Inc, err-disabled) is a probable fault.
+        broken = reasons or any(st.upper() != "BLK" for st in statuses)
+        findings.append(make_finding(
+            switch, WARNING if broken else INFO, title, desc,
+            finding_type="STP port not forwarding" if broken else "STP blocked port",
+        ))
 
     # 2. Default STP priority on root bridges
     for vid, info in sorted(vlans.items(),
@@ -476,12 +511,12 @@ def _build_findings(vlans, blocked_ports, svi_ips, inventory_data):
         # Default priority = 32768 + VLAN ID (or just 32768 for some platforms)
         if priority == 32768 + vlan_num or priority == 32768:
             root_dev = info.get("root_device") or info.get("root_bridge_mac") or "unknown"
-            findings.append({
-                "hostname": root_dev,
-                "title": f"VLAN {vid} -- default STP priority",
-                "description": (f"Root priority {priority} (32768+{vlan_num}, untuned). "
-                                f"Root election is arbitrary."),
-            })
+            findings.append(make_finding(
+                root_dev, WARNING, f"VLAN {vid} -- default STP priority",
+                (f"Root priority {priority} (32768+{vlan_num}, untuned). "
+                 f"Root election is arbitrary."),
+                finding_type="Default STP priority on root",
+            ))
 
     # 3. STP root bridge mismatches
     for vid, info in sorted(vlans.items(),
@@ -492,11 +527,11 @@ def _build_findings(vlans, blocked_ports, svi_ips, inventory_data):
         parts = []
         for mac, switches in bridges.items():
             parts.append(f"{mac} on {', '.join(sorted(switches))}")
-        findings.append({
-            "hostname": "",
-            "title": f"VLAN {vid} -- STP root bridge mismatch",
-            "description": f"Multiple root bridges detected: {'; '.join(parts)}.",
-        })
+        findings.append(make_finding(
+            "", CRITICAL, f"VLAN {vid} -- STP root bridge mismatch",
+            f"Multiple root bridges detected: {'; '.join(parts)}.",
+            finding_type="STP root bridge mismatch",
+        ))
 
     # 4. Subnets larger than /20
     for vid, ips in sorted(svi_ips.items(),
@@ -516,11 +551,16 @@ def _build_findings(vlans, blocked_ports, svi_ips, inventory_data):
                 # Collect all IPs for this VLAN with this prefix
                 entries = [f"{e['hostname']}: {e['ip']}/{e['prefix']}"
                            for e in ips if e.get("prefix") == prefix]
-                findings.append({
-                    "hostname": "",
-                    "title": title,
-                    "description": f"Large subnet (/{prefix_len}): {', '.join(entries)}. Verify intent.",
-                })
+                # Fabric/overlay infra VLANs (VTEP pools, ACI infra) are
+                # large by design.
+                infra = bool(_INFRA_VLAN_RE.search(vlan_name or ""))
+                desc = f"Large subnet (/{prefix_len}): {', '.join(entries)}."
+                desc += (" Name indicates fabric infrastructure; large by design."
+                         if infra else " Verify intent.")
+                findings.append(make_finding(
+                    "", INFO if infra else WARNING, title, desc,
+                    finding_type="Large subnet",
+                ))
                 break  # one finding per VLAN
 
     # 5. VLAN name discrepancies
@@ -548,12 +588,13 @@ def _build_findings(vlans, blocked_ports, svi_ips, inventory_data):
                 name_switches[name].append(switch)
             for name, switches in sorted(name_switches.items()):
                 parts.append(f'"{name}" on {", ".join(sorted(switches))}')
-            findings.append({
-                "hostname": "",
-                "title": f"VLAN {vid} -- name discrepancy",
-                "description": f"Different names: {'; '.join(parts)}.",
-            })
+            findings.append(make_finding(
+                "", INFO, f"VLAN {vid} -- name discrepancy",
+                f"Different names: {'; '.join(parts)}.",
+                finding_type="VLAN name discrepancy",
+            ))
 
+    overfire_check(findings, len(inventory_data.get("devices", {})))
     return findings
 
 
@@ -638,39 +679,10 @@ def _build_summary_sheet(wb, analysis, inventory_data):
     device_count = len(inventory_data.get("devices", {}))
     vlan_count = len(analysis.get("vlans", {}))
 
-    # Categorize findings by severity
-    critical = 0
-    warning = 0
-    info = 0
-    for finding in analysis.get("findings", []):
-        sev = finding.get("severity", "")
-        if sev:
-            if sev == "Critical":
-                critical += 1
-            elif sev == "Warning":
-                warning += 1
-            else:
-                info += 1
-        else:
-            # Categorize by title keywords
-            title = finding.get("title", "").lower()
-            if "mismatch" in title:
-                critical += 1
-            elif any(kw in title for kw in [
-                "blk", "bkn", "default stp", "subnet",
-                "bpdu", "storm", "trunk", "topology",
-            ]):
-                warning += 1
-            else:
-                info += 1
-
     metrics = [
         ("Device Count", device_count),
         ("VLAN Count", vlan_count),
-        ("Critical Findings", critical),
-        ("Warning Findings", warning),
-        ("Info Findings", info),
-    ]
+    ] + [tuple(r) for r in summary_count_rows(analysis.get("findings", []))]
 
     row = 2
     for metric, value in metrics:
@@ -835,30 +847,43 @@ def _build_vlan_sheet(ws, analysis, inventory_data):
     ws.freeze_panes = "A2"
 
 
-def _build_findings_sheet(ws, analysis):
-    """Findings sheet -- Hostname, Site/Location, Port, Notes."""
-    findings = analysis["findings"]
+_FINDINGS_DETAIL_HEADERS = ["Hostname", "Site/Location", "Port", "Notes", "Severity"]
 
-    headers = ["Hostname", "Site/Location", "Port", "Notes"]
+
+def _findings_detail_rows(findings):
+    if not findings:
+        return [["No findings detected.", "", "", "", ""]]
+    return [[f.get("hostname", ""), _derive_site(f.get("hostname", "")),
+             f["title"], f["description"], f.get("severity", "")]
+            for f in findings]
+
+
+def _write_findings_table(ws, table_name, headers, rows, wrap_col):
     _write_header_row(ws, headers, row=1)
-
+    if not rows:
+        rows = [["No findings detected."] + [""] * (len(headers) - 1)]
     row = 2
-    if findings:
-        for finding in findings:
-            hostname = finding.get("hostname", "")
-            ws.cell(row=row, column=1, value=hostname)
-            ws.cell(row=row, column=2, value=_derive_site(hostname))
-            ws.cell(row=row, column=3, value=finding["title"])
-            cell = ws.cell(row=row, column=4, value=finding["description"])
-            cell.alignment = _WRAP_ALIGN
-            row += 1
-    else:
-        ws.cell(row=row, column=1, value="No findings detected.")
+    for values in rows:
+        for col, value in enumerate(values, 1):
+            cell = ws.cell(row=row, column=col, value=value)
+            if col == wrap_col:
+                cell.alignment = _WRAP_ALIGN
         row += 1
-
-    _add_table(ws, "Findings", len(headers), row - 1)
+    _add_table(ws, table_name, len(headers), row - 1)
     _auto_width(ws)
     ws.freeze_panes = "A2"
+
+
+def _build_findings_sheet(ws, analysis):
+    """Findings sheet -- one row per distinct finding with its device count."""
+    _write_findings_table(ws, "Findings", AGGREGATE_HEADERS,
+                          aggregate_rows(analysis["findings"]), 3)
+
+
+def _build_findings_detail_sheet(ws, analysis):
+    """Findings (detail) -- Hostname, Site/Location, Port, Notes, Severity."""
+    _write_findings_table(ws, "FindingsDetail", _FINDINGS_DETAIL_HEADERS,
+                          _findings_detail_rows(analysis["findings"]), 4)
 
 
 def _build_root_bridge_sheet(ws, analysis):
@@ -936,34 +961,89 @@ def _build_stp_topology_sheet(wb, inventory_data):
     return ws
 
 
-def _build_port_security_sheet(wb, inventory_data):
-    """Port Security tab -- access port hardening analysis."""
-    ws = wb.create_sheet(title="Port Security")
+_PORT_SECURITY_HEADERS = ["Device", "Site/Location", "Interface", "Mode", "BPDU Guard",
+                          "Root Guard", "Storm Control", "Port Security", "Voice VLAN"]
 
-    headers = ["Device", "Site/Location", "Interface", "Mode", "BPDU Guard",
-               "Root Guard", "Storm Control", "Port Security", "Voice VLAN"]
-    _write_header_row(ws, headers, row=1)
 
-    row = 2
+def _interface_config_blocks(config_text):
+    """{canonical interface name: [config lines, lowercased]} from a
+    running-config."""
+    blocks = {}
+    current = None
+    for line in (config_text or "").splitlines():
+        if line.startswith("interface "):
+            current = blocks.setdefault(
+                canonical_ifname(line.split(None, 1)[1].strip()), [])
+            continue
+        if current is None:
+            continue
+        if line[:1] in (" ", "\t"):
+            current.append(" ".join(line.split()).lower())
+        else:
+            current = None
+    return blocks
+
+
+def _global_stp_flags(config_text):
+    lines = {" ".join(l.split()).lower() for l in (config_text or "").splitlines()
+             if l.startswith("spanning-tree ")}
+    return {
+        # IOS, IOS-XE ("portfast edge ..."), NX-OS ("port type edge ...")
+        "bpduguard_default": bool(lines & {
+            "spanning-tree portfast bpduguard default",
+            "spanning-tree portfast edge bpduguard default",
+            "spanning-tree port type edge bpduguard default"}),
+        "portfast_default": bool(lines & {
+            "spanning-tree portfast default",
+            "spanning-tree portfast edge default",
+            "spanning-tree port type edge default"}),
+    }
+
+
+def _is_edge_port(block, is_access, portfast_default):
+    """PortFast/edge on this port, configured or by default for access ports."""
+    if any(l in ("spanning-tree portfast disable", "spanning-tree portfast network",
+                 "spanning-tree port type network", "spanning-tree port type normal")
+           for l in block):
+        return False
+    if any(l.startswith(("spanning-tree portfast", "spanning-tree port type edge"))
+           for l in block):
+        return True
+    return portfast_default and is_access
+
+
+def _bpdu_guard(block, is_access, flags):
+    """BPDU guard is on when the port enables it, or when it is an edge port
+    and the global edge-port default is set. The global default never
+    covers trunks or other non-edge ports."""
+    if "spanning-tree bpduguard disable" in block:
+        return False
+    if "spanning-tree bpduguard enable" in block:
+        return True
+    return flags["bpduguard_default"] and _is_edge_port(
+        block, is_access, flags["portfast_default"])
+
+
+def _port_security_rows(inventory_data):
+    """[(row values, mode)] for the Port Security tab."""
+    rows = []
     for hostname in sorted(inventory_data.get("devices", {}).keys()):
         device = inventory_data["devices"][hostname]
         sw_data = device.get("collector_data", {}).get("switchport", {})
         parsed = sw_data.get("parsed", {})
         site = _derive_site(hostname)
 
-        # Get running config for BPDU/root guard detection
         config_text = device.get("collector_data", {}).get(
             "config", {}).get("parsed", {}).get("config", "")
-        global_bpdu = ("spanning-tree portfast bpduguard default" in config_text)
+        blocks = _interface_config_blocks(config_text)
+        flags = _global_stp_flags(config_text)
 
-        # Build storm control lookup by interface
         storm_lookup = {}
         for sc in parsed.get("storm_control", []):
             iface = sc.get("interface", "")
             if iface:
                 storm_lookup[iface.lower()] = sc
 
-        # Build port security lookup by interface
         ps_lookup = {}
         for ps in parsed.get("port_security", []):
             iface = ps.get("interface", "")
@@ -973,57 +1053,54 @@ def _build_port_security_sheet(wb, inventory_data):
         for port in parsed.get("switchports", []):
             iface = port.get("interface", "")
             mode = port.get("mode", "")
+            block = blocks.get(canonical_ifname(iface), [])
+            if "switchport mode trunk" in block:
+                is_access = False
+            else:
+                is_access = ("switchport mode access" in block
+                             or "access" in mode.lower()
+                             or "access" in str(port.get("operational_mode", "")).lower())
 
-            # BPDU Guard: global or per-interface in config
-            has_bpdu = global_bpdu
-            if not has_bpdu and config_text and iface:
-                if "spanning-tree bpduguard enable" in config_text:
-                    has_bpdu = True
-            bpdu_str = "Yes" if has_bpdu else "No"
+            has_bpdu = _bpdu_guard(block, is_access, flags)
+            has_root_guard = "spanning-tree guard root" in block
 
-            # Root Guard
-            has_root_guard = False
-            if config_text:
-                if "spanning-tree guard root" in config_text:
-                    has_root_guard = True
-            root_guard_str = "Yes" if has_root_guard else "No"
+            rows.append([
+                hostname, site, iface, mode,
+                "Yes" if has_bpdu else "No",
+                "Yes" if has_root_guard else "No",
+                "Yes" if iface.lower() in storm_lookup else "No",
+                "Yes" if iface.lower() in ps_lookup else "No",
+                port.get("voice_vlan", ""),
+            ])
+    return rows
 
-            # Storm Control
-            has_storm = iface.lower() in storm_lookup
-            storm_str = "Yes" if has_storm else "No"
 
-            # Port Security
-            has_ps = iface.lower() in ps_lookup
-            ps_str = "Yes" if has_ps else "No"
+def _build_port_security_sheet(wb, inventory_data):
+    """Port Security tab -- access port hardening analysis."""
+    ws = wb.create_sheet(title="Port Security")
 
-            # Voice VLAN
-            voice_vlan = port.get("voice_vlan", "")
+    headers = _PORT_SECURITY_HEADERS
+    _write_header_row(ws, headers, row=1)
 
-            ws.cell(row=row, column=1, value=hostname)
-            ws.cell(row=row, column=2, value=site)
-            ws.cell(row=row, column=3, value=iface)
-            ws.cell(row=row, column=4, value=mode)
-            ws.cell(row=row, column=5, value=bpdu_str)
-            ws.cell(row=row, column=6, value=root_guard_str)
-            ws.cell(row=row, column=7, value=storm_str)
-            ws.cell(row=row, column=8, value=ps_str)
-            ws.cell(row=row, column=9, value=voice_vlan)
+    row = 2
+    for values in _port_security_rows(inventory_data):
+        for col, value in enumerate(values, start=1):
+            ws.cell(row=row, column=col, value=value)
 
-            # Highlight missing security features based on port mode:
-            #   ACCESS: BPDU Guard (5), Storm Control (7)
-            #   TRUNK:  Root Guard (6), Storm Control (7)
-            is_trunk = "trunk" in mode.lower()
-            is_access = "access" in mode.lower() or "static access" in mode.lower()
-            highlight_cols = []
-            if is_access:
-                highlight_cols = [5, 7]   # BPDU Guard, Storm Control
-            elif is_trunk:
-                highlight_cols = [6, 7]   # Root Guard, Storm Control
-            for col in highlight_cols:
-                if ws.cell(row=row, column=col).value == "No":
-                    ws.cell(row=row, column=col).fill = _ROOT_BAD_FILL
+        # Highlight missing security features based on port mode:
+        #   ACCESS: BPDU Guard (5), Storm Control (7)
+        #   TRUNK:  Root Guard (6), Storm Control (7)
+        mode = values[3].lower()
+        highlight_cols = []
+        if "access" in mode:
+            highlight_cols = [5, 7]   # BPDU Guard, Storm Control
+        elif "trunk" in mode:
+            highlight_cols = [6, 7]   # Root Guard, Storm Control
+        for col in highlight_cols:
+            if ws.cell(row=row, column=col).value == "No":
+                ws.cell(row=row, column=col).fill = _ROOT_BAD_FILL
 
-            row += 1
+        row += 1
 
     _add_table(ws, "PortSecurity", len(headers), row - 1)
     _auto_width(ws)
@@ -1111,6 +1188,7 @@ class L2DiscoveryReport(BaseReport):
         # Sheet 3: Findings (always)
         ws3 = wb.create_sheet(title="Findings")
         _build_findings_sheet(ws3, analysis)
+        _build_findings_detail_sheet(wb.create_sheet(title=DETAIL_SHEET), analysis)
 
         # Sheet 4: Root Bridge IDs (always)
         ws4 = wb.create_sheet(title="Root Bridge IDs")
@@ -1140,38 +1218,11 @@ class L2DiscoveryReport(BaseReport):
         device_count = len(inventory_data.get("devices", {}))
         vlan_count = len(analysis.get("vlans", {}))
 
-        critical = 0
-        warning = 0
-        info = 0
-        for finding in analysis.get("findings", []):
-            sev = finding.get("severity", "")
-            if sev:
-                if sev == "Critical":
-                    critical += 1
-                elif sev == "Warning":
-                    warning += 1
-                else:
-                    info += 1
-            else:
-                title = finding.get("title", "").lower()
-                if "mismatch" in title:
-                    critical += 1
-                elif any(kw in title for kw in [
-                    "blk", "bkn", "default stp", "subnet",
-                    "bpdu", "storm", "trunk", "topology",
-                ]):
-                    warning += 1
-                else:
-                    info += 1
-
         summary_headers = ["Metric", "Value"]
         summary_rows = [
             ["Device Count", device_count],
             ["VLAN Count", vlan_count],
-            ["Critical Findings", critical],
-            ["Warning Findings", warning],
-            ["Info Findings", info],
-        ]
+        ] + summary_count_rows(analysis.get("findings", []))
         sheets["Summary"] = (summary_headers, summary_rows)
 
         # ---- VLAN Documentation sheet ----
@@ -1299,21 +1350,12 @@ class L2DiscoveryReport(BaseReport):
             ])
         sheets["VLAN Documentation"] = (vlan_headers, vlan_rows)
 
-        # ---- Findings sheet ----
-        findings_headers = ["Hostname", "Site/Location", "Port", "Notes"]
-        findings_rows = []
-        if analysis["findings"]:
-            for finding in analysis["findings"]:
-                hostname = finding.get("hostname", "")
-                findings_rows.append([
-                    hostname,
-                    _derive_site(hostname),
-                    finding["title"],
-                    finding["description"],
-                ])
-        else:
-            findings_rows.append(["No findings detected.", "", "", ""])
-        sheets["Findings"] = (findings_headers, findings_rows)
+        # ---- Findings (aggregated) and Findings (detail) sheets ----
+        sheets["Findings"] = (list(AGGREGATE_HEADERS),
+                              aggregate_rows(analysis["findings"])
+                              or [["No findings detected.", "", "", "", ""]])
+        sheets[DETAIL_SHEET] = (list(_FINDINGS_DETAIL_HEADERS),
+                                _findings_detail_rows(analysis["findings"]))
 
         # ---- Root Bridge IDs sheet ----
         rb_headers = ["Hostname", "Site/Location", "Root Bridge ID"]
@@ -1375,62 +1417,8 @@ class L2DiscoveryReport(BaseReport):
 
         # ---- Port Security sheet (conditional) ----
         if _has_collector_data(inventory_data, "switchport"):
-            ps_headers = [
-                "Device", "Site/Location", "Interface", "Mode", "BPDU Guard",
-                "Root Guard", "Storm Control", "Port Security", "Voice VLAN",
-            ]
-            ps_rows = []
-            for hostname in sorted(inventory_data.get("devices", {}).keys()):
-                device = inventory_data["devices"][hostname]
-                sw_data = device.get("collector_data", {}).get("switchport", {})
-                parsed = sw_data.get("parsed", {})
-                site = _derive_site(hostname)
-
-                config_text = device.get("collector_data", {}).get(
-                    "config", {}).get("parsed", {}).get("config", "")
-                global_bpdu = ("spanning-tree portfast bpduguard default" in config_text)
-
-                storm_lookup = {}
-                for sc in parsed.get("storm_control", []):
-                    iface = sc.get("interface", "")
-                    if iface:
-                        storm_lookup[iface.lower()] = sc
-
-                ps_lookup = {}
-                for ps in parsed.get("port_security", []):
-                    iface = ps.get("interface", "")
-                    if iface:
-                        ps_lookup[iface.lower()] = ps
-
-                for port in parsed.get("switchports", []):
-                    iface = port.get("interface", "")
-                    mode = port.get("mode", "")
-
-                    has_bpdu = global_bpdu
-                    if not has_bpdu and config_text and iface:
-                        if "spanning-tree bpduguard enable" in config_text:
-                            has_bpdu = True
-                    bpdu_str = "Yes" if has_bpdu else "No"
-
-                    has_root_guard = False
-                    if config_text:
-                        if "spanning-tree guard root" in config_text:
-                            has_root_guard = True
-                    root_guard_str = "Yes" if has_root_guard else "No"
-
-                    has_storm = iface.lower() in storm_lookup
-                    storm_str = "Yes" if has_storm else "No"
-
-                    has_ps = iface.lower() in ps_lookup
-                    ps_str = "Yes" if has_ps else "No"
-
-                    voice_vlan = port.get("voice_vlan", "")
-
-                    ps_rows.append([
-                        hostname, site, iface, mode, bpdu_str,
-                        root_guard_str, storm_str, ps_str, voice_vlan,
-                    ])
-            sheets["Port Security"] = (ps_headers, ps_rows)
+            sheets["Port Security"] = (list(_PORT_SECURITY_HEADERS),
+                                       _port_security_rows(inventory_data))
 
             # ---- Trunk Summary sheet (conditional, same gate) ----
             trunk_headers = [

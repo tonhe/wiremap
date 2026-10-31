@@ -6,6 +6,7 @@ SECURITY: SNMP community strings are NEVER stored — only boolean flags.
 import re
 
 from .base import BaseCollector
+from .errors import send_failure_output
 
 _COMMANDS = {
     "cisco_ios": [
@@ -32,7 +33,33 @@ _COMMANDS = {
         "show aaa sessions",
         "show running-config | section aaa",
     ],
+    "vyos": [
+        "show ntp",
+        "show log tail",
+    ],
+    "cisco_wlc": [
+        "show time",
+        "show logging",
+        "show snmpversion",
+    ],
+    "watchguard_fireware": [
+        "show ntp",
+        "show log",
+    ],
+    "paloalto_panos": [
+        "show ntp",
+        "show system info",
+        "show log system direction equal backward",
+    ],
 }
+_LOG_COMMANDS = frozenset({
+    "show logging",
+    "show log tail",
+    "show log",
+    "show log system direction equal backward",
+})
+LOG_READ_TIMEOUT = 180
+
 _DEFAULT_COMMANDS = [
     "show ntp status",
     "show ntp associations",
@@ -251,7 +278,9 @@ class NtpLoggingCollector(BaseCollector):
         return list(_COMMANDS.get(device_type, _DEFAULT_COMMANDS))
 
     def parse(self, raw_outputs: dict[str, str], device_type: str) -> dict:
-        cmds = _COMMANDS.get(device_type, _DEFAULT_COMMANDS)
+        # Non-Cisco platforms run fewer than six commands; pad so the
+        # missing positions parse as empty instead of raising IndexError.
+        cmds = list(_COMMANDS.get(device_type, _DEFAULT_COMMANDS)) + [""] * 6
         ntp_status_cmd = cmds[0]
         ntp_peers_cmd = cmds[1]
         logging_cmd = cmds[2]
@@ -284,15 +313,24 @@ class NtpLoggingCollector(BaseCollector):
         raw_outputs = {}
         for cmd in cmds:
             try:
-                raw_outputs[cmd] = connection.send_command(cmd)
-            except Exception:
-                raw_outputs[cmd] = ""
+                if cmd in _LOG_COMMANDS:
+                    # A full buffer is hundreds of KB; netmiko's default
+                    # 10s read timeout gave up on it and the log was lost.
+                    raw_outputs[cmd] = connection.send_command(
+                        cmd, read_timeout=LOG_READ_TIMEOUT)
+                else:
+                    raw_outputs[cmd] = connection.send_command(cmd)
+            except Exception as e:
+                raw_outputs[cmd] = send_failure_output(e)
 
-        parsed = self.parse(raw_outputs, device_type)
+        parsed = self.parse_collected(raw_outputs, device_type)
 
-        # SECURITY: Redact raw outputs that may contain secrets
-        raw_outputs[cmds[3]] = "<REDACTED>"  # show snmp
-        raw_outputs[cmds[5]] = "<REDACTED>"  # show running-config | section aaa
+        # SECURITY: Redact raw outputs that may contain secrets. Matched by
+        # command, not position: VyOS, WLC, WatchGuard and PAN-OS run shorter
+        # lists, and indexing them raised IndexError and lost the collector.
+        for cmd in cmds:
+            if cmd == "show snmp" or "running-config" in cmd:
+                raw_outputs[cmd] = "<REDACTED>"
 
         return {
             "raw": raw_outputs,

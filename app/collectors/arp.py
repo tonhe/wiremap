@@ -18,6 +18,11 @@ _COMMANDS = {
     "extreme": "show iparp",
     "extreme_vsp": "show ip arp",
     "juniper_junos": "show arp",
+    "vyos": "show arp",
+    # AireOS exposes the controller's kernel ARP cache, not an IOS-style table.
+    "cisco_wlc": "show arp kernel",
+    "watchguard_fireware": "show arp",
+    "paloalto_panos": "show arp all",
 }
 _DEFAULT_COMMAND = "show ip arp"
 

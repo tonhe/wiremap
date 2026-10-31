@@ -7,7 +7,13 @@ from collections import OrderedDict
 from openpyxl import Workbook
 
 from .base import BaseReport
+from .neighbor_lookup import neighbors_by_interface
 from .xlsx_utils import create_sheet
+
+try:
+    from app.ifname import canonical_ifname
+except ImportError:
+    from ifname import canonical_ifname
 
 
 class InterfaceSummaryReport(BaseReport):
@@ -20,7 +26,7 @@ class InterfaceSummaryReport(BaseReport):
 
     def generate_tabular_data(self, inventory_data):
         status_headers = ["Device", "Port", "Description", "Status", "VLAN",
-                          "Duplex", "Speed", "Type"]
+                          "Duplex", "Speed", "Type", "Neighbor"]
         ip_headers = ["Device", "Interface", "IP Address", "Status", "Protocol"]
 
         status_rows = []
@@ -31,16 +37,19 @@ class InterfaceSummaryReport(BaseReport):
             parsed = intf_data.get("parsed", {})
 
             # Interface status
+            neighbors = neighbors_by_interface(device)
             for entry in parsed.get("interfaces_status", []):
                 status_rows.append([
                     hostname,
                     entry.get("port", entry.get("interface", "")),
                     entry.get("name", entry.get("description", "")),
                     entry.get("status", ""),
-                    entry.get("vlan", ""),
+                    entry.get("vlan_id", entry.get("vlan", "")),
                     entry.get("duplex", ""),
                     entry.get("speed", ""),
                     entry.get("type", ""),
+                    neighbors.get(canonical_ifname(
+                        entry.get("port", entry.get("interface", ""))), ""),
                 ])
 
             # IP interfaces

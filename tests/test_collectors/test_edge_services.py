@@ -165,3 +165,20 @@ GigabitEthernet0/1 is up, line protocol is up
     assert g1["proxy_arp"] is True
     assert g1["urpf"] is False
     assert g1["directed_broadcast"] is True
+
+
+def test_parse_ip_interfaces_vrf(collector):
+    raw = """GigabitEthernet0/0 is up, line protocol is up
+  Internet address is 198.51.100.2/30
+  Broadcast address is 255.255.255.255
+  VPN Routing/Forwarding "INET"
+  Inbound  access list is OUTSIDE-IN
+GigabitEthernet0/1 is up, line protocol is up
+  Internet address is 10.0.0.1/24
+  Inbound  access list is not set
+"""
+    result = collector.parse({"show ip interface": raw}, "cisco_ios")
+    ifaces = {i["interface"]: i for i in result["ip_interfaces"]}
+    assert ifaces["GigabitEthernet0/0"]["vrf"] == "INET"
+    assert ifaces["GigabitEthernet0/0"]["acl_in"] == "OUTSIDE-IN"
+    assert ifaces["GigabitEthernet0/1"]["vrf"] == ""
