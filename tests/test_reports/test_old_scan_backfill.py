@@ -247,6 +247,8 @@ def test_2960x_stack_members_take_state_with_classic_master_role():
     status = {r[2]: r[6] for r in _modules_sheet(device)}
     assert status["1"] == "Ready"
     assert status["3"] == "Removed"
+    # The stacking module has no state of its own; it follows its member.
+    assert status["Switch 1 - FlexStackPlus Module"] == "Ready"
 
 
 def test_standalone_switch_gets_no_member_row():

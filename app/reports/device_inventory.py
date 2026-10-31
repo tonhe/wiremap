@@ -178,6 +178,8 @@ _MODULE_HEADERS = ["Hostname", "Mgmt IP", "Slot", "Type",
 # "module R0", "module 0", "SPA subslot 0/0", "NIM subslot 1/0"
 _INV_SLOT_RE = re.compile(r"\b(?:module|subslot)\s+(\S+)\s*$", re.I)
 _INV_SWITCH_RE = re.compile(r"^\s*(?:switch\s+)?(\d+)\s*$", re.I)
+# A member's sub-component: "Switch 1 - FlexStackPlus Module"
+_INV_MEMBER_PART_RE = re.compile(r"^\s*switch\s+(\d+)\s+-\s+\S", re.I)
 
 
 def _stack_members(parsed, raw):
@@ -296,8 +298,13 @@ def _module_rows(inventory_data):
                     members_shown.add(sw.group(1))
                 else:
                     sl = _INV_SLOT_RE.search(raw_name)
+                    part = _INV_MEMBER_PART_RE.match(raw_name)
                     if sl:
                         status = slot_state.get(sl.group(1), "")
+                    elif part:
+                        # Nothing reports a stack module's own state; it is
+                        # present exactly when its member is.
+                        status = stack_state.get(part.group(1), "")
                 rows.append([
                     hostname,
                     mgmt_ip,
