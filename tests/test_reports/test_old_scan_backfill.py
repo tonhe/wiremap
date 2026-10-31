@@ -68,7 +68,20 @@ def test_module_status_read_from_raw_show_module_when_parsed_has_none():
         {"module": "2", "ports": "8", "type": "4500X 8 port 10GE (SFP+) Uplink Module",
          "model": "C4KX-NM-8SFP+", "serial": "JAE00000AAB"}]})
     device["collector_data"]["device_inventory"]["raw"]["show module"] = SHOW_MODULE_4500X
-    assert [r[6] for r in _modules_sheet(device)] == ["Ok"]
+    # The parsed modules held only the uplink; the raw card table has the
+    # chassis too, and both have a status.
+    assert [(r[2], r[4], r[6]) for r in _modules_sheet(device)] == [
+        ("1", "WS-C4500X-32", "Ok"), ("2", "C4KX-NM-8SFP+", "Ok")]
+
+
+def test_4500x_without_an_uplink_card_still_lists_its_chassis():
+    device = _logged_in("switch")
+    device["collector_data"]["device_inventory"]["raw"]["show module"] = (
+        SHOW_MODULE_4500X.replace(
+            " 2     8  4500X 8 port 10GE (SFP+) Uplink Module C4KX-NM-8SFP+      JAE00000AAB\n", "")
+        .replace(" 2 00aa.bb00.0120 to 00aa.bb00.0127 1.0                               Ok\n", ""))
+    assert [(r[2], r[4], r[6]) for r in _modules_sheet(device)] == [
+        ("1", "WS-C4500X-32", "Ok")]
 
 
 def test_stack_member_state_read_from_raw_show_switch_detail():
@@ -179,8 +192,9 @@ def test_vss_pair_lists_both_uplink_cards_when_ntc_kept_only_the_first():
     device["collector_data"]["device_inventory"]["raw"][
         "show module"] = SHOW_MODULE_4500X_VSS_PAIR
     rows = _modules_sheet(device)
-    assert [(r[5], r[6]) for r in rows] == [("JAE00000AAD", "Ok"),
-                                            ("JAE00000AAF", "Ok")]
+    assert [(r[2], r[5], r[6]) for r in rows] == [
+        ("1/1", "JAE00000AAC", "Ok"), ("1/2", "JAE00000AAD", "Ok"),
+        ("2/1", "JAE00000AAE", "Ok"), ("2/2", "JAE00000AAF", "Ok")]
 
 
 STACK_WITH_REMOVED = """Switch/Stack Mac Address : 00aa.bb00.0600 - Local Mac Address
@@ -205,6 +219,34 @@ def test_every_stack_member_has_a_modules_row_with_its_state():
     assert [(r[2], r[4], r[6]) for r in rows] == [
         ("Switch 1", "C9300-48P", "Ready"), ("Switch 2", "C9300-48P", "Ready"),
         ("Switch 3", "", "Removed")]
+
+
+C2960X_SHOW_SWITCH_DETAIL = """Switch/Stack Mac Address : 00aa.bb00.e380 - Local Mac Address
+Mac persistency wait time: Indefinite
+                                           H/W   Current
+Switch#  Role   Mac Address     Priority Version  State
+------------------------------------------------------------
+*1       Master 00aa.bb00.e380     1      4       Ready
+ 2       Member 00aa.bb00.e400     1      4       Ready
+ 3       Member 00aa.bb00.e480     1      4       Removed
+"""
+
+
+def test_2960x_stack_members_take_state_with_classic_master_role():
+    from app.collectors.device_inventory import DeviceInventoryCollector
+    from tests.test_collectors.stack_fixtures import (C2960X_STACK_INVENTORY,
+                                                      C2960X_STACK_VERSION)
+    collector = DeviceInventoryCollector()
+    raw = {cmd: "" for cmd in collector.get_commands("cisco_ios")}
+    raw.update({"show version": C2960X_STACK_VERSION,
+                "show inventory": C2960X_STACK_INVENTORY,
+                "show module": "% Invalid input detected at '^' marker.\n",
+                "show switch detail": C2960X_SHOW_SWITCH_DETAIL})
+    device = _logged_in("switch", parsed=collector.parse(raw, "cisco_ios"))
+    device["collector_data"]["device_inventory"]["raw"] = raw
+    status = {r[2]: r[6] for r in _modules_sheet(device)}
+    assert status["1"] == "Ready"
+    assert status["3"] == "Removed"
 
 
 def test_standalone_switch_gets_no_member_row():

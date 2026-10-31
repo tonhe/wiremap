@@ -213,15 +213,19 @@ def _module_status_sources(parsed, raw=None):
     return stack, slots, module_status, cards
 
 
-def _module_status(m, slot, slot_state, module_status):
-    if m.get("status"):
-        return m["status"]
+def _table_status(m, slot, module_status):
+    """Status from the show module status table for this card, or None."""
     sw = str(m.get("switch_number") or "")
     value = module_status.get((sw, slot))
     if value is None and not sw:
         hits = [v for (s, n), v in module_status.items() if n == slot]
         value = hits[0] if len(hits) == 1 else None
-    return value or slot_state.get(slot, "")
+    return value
+
+
+def _module_status(m, slot, slot_state, module_status):
+    return (m.get("status") or _table_status(m, slot, module_status)
+            or slot_state.get(slot, ""))
 
 
 def _module_rows(inventory_data):
@@ -252,18 +256,25 @@ def _module_rows(inventory_data):
                 # ntc's IOS template names these cardtype and port
                 mod_type = (m.get("type") or m.get("module_type")
                             or m.get("cardtype") or "")
-                if not _is_real_module(model, mod_type):
-                    continue
                 slot = str(m.get("module") or m.get("slot") or "")
+                status = _module_status(m, slot, slot_state, module_status)
+                # A fixed chassis that show module lists with a status (4500-X
+                # slot 1) is the only row such a box has; a stack member's
+                # chassis row has no status and is listed from its state below.
+                if not _is_real_module(model, mod_type) and not (
+                        _CHASSIS_MODEL_RE.match(model)
+                        and _table_status(m, slot, module_status)
+                        and not _SKIP_MODULE_RE.search(mod_type)):
+                    continue
+                sw = str(m.get("switch_number") or "")
                 rows.append([
                     hostname,
                     mgmt_ip,
-                    slot,
+                    f"{sw}/{slot}" if sw else slot,
                     mod_type,
                     model,
                     m.get("serial") or m.get("serialnum") or "",
-                    _module_status(m, slot, slot_state,
-                                   module_status),
+                    status,
                     m.get("ports") or m.get("port") or "",
                 ])
         else:
