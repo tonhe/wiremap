@@ -27,11 +27,17 @@ try:
 except ImportError:
     from source_access import refused_hint
 try:
+    from app.inventory import refresh_categories
+except ImportError:
+    from inventory import refresh_categories
+try:
     from app.target_outcomes import (COLLECTED, MERGED, FAILED, SKIPPED,
-                                     UNRESOLVED, NOT_ATTEMPTED, outcome_counts)
+                                     UNRESOLVED, NOT_ATTEMPTED, outcome_counts,
+                                     reconcile, target_list)
 except ImportError:
     from target_outcomes import (COLLECTED, MERGED, FAILED, SKIPPED,
-                                 UNRESOLVED, NOT_ATTEMPTED, outcome_counts)
+                                 UNRESOLVED, NOT_ATTEMPTED, outcome_counts,
+                                 reconcile, target_list)
 
 logger = logging.getLogger(__name__)
 
@@ -233,7 +239,21 @@ def _target_key(target):
     return str(target.get("input") or target.get("resolved_ip") or "").strip().lower()
 
 
-def _merge_targets(summaries, reached_by_ip, failed, skipped):
+def _scan_targets(inventory):
+    """The scan's requested hosts. Scans from before every target carried an
+    outcome listed only resolved names in the summary, with address lines in
+    params.target_ips, so those are rebuilt into one list."""
+    summary = inventory.get("scan_summary") or {}
+    targets = summary.get("targets") or []
+    if any(t.get("outcome") for t in targets):
+        return targets
+    ips = (inventory.get("params") or {}).get("target_ips") or []
+    return target_list({"targets": targets,
+                        "unresolved": summary.get("unresolved") or []},
+                       [(ip, None) for ip in ips])
+
+
+def _merge_targets(inventories, reached_by_ip, failed, skipped):
     """One target per requested host across every scan.
 
     A host listed in several scans takes its best outcome, then is checked
@@ -242,8 +262,8 @@ def _merge_targets(summaries, reached_by_ip, failed, skipped):
     """
     best = {}
     best_resolved = {}
-    for summary in summaries:
-        for target in summary.get("targets") or []:
+    for inventory in inventories:
+        for target in _scan_targets(inventory):
             key = _target_key(target)
             if not key:
                 continue
@@ -257,7 +277,7 @@ def _merge_targets(summaries, reached_by_ip, failed, skipped):
     for key, target in best.items():
         # A name that resolved in any scan does resolve; "unresolved" from
         # another scan would contradict the address we hold for it.
-        if target.get("outcome") == UNRESOLVED and key in best_resolved:
+        if not target.get("resolved_ip") and key in best_resolved:
             target = best_resolved[key]
         ip = target.get("resolved_ip")
         hostname = reached_by_ip.get(ip) if ip else None
@@ -271,6 +291,9 @@ def _merge_targets(summaries, reached_by_ip, failed, skipped):
             entry = skipped[ip] if isinstance(skipped[ip], dict) else {}
             target["outcome"] = SKIPPED
             target["reason"] = entry.get("reason") or "skipped"
+        elif not target.get("outcome"):
+            # Rebuilt from an older scan, which never recorded one.
+            target = reconcile([target], {}, {}, {}, failed, skipped)[0]
         out.append(target)
     return out
 
@@ -411,6 +434,8 @@ def merge_inventories(inventories: list, filenames: list = None) -> dict:
             device = copy.deepcopy(device)
             if not (is_merge and device.get("source_scan")):
                 device["source_scan"] = source_id
+            # So an older scan's capability guess does not outvote the model.
+            refresh_categories({"devices": {hostname: device}})
             records.append((hostname, device,
                             source_times.get(device["source_scan"], timestamp)))
 
@@ -504,7 +529,7 @@ def merge_inventories(inventories: list, filenames: list = None) -> dict:
     for ip in skipped:
         failed.pop(ip, None)
 
-    targets = _merge_targets(summaries, reached_by_ip, failed, skipped)
+    targets = _merge_targets(inventories, reached_by_ip, failed, skipped)
     not_attempted = _merge_not_attempted(
         summaries, reached | set(failed) | set(skipped))
 
@@ -534,6 +559,12 @@ def merge_inventories(inventories: list, filenames: list = None) -> dict:
         "not_attempted_count": len(not_attempted),
         "source_access_warnings": _merge_warnings(summaries),
     }
+    # Each run's own address, since the runs may not share one.
+    source_ips = [{key: s[key] for key in ("filename", "source_ip",
+                                          "source_ip_method") if s.get(key)}
+                  for s in sources if s.get("source_ip")]
+    if source_ips:
+        scan_summary["source_ips"] = source_ips
     for field in _AGREED_FIELDS:
         value = _agreed(summaries, field)
         if value is not None:

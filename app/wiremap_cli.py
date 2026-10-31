@@ -34,13 +34,13 @@ if __name__ == "__main__":
 
 try:
     from app import merge_scans
-    from app.inventory import DiscoveryInventory
+    from app.inventory import DiscoveryInventory, refresh_categories
     from app.inventory_merge import merge_inventories
     from app.reports import get_registry
     from app.target_outcomes import summary_line
 except ImportError:
     import merge_scans
-    from inventory import DiscoveryInventory
+    from inventory import DiscoveryInventory, refresh_categories
     from inventory_merge import merge_inventories
     from reports import get_registry
     from target_outcomes import summary_line
@@ -79,6 +79,7 @@ def load_scan(path):
         raise ValueError(f"could not read {path}: {e}")
     if not isinstance(data, dict) or "devices" not in data:
         raise ValueError(f"{path} is not a wiremap scan (no devices key)")
+    refresh_categories(data)
     return data
 
 
@@ -252,6 +253,10 @@ def cmd_summary(args):
     if s["source_ip"]:
         method = f" ({s['source_ip_method']})" if s["source_ip_method"] else ""
         print(f"Source IP: {s['source_ip']}{method}")
+    elif stored.get("source_ips"):
+        print("Source IP: " + ", ".join(
+            f"{e['source_ip']} ({e.get('filename') or '?'})"
+            for e in stored["source_ips"]))
     if s["source_access_line"]:
         print(s["source_access_line"])
     for warning in s["source_access_warnings"]:

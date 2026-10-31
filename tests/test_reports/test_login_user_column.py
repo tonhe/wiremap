@@ -23,8 +23,15 @@ def test_login_user_column_shows_the_account_that_logged_in():
 
 def test_login_user_sits_before_source_scan_on_merged_inventory():
     headers, _ = _devices_sheet({"merged_from": [{"file": "a.json"}],
-                                 "devices": {}})
+                                 "devices": {"SW-A": {"login_user": "netops"}}})
     assert headers[-2:] == ["Login User", "Source Scan"]
+
+
+def test_login_user_column_left_out_of_scans_that_never_recorded_it():
+    headers, _ = _devices_sheet({"devices": {
+        "SW-A": {"hostname": "SW-A", "login_succeeded": True,
+                 "collector_data": {}}}})
+    assert "Login User" not in headers
 
 
 def _failed(attempts):

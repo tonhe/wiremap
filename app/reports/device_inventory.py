@@ -15,6 +15,12 @@ try:
 except ImportError:
     from device_facts import extract_device_facts, extract_version_details
 try:
+    from app.collectors.device_inventory import (
+        _parse_ios_show_module, _parse_show_switch_detail, _usable)
+except ImportError:
+    from collectors.device_inventory import (
+        _parse_ios_show_module, _parse_show_switch_detail, _usable)
+try:
     from app.site_mapping import derive_site, naming_flags
 except ImportError:
     from site_mapping import derive_site, naming_flags
@@ -174,10 +180,20 @@ _INV_SLOT_RE = re.compile(r"\b(?:module|subslot)\s+(\S+)\s*$", re.I)
 _INV_SWITCH_RE = re.compile(r"^\s*switch\s+(\d+)\s*$", re.I)
 
 
-def _module_status_sources(parsed):
-    """({stack member number: state}, {platform slot: state})."""
+def _module_status_sources(parsed, raw=None):
+    """({stack member number: state}, {platform slot: state},
+    {(switch, module): show module status}).
+
+    Scans collected before the status tables were parsed still hold the raw
+    show module and show switch detail output, so status is read from there
+    when the parsed data has none.
+    """
+    raw = raw or {}
+    members = parsed.get("stack_members", []) or []
+    if not any(_normalize_keys(m).get("state") for m in members):
+        members = _parse_show_switch_detail(_usable(raw.get("show switch detail")))
     stack = {}
-    for member in parsed.get("stack_members", []) or []:
+    for member in members:
         m = _normalize_keys(member)
         num = str(m.get("switch") or m.get("member") or "")
         state = m.get("state") or m.get("status") or ""
@@ -186,7 +202,19 @@ def _module_status_sources(parsed):
     slots = {str(s.get("slot", "")): s.get("state", "")
              for s in parsed.get("platform_slots", []) or []
              if s.get("slot") and s.get("state")}
-    return stack, slots
+    _, module_status = _parse_ios_show_module(_usable(raw.get("show module")))
+    return stack, slots, module_status
+
+
+def _module_status(m, slot, slot_state, module_status):
+    if m.get("status"):
+        return m["status"]
+    sw = str(m.get("switch_number") or "")
+    value = module_status.get((sw, slot))
+    if value is None and not sw:
+        hits = [v for (s, n), v in module_status.items() if n == slot]
+        value = hits[0] if len(hits) == 1 else None
+    return value or slot_state.get(slot, "")
 
 
 def _module_rows(inventory_data):
@@ -196,11 +224,13 @@ def _module_rows(inventory_data):
     state, whichever the device reports."""
     rows = []
     for hostname, device in sorted(inventory_data.get("devices", {}).items()):
-        parsed = (device.get("collector_data", {})
-                  .get("device_inventory", {}).get("parsed", {}))
+        inv = device.get("collector_data", {}).get("device_inventory", {})
+        parsed = inv.get("parsed", {})
+        raw = inv.get("raw") if isinstance(inv.get("raw"), dict) else {}
         modules = parsed.get("modules", [])
         mgmt_ip = device.get("mgmt_ip", "")
-        stack_state, slot_state = _module_status_sources(parsed)
+        stack_state, slot_state, module_status = _module_status_sources(
+            parsed, raw)
 
         if modules:
             for mod in modules:
@@ -219,7 +249,8 @@ def _module_rows(inventory_data):
                     mod_type,
                     model,
                     m.get("serial") or m.get("serialnum") or "",
-                    m.get("status") or slot_state.get(slot, ""),
+                    _module_status(m, slot, slot_state,
+                                   module_status),
                     m.get("ports") or m.get("port") or "",
                 ])
         else:
@@ -557,10 +588,14 @@ class DeviceInventoryReport(BaseReport):
             "Serial Number", "Discovery Source", "Logged In", "Login Error",
             "Redundancy", "HA State", "Uptime", "Last Reload Reason",
             "Image", "License", "Discovered Via", "Collection Status",
-            "Site", "Site Naming", "Login User",
+            "Site", "Site Naming",
         ]
         devices = inventory_data.get("devices", {})
         site_flags = naming_flags(list(devices))
+        # Scans from before login accounts were recorded have none to show.
+        login_users = any(d.get("login_user") for d in devices.values())
+        if login_users:
+            headers.append("Login User")
         # Only meaningful on a merged inventory, so the column is not there
         # to be ignored on every ordinary scan.
         merged = bool(inventory_data.get("merged_from"))
@@ -610,8 +645,9 @@ class DeviceInventoryReport(BaseReport):
                 _collection_status(device, inventory_data),
                 derive_site(hostname),
                 site_flags.get(hostname, ""),
-                device.get("login_user", "") or "",
             ]
+            if login_users:
+                row.append(device.get("login_user", "") or "")
             if merged:
                 row.append(device.get("source_scan", "") or "")
             rows.append(row)

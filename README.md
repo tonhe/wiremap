@@ -136,8 +136,9 @@ pip install -r requirements.txt
 cd app && python app.py
 ```
 
-Use Python 3.12. `telnetlib` was removed in 3.13, so netmiko will not import on
-newer versions and Telnet support is lost. The container runs 3.11.
+Use Python 3.12. `telnetlib` was removed in 3.13; on 3.13 and later
+`requirements.txt` pulls in the `standard-telnetlib` backport so netmiko still
+imports. The container runs 3.11.
 
 **Iterating without rebuilds.** The Dockerfile copies `app/` and `templates/`
 into the image, so `docker compose up -d` after a pull runs the previous build.
@@ -169,7 +170,7 @@ Both the discovery and targeted forms take up to five username/password sets. Th
 - A rejected set is not retried on that device with another device-type driver or over Telnet
 - Whichever set last logged in is tried first on the next device, with the rest following in their configured order. On a site where most devices share one account, the other sets cost nothing after the first success
 - Every try goes through the `max_logins_per_minute` limiter
-- The Devices sheet has a **Login User** column with the account that logged in (the scan file also stores the set number). The Failed Devices sheet lists the set tried on each attempt, and an auth failure says all the sets were rejected
+- The Devices sheet has a **Login User** column with the account that logged in (left out on scans from before accounts were recorded) (the scan file also stores the set number). The Failed Devices sheet lists the set tried on each attempt, and an auth failure says all the sets were rejected
 - Passwords are never saved: not in the scan file, logs, console events, settings or the browser. The scan file records the usernames offered, in order
 
 **AAA lockout caution.** A device that rejects every set costs one authentication failure per set, up to five. Against TACACS+ or ISE with lockout thresholds, put the set most devices accept first, keep the list short, and set `max_logins_per_minute`.
@@ -230,8 +231,8 @@ arguments.
 ### Reports from the Command Line
 
 `app/wiremap_cli.py` generates the same reports as the Reports tab without the
-web app running. It needs Python 3.11 or 3.12 (netmiko still imports `telnetlib`,
-which 3.13 removed) and the packages in `requirements.txt`.
+web app running. It needs the packages in `requirements.txt` (on Python 3.13
+and later that includes the `standard-telnetlib` backport netmiko needs).
 
 ```bash
 python app/wiremap_cli.py                         # menu: pick scans, reports, format
