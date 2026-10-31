@@ -203,7 +203,38 @@ docker compose exec wiremap python merge_scans.py \
 Configs in the output are redacted unless you pass `--no-redact`. Older scans
 predate collection-time redaction, and the merged file is usually the one that
 gets passed around. Drop the result into `inventories/` and it shows up in
-**Saved Scans** like any other.
+**Saved Scans** like any other. `wiremap_cli.py merge` takes the same
+arguments.
+
+### Reports from the Command Line
+
+`app/wiremap_cli.py` generates the same reports as the Reports tab without the
+web app running. It needs only Python and the packages in `requirements.txt`.
+
+```bash
+python app/wiremap_cli.py                         # menu: pick scans, reports, format
+python app/wiremap_cli.py list scan.json          # which reports apply to this scan
+python app/wiremap_cli.py report scan.json        # every report that applies, into ./<scan id>/
+python app/wiremap_cli.py report scan.json -r device_inventory -r link_inventory -f csv -o out/
+python app/wiremap_cli.py report a.json b.json    # several scans are merged first
+python app/wiremap_cli.py summary scan.json       # devices, failures and causes, targets, source access
+python app/wiremap_cli.py merge a.json b.json -o merged.json
+
+# or inside the container
+docker compose exec wiremap python wiremap_cli.py
+docker compose exec wiremap python wiremap_cli.py report \
+    /app/inventories/<scan>.json -o /app/inventories/reports
+```
+
+`-f` picks csv, json, xml or xlsx where a report offers it; the config archive
+(zip) and topology map (html) are always written in their own format. Reports
+the scan has no data for are skipped and listed. The exit code is non-zero
+when a report fails or a report named with `-r` could not be generated.
+
+The EoX report uses the Cisco API credentials saved in the web UI, read from
+`config/` (`/app/config` in the container). Point elsewhere with `--config-dir`,
+or pass `--offline` to skip it, as it is the only report that calls out to the
+network.
 
 ### Add to a Previous Scan
 
@@ -330,6 +361,8 @@ wiremap/
 │   ├── parsers_panos.py      # PAN-OS routing and LLDP parsers
 │   ├── identity.py           # Hostname normalization, device identity
 │   ├── inventory_merge.py    # Merge several scans into one
+│   ├── wiremap_cli.py        # Command-line reports, summary and merge
+│   ├── merge_scans.py        # Command-line scan merge
 │   ├── device_facts.py       # Serial/model/version extraction
 │   ├── snmp_probe.py         # SNMP identification (v2c/v3)
 │   ├── snmp_tables.py        # Standard-MIB table collection

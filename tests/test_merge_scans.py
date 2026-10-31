@@ -1,4 +1,7 @@
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -100,3 +103,19 @@ def test_rejects_non_scan_json(tmp_path):
     bad = _write(tmp_path / "bad.json", {"something": "else"})
     with pytest.raises(SystemExit):
         main([a, bad])
+
+
+def test_runs_as_a_script_without_loading_the_web_app(tmp_path):
+    """Run as `python app/merge_scans.py`, app/app.py used to shadow the app
+    package and the script died opening the web app's log file."""
+    a = _write(tmp_path / "a.json", _scan("a", {"SW1": _device("SW1", "192.0.2.1")}))
+    b = _write(tmp_path / "b.json", _scan("b", {"SW2": _device("SW2", "192.0.2.2")}))
+    out = tmp_path / "merged.json"
+    script = Path(__file__).resolve().parent.parent / "app" / "merge_scans.py"
+
+    result = subprocess.run([sys.executable, str(script), a, b, "-o", str(out)],
+                            capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "flask" not in result.stderr.lower()
+    assert set(json.loads(out.read_text())["devices"]) == {"SW1", "SW2"}

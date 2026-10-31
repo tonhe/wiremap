@@ -21,6 +21,11 @@ import json
 import os
 import sys
 
+if __name__ == "__main__":
+    # Run as a script, this directory is first on sys.path and app.py would
+    # shadow the app package. Block it so every import falls back to flat.
+    sys.modules.setdefault("app", None)
+
 try:
     from app.inventory import DiscoveryInventory
     from app.inventory_merge import merge_inventories
