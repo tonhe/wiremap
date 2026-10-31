@@ -316,3 +316,18 @@ def test_licenses_sheet_in_workbook_and_tabular():
     wb = load_workbook(io.BytesIO(report.generate(inv)))
     assert "Licenses" in wb.sheetnames
     assert "Licenses" in report.generate_tabular_data(inv)
+
+
+def test_site_and_site_naming_columns(monkeypatch):
+    monkeypatch.setattr("app.site_mapping._configured_rules", lambda: [])
+    names = ["AB001-IDF-SWA-01", "AB002-MDF-STK-01", "CD103-IDF-SWA-02",
+             "EF204-MDF-RTR-01", "GH305-IDF-SWA-01", "Switch-exec"]
+    inventory = {"devices": {n: _device(n, f"192.0.2.{i}")
+                             for i, n in enumerate(names, 1)}}
+
+    rows = _rows(inventory)
+
+    assert rows["AB001-IDF-SWA-01"]["Site"] == "AB001"
+    assert rows["AB001-IDF-SWA-01"]["Site Naming"] == ""
+    assert rows["Switch-exec"]["Site"] == "Switch"
+    assert "unlike most" in rows["Switch-exec"]["Site Naming"]

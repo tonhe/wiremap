@@ -35,7 +35,7 @@ Each platform has its own command set per collector. A collector that cannot ser
 
 **Legacy SSH:** paramiko is pinned to 3.5.x deliberately. Version 4.0 removed the SHA-1 key exchanges and the `ssh-rsa` host key algorithm outright, which strands older Catalyst and Nexus hardware that offers nothing else. Modern algorithms are still preferred wherever the device supports them.
 
-### Data Collection (15 Collectors)
+### Data Collection (20 Collectors)
 All collectors run automatically on every device -- no pre-selection needed.
 
 | Collector | Data Gathered |
@@ -52,9 +52,14 @@ All collectors run automatically on every device -- no pre-selection needed.
 | Routing Detail | Protocol summaries, per-VRF route counts, OSPF LSDB and EIGRP topology size, routing processes, redistribution |
 | VRF | VRF definitions and interface assignments |
 | Switchport | Port-security, BPDU guard, storm-control, trunk config |
-| HSRP | HSRP/VRRP state, virtual IPs, active/standby roles |
+| HSRP | HSRP, GLBP and VRRP state, virtual IPs, active/standby roles; groups configured but not collected are still listed from the config |
 | Edge Services | ACLs and what references them, applied ACLs per interface, NAT, proxy-ARP, uRPF |
-| NTP/Logging | NTP sync, logging config, SNMP settings (credentials redacted) |
+| NTP/Logging | NTP sync, logging config and the full log buffer, SNMP settings (credentials redacted) |
+| Environment | PSU, fan and temperature state, PoE budget and faulted ports |
+| Redundancy | Supervisor redundancy mode and peer state, switchovers, stack ports and ring |
+| Management Security | SSH version and host key size, Smart Install state |
+| Interface Counters | Per-interface errors, CRC, drops, resets, last input/output and link flap |
+| CPU/Memory | CPU 5s/1m/5m, CPU history, memory pools and top processes |
 
 Parsing uses [NTC Templates](https://github.com/networktocode/ntc-templates) (TextFSM) with regex fallbacks for vendor-aware structured output.
 
@@ -77,10 +82,11 @@ A dedicated **Reports** tab serves as the single destination for all report gene
 | L2 Discovery | XLSX, JSON, CSV, XML | VLANs, STP topology and root bridges, trunk and interface status with neighbors, routed interfaces, anomaly findings |
 | L3 Routing & IP | XLSX, JSON, CSV, XML | Protocol neighbors, route tables, per-VRF route summary, OSPF topology, Routing Scale (OSPF LSDB, EIGRP topology), Routing Processes, Redistribution, FHRP status, IP audit, ARP/MAC map, VRF summary, and a Collection Errors sheet listing any command a device rejected |
 | Internet Edge | XLSX, JSON, CSV, XML | Edge Devices (and why each qualifies), BGP peering across VRFs, Public Addresses, NAT overview, ACL audit by usage, FHRP status, edge interface security |
+| Platform Health | XLSX, JSON, CSV, XML | Environment (PSU, fan, temperature), PoE budget, redundancy and stack ring, SSH and Smart Install exposure, CPU and memory, interface errors and drops, with findings |
 | EOX Lifecycle | XLSX | Hardware/software end-of-life dates, module EOX status (requires Cisco API credentials) |
 | Config Archive | ZIP | Running configs as individual text files |
 
-**Findings.** The L2, L3 and Internet Edge reports rate findings on one scale. Critical is a reachability, redundancy or security exposure backed by collected data (a BGP session down, overlapping subnets). Warning is something usually wrong that may be intentional (`permit ip any any` on an interface filter). Info is documentation grade (an unreferenced ACL, an EIGRP stub peer). When one check fires on more than half the devices, an Info note says so, since that is more often a miscalibrated check than a network-wide defect.
+**Findings.** The L2, L3, Internet Edge and Platform Health reports rate findings on one scale. Critical is a reachability, redundancy or security exposure backed by collected data (a BGP session down, overlapping subnets). Warning is something usually wrong that may be intentional (`permit ip any any` on an interface filter). Info is documentation grade (an unreferenced ACL, an EIGRP stub peer). When one check fires on more than half the devices, an Info note says so, since that is more often a miscalibrated check than a network-wide defect.
 
 **Internet edge.** A device counts as edge when it has BGP to a public AS, a public address on an interface, NAT configured, or a static default pointing outside the IGP, and the Edge Devices sheet says which. The ACL audit classifies each ACL by what references it in the running config (interface filter, management, QoS, route-map, NAT, crypto, or unreferenced), so a QoS class-map ACL with zero hits is not reported as dead. A device with no NAT config reads "not configured" rather than 0 translations.
 
@@ -149,11 +155,26 @@ A rebuild is only needed when `requirements.txt` changes.
 1. Open the web UI at `http://localhost:8888`
 2. Enter a seed device IP and select the platform type
 3. Choose connection protocol (SSH / Telnet / Auto)
-4. Provide credentials
+4. Provide credentials (add up to five sets with **Add credentials**, see below)
 5. Set crawl depth and toggle device type filters (routers, switches, phones, servers, APs)
 6. Click **Start Discovery**
 7. Monitor real-time progress in the console (authentication, data collection, neighbor discovery)
 8. After completion, the **Reports** tab opens automatically with available reports
+
+### Multiple Credential Sets
+
+Both the discovery and targeted forms take up to five username/password sets. The first set is the standard Username/Password fields; **Add credentials** adds another row, and blank extra rows are ignored. A row with a username and no password is rejected rather than skipped.
+
+- Sets are tried in order, and the next set is only tried when a device **rejects the login**. A timeout, a refused port or an SSH negotiation failure means the device can't be reached, so no other set is tried
+- A rejected set is not retried on that device with another device-type driver or over Telnet
+- Whichever set last logged in is tried first on the next device, with the rest following in their configured order. On a site where most devices share one account, the other sets cost nothing after the first success
+- Every try goes through the `max_logins_per_minute` limiter
+- The Devices sheet has a **Login User** column with the account that logged in (the scan file also stores the set number). The Failed Devices sheet lists the set tried on each attempt, and an auth failure says all the sets were rejected
+- Passwords are never saved: not in the scan file, logs, console events, settings or the browser. The scan file records the usernames offered, in order
+
+**AAA lockout caution.** A device that rejects every set costs one authentication failure per set, up to five. Against TACACS+ or ISE with lockout thresholds, put the set most devices accept first, keep the list short, and set `max_logins_per_minute`.
+
+In demo mode, `10.0.0.1` (WAN-ROUTER-01) only accepts the username `backup-admin`, so a targeted scan of it exercises the second-set path.
 
 ### Load Previous Scan
 
@@ -209,7 +230,8 @@ arguments.
 ### Reports from the Command Line
 
 `app/wiremap_cli.py` generates the same reports as the Reports tab without the
-web app running. It needs only Python and the packages in `requirements.txt`.
+web app running. It needs Python 3.11 or 3.12 (netmiko still imports `telnetlib`,
+which 3.13 removed) and the packages in `requirements.txt`.
 
 ```bash
 python app/wiremap_cli.py                         # menu: pick scans, reports, format
@@ -229,7 +251,9 @@ docker compose exec wiremap python wiremap_cli.py report \
 `-f` picks csv, json, xml or xlsx where a report offers it; the config archive
 (zip) and topology map (html) are always written in their own format. Reports
 the scan has no data for are skipped and listed. The exit code is non-zero
-when a report fails or a report named with `-r` could not be generated.
+when a report fails or a report named with `-r` could not be generated. A csv
+export of a multi-sheet report is written as one file per sheet. At the menu,
+`q` quits.
 
 The EoX report uses the Cisco API credentials saved in the web UI, read from
 `config/` (`/app/config` in the container). Point elsewhere with `--config-dir`,
@@ -319,6 +343,8 @@ Set from the **Settings** tab under **Discovery Settings**. Values are persisted
 
 Lines starting with `#` are comments. A hostname that matches no rule falls back to the default.
 
+The Device Inventory Devices sheet shows each device's Site, and a **Site Naming** note for names the default rule probably got wrong: no hyphen at all, or a first token shaped unlike most of the site codes in the scan (`Switch-exec` among `AB001`-style codes). Those are the names to fix or cover with a rule.
+
 ### SNMP
 
 SNMP credentials are entered per scan on both the discovery and targeted forms, alongside the login credentials. Both v2c (community string) and v3 (auth and privacy) are supported.
@@ -372,7 +398,7 @@ wiremap/
 │   ├── site_mapping.py       # Hostname-to-site rules
 │   ├── redact.py             # Config secret redaction
 │   ├── mock_devices.py       # Demo mode simulator (opt-in)
-│   ├── collectors/           # 15 modular data collectors
+│   ├── collectors/           # 20 modular data collectors
 │   ├── neighbors/            # Neighbour sources and crawl scope
 │   └── reports/              # On-demand report generators
 ├── config/

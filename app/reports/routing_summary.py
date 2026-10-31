@@ -30,6 +30,7 @@ from .findings import (
     CRITICAL, WARNING, INFO, AGGREGATE_HEADERS, DETAIL_SHEET,
     make_finding, overfire_check, aggregate_rows, summary_count_rows,
 )
+from .fhrp import FHRP_HEADERS, fhrp_rows, fhrp_state_findings, has_fhrp_data
 from .l2_discovery import (
     _extract_ip_interfaces,
     _get_interface_description,
@@ -37,6 +38,12 @@ from .l2_discovery import (
     _derive_site,
     _has_collector_data,
 )
+try:
+    from app.collectors.routing_detail import (
+        normalize_route_summary, parse_ospf_interfaces_brief as _parse_ospf_interfaces_brief)
+except ImportError:
+    from collectors.routing_detail import (
+        normalize_route_summary, parse_ospf_interfaces_brief as _parse_ospf_interfaces_brief)
 
 # ---------------------------------------------------------------------------
 # Styling (mirrors L2 discovery report palette)
@@ -174,7 +181,7 @@ def _analyze_l3(inventory_data):
                 ))
 
         # --- Route summary: static routes alongside dynamic ---
-        route_summary = rd_parsed.get("route_summary", [])
+        route_summary = normalize_route_summary(rd_parsed.get("route_summary"))
         has_dynamic = False
         has_static = False
         static_count = 0
@@ -238,17 +245,7 @@ def _analyze_l3(inventory_data):
         findings.extend(_redistribution_findings(hostname, device))
 
         # --- FHRP state check ---
-        hsrp_parsed = cd.get("hsrp", {}).get("parsed", {})
-        for e in hsrp_parsed.get("entries", []):
-            state = e.get("state", "")
-            if state and state.lower() not in ("active", "standby", "listen", ""):
-                findings.append(make_finding(
-                    hostname, WARNING, "FHRP group in unexpected state",
-                    (
-                        f"Interface {e.get('interface', '?')} group {e.get('group', '?')} "
-                        f"VIP {e.get('virtual_ip', '?')} state: {state}"
-                    ),
-                ))
+        findings.extend(fhrp_state_findings(hostname, device, make_finding, WARNING))
 
         # --- Collect IP subnets for overlap detection ---
         ip_interfaces = _extract_ip_interfaces(device)
@@ -265,7 +262,7 @@ def _analyze_l3(inventory_data):
                         pass
 
         # --- Collect OSPF neighbors for asymmetry check ---
-        ospf_intfs = rd_parsed.get("ospf_interfaces", [])
+        ospf_intfs = _ospf_interfaces(device.get("collector_data", {}).get("routing_detail", {}))
         if ospf_intfs:
             ospf_neighbors_by_device[hostname] = ospf_intfs
 
@@ -506,7 +503,7 @@ def _route_summary_rows(inventory_data):
     for hostname, device in sorted(inventory_data.get("devices", {}).items()):
         cd = device.get("collector_data", {})
         rd_parsed = cd.get("routing_detail", {}).get("parsed", {})
-        route_summary = rd_parsed.get("route_summary", [])
+        route_summary = normalize_route_summary(rd_parsed.get("route_summary"))
         if route_summary:
             rows.append(_route_counts_row(hostname, "default", (
                 (_route_bucket(rs.get("source", "")), rs.get("count", 0))
@@ -745,51 +742,66 @@ def _build_route_summary_sheet(wb, inventory_data):
     _finalize(ws, "RouteSummary", len(headers), row - 1)
 
 
-def _build_ospf_topology_sheet(wb, inventory_data):
-    ws = wb.create_sheet(title="OSPF Topology")
-    headers = ["Device", "Site/Location", "Process ID", "Router ID",
-               "Area", "Interface", "Cost", "State", "Neighbors"]
-    _write_header_row(ws, headers)
+_OSPF_TOPOLOGY_HEADERS = ["Device", "Site/Location", "Process ID", "Router ID",
+                          "Area", "Interface", "Cost", "State", "Neighbors"]
 
-    row = 2
+
+def _ospf_interfaces(rd):
+    """OSPF interface rows, re-read from the raw brief output when it was
+    saved. Scans parsed before the brief parser was fixed stored rows with
+    every column from Area onward shifted one place."""
+    raw = (rd.get("raw") or {}).get("show ip ospf interface brief", "")
+    if raw:
+        rows = _parse_ospf_interfaces_brief(raw)
+        if rows:
+            return rows
+    return rd.get("parsed", {}).get("ospf_interfaces", []) or []
+
+
+def _ospf_topology_rows(inventory_data):
+    rows = []
     for hostname, device in sorted(inventory_data.get("devices", {}).items()):
-        rd_parsed = device.get("collector_data", {}).get("routing_detail", {}).get("parsed", {})
-        ospf_procs = rd_parsed.get("ospf_processes", [])
-        ospf_intfs = rd_parsed.get("ospf_interfaces", [])
-        site = _derive_site(hostname)
-
+        rd = device.get("collector_data", {}).get("routing_detail", {})
+        rd_parsed = rd.get("parsed", {})
+        ospf_procs = rd_parsed.get("ospf_processes", []) or []
+        ospf_intfs = _ospf_interfaces(rd)
         if not ospf_procs and not ospf_intfs:
             continue
-
-        # Build process/area lookup
-        proc_id = ""
-        router_id = ""
-        proc_areas = []
-        if ospf_procs:
-            p = ospf_procs[0]
-            proc_id = p.get("process_id", "")
-            router_id = p.get("router_id", "")
-            proc_areas = p.get("areas", [])
+        site = _derive_site(hostname)
+        router_ids = {str(p.get("process_id", "")): p.get("router_id", "")
+                      for p in ospf_procs}
+        first = ospf_procs[0] if ospf_procs else {}
 
         if ospf_intfs:
             for oi in ospf_intfs:
-                _write_row(ws, row, [
-                    hostname, site, proc_id, router_id,
+                proc_id = str(oi.get("process") or first.get("process_id", ""))
+                rows.append([
+                    hostname, site, proc_id,
+                    router_ids.get(proc_id, first.get("router_id", "")),
                     oi.get("area", ""),
                     oi.get("interface", ""),
                     oi.get("cost", ""),
                     oi.get("state", ""),
                     oi.get("neighbors", oi.get("nbrs_full", "")),
                 ])
-                row += 1
-        elif ospf_procs:
+        else:
             # No interface detail, just list process + areas
-            for area in proc_areas:
-                _write_row(ws, row, [
-                    hostname, site, proc_id, router_id,
-                    area, "", "", "", "",
-                ])
-                row += 1
+            for p in ospf_procs:
+                for area in p.get("areas", []):
+                    rows.append([hostname, site, p.get("process_id", ""),
+                                 p.get("router_id", ""), area, "", "", "", ""])
+    return rows
+
+
+def _build_ospf_topology_sheet(wb, inventory_data):
+    ws = wb.create_sheet(title="OSPF Topology")
+    headers = _OSPF_TOPOLOGY_HEADERS
+    _write_header_row(ws, headers)
+
+    row = 2
+    for values in _ospf_topology_rows(inventory_data):
+        _write_row(ws, row, values)
+        row += 1
 
     _finalize(ws, "OSPFTopology", len(headers), row - 1)
 
@@ -944,28 +956,13 @@ def _build_vrf_sheet(wb, inventory_data):
 
 def _build_fhrp_sheet(wb, inventory_data):
     ws = wb.create_sheet(title="FHRP Status")
-    headers = ["Device", "Site/Location", "Interface", "Group",
-               "Priority", "State", "Virtual IP"]
+    headers = FHRP_HEADERS
     _write_header_row(ws, headers)
 
     row = 2
-    for hostname, device in sorted(inventory_data.get("devices", {}).items()):
-        hsrp_parsed = device.get("collector_data", {}).get("hsrp", {}).get("parsed", {})
-        entries = hsrp_parsed.get("entries", [])
-        if not entries:
-            continue
-
-        site = _derive_site(hostname)
-        for e in entries:
-            _write_row(ws, row, [
-                hostname, site,
-                e.get("interface", ""),
-                e.get("group", ""),
-                e.get("priority", ""),
-                e.get("state", ""),
-                e.get("virtual_ip", ""),
-            ])
-            row += 1
+    for row_data in fhrp_rows(inventory_data, _derive_site):
+        _write_row(ws, row, row_data)
+        row += 1
 
     _finalize(ws, "FHRPStatus", len(headers), row - 1)
 
@@ -1138,7 +1135,7 @@ class RoutingSummaryReport(BaseReport):
             _build_vrf_sheet(wb, inventory_data)
 
         # Tab 10: FHRP Status (if hsrp data exists)
-        if _has_collector_data(inventory_data, "hsrp"):
+        if _has_collector_data(inventory_data, "hsrp") or has_fhrp_data(inventory_data):
             _build_fhrp_sheet(wb, inventory_data)
 
         # Tab 11: Findings
@@ -1254,41 +1251,8 @@ class RoutingSummaryReport(BaseReport):
 
         # --- OSPF Topology (conditional) ---
         if _has_collector_data(inventory_data, "routing_detail"):
-            ospf_headers = ["Device", "Site/Location", "Process ID", "Router ID",
-                            "Area", "Interface", "Cost", "State", "Neighbors"]
-            ospf_rows = []
-            for hostname, device in sorted(devices.items()):
-                rd_parsed = device.get("collector_data", {}).get("routing_detail", {}).get("parsed", {})
-                ospf_procs = rd_parsed.get("ospf_processes", [])
-                ospf_intfs = rd_parsed.get("ospf_interfaces", [])
-                site = _derive_site(hostname)
-                if not ospf_procs and not ospf_intfs:
-                    continue
-                proc_id = ""
-                router_id = ""
-                proc_areas = []
-                if ospf_procs:
-                    p = ospf_procs[0]
-                    proc_id = p.get("process_id", "")
-                    router_id = p.get("router_id", "")
-                    proc_areas = p.get("areas", [])
-                if ospf_intfs:
-                    for oi in ospf_intfs:
-                        ospf_rows.append([
-                            hostname, site, proc_id, router_id,
-                            oi.get("area", ""),
-                            oi.get("interface", ""),
-                            oi.get("cost", ""),
-                            oi.get("state", ""),
-                            oi.get("neighbors", oi.get("nbrs_full", "")),
-                        ])
-                elif ospf_procs:
-                    for area in proc_areas:
-                        ospf_rows.append([
-                            hostname, site, proc_id, router_id,
-                            area, "", "", "", "",
-                        ])
-            sheets["OSPF Topology"] = (ospf_headers, ospf_rows)
+            sheets["OSPF Topology"] = (list(_OSPF_TOPOLOGY_HEADERS),
+                                       _ospf_topology_rows(inventory_data))
 
         scale_rows = _routing_scale_rows(inventory_data)
         if scale_rows:
@@ -1414,26 +1378,9 @@ class RoutingSummaryReport(BaseReport):
             sheets["VRF Summary"] = (vrf_headers, vrf_rows)
 
         # --- FHRP Status (conditional) ---
-        if _has_collector_data(inventory_data, "hsrp"):
-            fhrp_headers = ["Device", "Site/Location", "Interface", "Group",
-                            "Priority", "State", "Virtual IP"]
-            fhrp_rows = []
-            for hostname, device in sorted(devices.items()):
-                hsrp_parsed = device.get("collector_data", {}).get("hsrp", {}).get("parsed", {})
-                entries = hsrp_parsed.get("entries", [])
-                if not entries:
-                    continue
-                site = _derive_site(hostname)
-                for e in entries:
-                    fhrp_rows.append([
-                        hostname, site,
-                        e.get("interface", ""),
-                        e.get("group", ""),
-                        e.get("priority", ""),
-                        e.get("state", ""),
-                        e.get("virtual_ip", ""),
-                    ])
-            sheets["FHRP Status"] = (fhrp_headers, fhrp_rows)
+        if _has_collector_data(inventory_data, "hsrp") or has_fhrp_data(inventory_data):
+            sheets["FHRP Status"] = (list(FHRP_HEADERS),
+                                     fhrp_rows(inventory_data, _derive_site))
 
         # --- Findings (aggregated) and Findings (detail) ---
         findings_tabular_sheets(sheets, analysis["findings"])

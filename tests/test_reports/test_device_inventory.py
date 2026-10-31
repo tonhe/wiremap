@@ -218,3 +218,41 @@ def test_no_conflicts_sheet_when_none():
     data = DeviceInventoryReport().generate_tabular_data(inventory)
     assert "Merge Sources" in data
     assert "Merge Conflicts" not in data
+
+
+def _merged_xlsx_inventory():
+    return {
+        "devices": {"SW1": {"hostname": "SW1", "mgmt_ip": "192.0.2.1",
+                            "source_scan": "scan-a", "collector_data": {}}},
+        "merged_from": [
+            {"discovery_id": "scan-a", "filename": "a.json",
+             "seed_ip": "192.0.2.1", "timestamp": "2026-08-25T10:00:00+00:00",
+             "device_count": 1},
+            {"discovery_id": "scan-b", "filename": "b.json",
+             "seed_ip": "198.51.100.1", "timestamp": "2026-08-26T10:00:00+00:00",
+             "device_count": 1},
+        ],
+        "merge_conflicts": [
+            {"hostname": "SW1", "also_named": "", "kept_from": "scan-a",
+             "discarded_from": "scan-b", "reason": "newer scan"},
+        ],
+    }
+
+
+def test_merged_xlsx_has_merge_sheets():
+    data = DeviceInventoryReport().generate(_merged_xlsx_inventory(), "xlsx")
+    wb = load_workbook(io.BytesIO(data))
+    assert "Merge Sources" in wb.sheetnames
+    assert "Merge Conflicts" in wb.sheetnames
+    rows = list(wb["Merge Sources"].iter_rows(min_row=2, values_only=True))
+    assert [r[0] for r in rows] == ["scan-a", "scan-b"]
+    rows = list(wb["Merge Conflicts"].iter_rows(min_row=2, values_only=True))
+    assert rows[0][0] == "SW1"
+
+
+def test_unmerged_xlsx_has_no_merge_sheets():
+    inventory = {"devices": {"SW1": {"hostname": "SW1", "collector_data": {}}}}
+    data = DeviceInventoryReport().generate(inventory, "xlsx")
+    wb = load_workbook(io.BytesIO(data))
+    assert "Merge Sources" not in wb.sheetnames
+    assert "Merge Conflicts" not in wb.sheetnames

@@ -12,6 +12,10 @@ try:
     from app import failures
 except ImportError:
     import failures
+try:
+    from app.credentials import Credential
+except ImportError:
+    from credentials import Credential
 
 logger = logging.getLogger(__name__)
 
@@ -155,8 +159,8 @@ class ConnectionError(Exception):
 
 
 def _attempt(protocol, device_type, reason, exception_class, message,
-             elapsed_ms=0):
-    return {
+             elapsed_ms=0, credential=None):
+    record = {
         "protocol": protocol,
         "port": _PORTS.get(protocol),
         "device_type": device_type,
@@ -165,6 +169,11 @@ def _attempt(protocol, device_type, reason, exception_class, message,
         "elapsed_ms": elapsed_ms,
         "reason": reason,
     }
+    # Which set was tried -- never the password.
+    if credential is not None:
+        record["credential_set"] = credential.number
+        record["username"] = credential.username
+    return record
 
 
 def _short_message(exc) -> str:
@@ -195,7 +204,8 @@ class ConnectionManager:
     def __init__(self, host: str, device_type: str, username: str,
                  password: str, protocol: str = "ssh",
                  allow_fallback: bool = True, platform: str = None,
-                 login_limiter=None, allow_telnet: bool = False):
+                 login_limiter=None, allow_telnet: bool = False,
+                 credentials=None):
         self.host = host
         # protocol="auto" stays on SSH unless telnet is allowed: most sites
         # run "transport input ssh", so a telnet try only adds a timeout and
@@ -212,24 +222,34 @@ class ConnectionManager:
         # were never reached because of exactly that.
         self.device_type = device_type or DEFAULT_DEVICE_TYPE
         self.device_type_supplied = bool(device_type)
-        self.username = username
-        self.password = password
+        # Credential sets in try order. The next set is only tried after an
+        # authentication failure; username/password alone is a single set.
+        self.credentials = list(credentials) if credentials else [
+            Credential(1, username, password)]
+        # The set that logged in, once connect() succeeds. username follows
+        # it, so callers asking who is logged in get the right account.
+        self.credential = None
+        self.username = self.credentials[0].username
+        self.password = self.credentials[0].password
         self.protocol = protocol  # "ssh", "telnet", "auto"
         # False when the caller supplied device_type explicitly -- trying
         # other platforms then contradicts what the operator asked for.
         self.allow_fallback = allow_fallback
         self.effective_device_type = None
+        self._legacy_ssh = False
 
-    def _build_device_params(self, device_type: str = None) -> dict:
+    def _build_device_params(self, device_type: str = None,
+                             credential=None) -> dict:
         """Build Netmiko connection parameters."""
         dt = device_type or self.device_type
         if self.protocol == "telnet" and not dt.endswith(_TELNET_SUFFIX):
             dt = dt + _TELNET_SUFFIX
+        cred = credential or self.credentials[0]
         return {
             "device_type": dt,
             "host": self.host,
-            "username": self.username,
-            "password": self.password,
+            "username": cred.username,
+            "password": cred.password,
             "timeout": 10,
             "session_timeout": 20,
             "auth_timeout": 10,
@@ -282,9 +302,7 @@ class ConnectionManager:
                 f"MOCK MODE: returning simulated data for {self.host} -- "
                 f"this is not a real device"
             )
-            mock_conn = get_mock_connection(self.host, self.device_type,
-                                            self.username, self.password)
-            return ConnectionResult(connection=mock_conn, protocol_used="mock", fallback_occurred=False)
+            return self._connect_mock(get_mock_connection)
 
         if self.protocol != "auto":
             protocols_to_try = [self.protocol]
@@ -295,6 +313,13 @@ class ConnectionManager:
             logger.debug(f"Telnet to {self.host} not allowed: allow_telnet is off")
         attempts = []
         fallback_occurred = False
+        # Set numbers this host's AAA has rejected. A rejection does not
+        # depend on the netmiko driver or the transport, so a rejected set
+        # is never retried on a device-type fallback or over telnet.
+        rejected = set()
+        # Set once a legacy-algorithm retry got past negotiation, so the
+        # next credential set goes straight to it.
+        self._legacy_ssh = False
 
         for proto in protocols_to_try:
             if proto == "telnet" and attempts and self._telnet_pointless(attempts):
@@ -321,26 +346,14 @@ class ConnectionManager:
                 else:
                     effective_dt = dt
 
-                params = self._build_device_params(effective_dt)
-                params["device_type"] = effective_dt
-                conn, reason = self._try_connect(proto, effective_dt, params,
-                                                 attempts)
-                if conn is None and reason == failures.LEGACY_CRYPTO \
-                        and proto == "ssh":
-                    _ensure_legacy_algorithms()
-                    legacy = dict(params,
-                                  disabled_algorithms=LEGACY_DISABLED_ALGORITHMS)
-                    logger.info(f"Retrying {self.host} with legacy SSH algorithms")
-                    conn, reason = self._try_connect(proto, effective_dt,
-                                                     legacy, attempts)
+                conn, reason = self._try_credentials(proto, effective_dt,
+                                                     attempts, rejected)
                 if conn is not None:
                     self.effective_device_type = effective_dt
                     return ConnectionResult(connection=conn, protocol_used=proto,
                                             fallback_occurred=fallback_occurred)
                 if reason == failures.AUTH:
-                    raise ConnectionError(
-                        f"Authentication failed to {self.host}", "auth",
-                        attempts, failures.AUTH)
+                    raise self._auth_error(attempts)
                 if reason in _NETWORK_LAYER:
                     # Another driver will hit the same closed port.
                     break
@@ -352,14 +365,108 @@ class ConnectionManager:
             f"Connection failed to {self.host}: {summary}", "connection",
             attempts, overall_reason(attempts))
 
-    def _try_connect(self, proto, device_type, params, attempts):
-        """One connection attempt. Returns (connection, None) or (None, reason)
-        after appending the attempt record."""
+    def _try_credentials(self, proto, device_type, attempts, rejected):
+        """Try each credential set not yet rejected, on one driver and
+        transport. Returns (connection, None) or (None, reason); reason is
+        AUTH only when every set has now been rejected.
+
+        Only an authentication failure moves on to the next set. Anything
+        else -- timeout, refusal, negotiation failure, a driver mismatch --
+        is not about the account, so another set would only cost the AAA
+        server another login.
+        """
+        reason = None
+        for cred in self.credentials:
+            if cred.number in rejected:
+                continue
+            params = self._build_device_params(device_type, cred)
+            params["device_type"] = device_type
+            legacy = dict(params,
+                          disabled_algorithms=LEGACY_DISABLED_ALGORITHMS)
+            if proto == "ssh" and self._legacy_ssh:
+                conn, reason = self._try_connect(proto, device_type,
+                                                 legacy, attempts, cred)
+            else:
+                conn, reason = self._try_connect(proto, device_type, params,
+                                                 attempts, cred)
+                if conn is None and reason == failures.LEGACY_CRYPTO \
+                        and proto == "ssh":
+                    _ensure_legacy_algorithms()
+                    logger.info(f"Retrying {self.host} with legacy SSH "
+                                f"algorithms")
+                    conn, reason = self._try_connect(proto, device_type,
+                                                     legacy, attempts, cred)
+                    if reason != failures.LEGACY_CRYPTO:
+                        self._legacy_ssh = True
+            if conn is not None:
+                self._logged_in_as(cred)
+                return conn, None
+            if reason != failures.AUTH:
+                return None, reason
+            rejected.add(cred.number)
+        if len(rejected) < len(self.credentials):
+            return None, reason or failures.OTHER
+        return None, failures.AUTH
+
+    def _logged_in_as(self, cred):
+        self.credential = cred
+        self.username = cred.username
+        self.password = cred.password
+
+    def _auth_error(self, attempts):
+        count = len(self.credentials)
+        if count > 1:
+            message = (f"Authentication failed to {self.host}: all {count} "
+                       f"credential sets rejected")
+        else:
+            message = f"Authentication failed to {self.host}"
+        return ConnectionError(message, "auth", attempts, failures.AUTH)
+
+    def _acquire_login_slot(self):
         if self.login_limiter is not None:
             waited = self.login_limiter.acquire()
             if waited:
                 self.login_wait_ms += int(waited * 1000)
-        logger.info(f"Connecting to {self.host} ({device_type} via {proto})")
+
+    def _as_whom(self, cred):
+        if cred is None or len(self.credentials) < 2:
+            return ""
+        return f" as {cred.label()}"
+
+    def _connect_mock(self, get_mock_connection):
+        """Mock logins walk the credential sets like real ones, so the
+        multi-set path can be exercised without a lab."""
+        attempts = []
+        for cred in self.credentials:
+            self._acquire_login_slot()
+            try:
+                conn = get_mock_connection(self.host, self.device_type,
+                                           cred.username, cred.password)
+            except Exception as e:
+                reason = failures.classify_exception(e)
+                attempts.append(_attempt("mock", self.device_type, reason,
+                                         type(e).__name__, _short_message(e),
+                                         credential=cred))
+                logger.warning(f"Failed {self.host} via mock{self._as_whom(cred)}"
+                               f" ({reason})")
+                if reason != failures.AUTH:
+                    raise ConnectionError(
+                        f"Connection failed to {self.host}: {_short_message(e)}",
+                        "connection", attempts, reason)
+                continue
+            self._logged_in_as(cred)
+            self.effective_device_type = self.device_type
+            return ConnectionResult(connection=conn, protocol_used="mock",
+                                    fallback_occurred=False)
+        raise self._auth_error(attempts)
+
+    def _try_connect(self, proto, device_type, params, attempts,
+                     credential=None):
+        """One connection attempt. Returns (connection, None) or (None, reason)
+        after appending the attempt record."""
+        self._acquire_login_slot()
+        who = self._as_whom(credential)
+        logger.info(f"Connecting to {self.host} ({device_type} via {proto}){who}")
         started = time.monotonic()
         try:
             conn = _connect_handler(**params)
@@ -370,11 +477,12 @@ class ConnectionManager:
             if params.get("disabled_algorithms"):
                 message = f"legacy algorithms retry: {message}"
             attempts.append(_attempt(proto, device_type, reason,
-                                     type(e).__name__, message, elapsed_ms))
+                                     type(e).__name__, message, elapsed_ms,
+                                     credential=credential))
             logger.warning(f"Failed {self.host} with {device_type} via "
-                           f"{proto} ({reason}): {message}")
+                           f"{proto}{who} ({reason}): {message}")
             return None, reason
-        logger.info(f"Connected to {self.host} ({device_type} via {proto})")
+        logger.info(f"Connected to {self.host} ({device_type} via {proto}){who}")
         return conn, None
 
     def _port_open(self, proto, attempts):

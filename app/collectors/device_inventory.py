@@ -24,11 +24,15 @@ _COMMANDS = {
     # Licensing and call-home: IOS-XE boxes are often typed cisco_ios by
     # autodetect, so both get the IOS-XE commands. Classic IOS rejects them,
     # which the parsers treat as "no licensing data".
+    # show platform: ASR1000/ISR4000 have no show module; their slot state
+    # (ok, ok/active, out of service) is only in this table.
     "cisco_ios": ["show version", "show inventory", "show switch detail", "show module",
+                  "show platform",
                   "show switch virtual", "show switch virtual link",
                   "show license summary", "show license status",
                   "show call-home", "show call-home profile all"],
     "cisco_xe": ["show version", "show inventory", "show switch detail", "show module",
+                 "show platform",
                  "show stackwise-virtual", "show stackwise-virtual link",
                  "show stackwise-virtual dual-active-detection",
                  "show switch virtual", "show switch virtual link",
@@ -105,6 +109,108 @@ def _usable(raw):
     if not raw or error_reason(raw):
         return ""
     return raw
+
+
+# IOS 'show module' card table: "Mod Ports Card Type Model Serial No."
+_MOD_CARD_HEADER_RE = re.compile(r"^\s*Mod\s+Ports\s+Card\s+Type", re.I)
+# Status table. 6500/9400/9500 print "Mod MAC addresses ... Status";
+# 4500/4500-X print " M MAC addresses ... Status".
+_MOD_STATUS_HEADER_RE = re.compile(r"^\s*(?:Mod|M)\s+MAC\s+addresses\b.*\bStatus\s*$", re.I)
+_MOD_SWITCH_RE = re.compile(r"^\s*Switch\s+Number:?\s*(\d+)", re.I)
+_MOD_CARD_ROW_RE = re.compile(
+    r"^\s*(\d+)\s+(\d+)\s+(\S.*?)\s+(\S+)\s+(\S+)\s*$")
+_MOD_STATUS_ROW_RE = re.compile(r"^\s*(\d+)\s+\S.*?\s(\S+)\s*$")
+
+
+def _parse_ios_show_module(raw):
+    """Card rows and per-module status from IOS 'show module'.
+
+    The ntc status template only knows the "Mod MAC addresses" header, so a
+    4500 or 4500-X (" M MAC addresses") came back with no status at all.
+    Returns (cards, {(switch, module): status}); switch is "" outside a
+    VSS/SVL "Switch Number N" section.
+    """
+    cards, status = [], {}
+    switch, section = "", None
+    for line in (raw or "").splitlines():
+        sw = _MOD_SWITCH_RE.match(line)
+        if sw:
+            switch, section = sw.group(1), None
+            continue
+        if _MOD_CARD_HEADER_RE.match(line):
+            section = "cards"
+            continue
+        if _MOD_STATUS_HEADER_RE.match(line):
+            section = "status"
+            continue
+        stripped = line.strip()
+        if not stripped or stripped[0].isalpha():
+            # Blank line or another table's header ends the section.
+            section = None
+            continue
+        if stripped.startswith(("-", "+")):
+            continue
+        if section == "cards":
+            m = _MOD_CARD_ROW_RE.match(line)
+            if m:
+                cards.append({"module": m.group(1), "switch_number": switch,
+                              "ports": m.group(2), "type": m.group(3),
+                              "model": m.group(4), "serial": m.group(5)})
+        elif section == "status":
+            m = _MOD_STATUS_ROW_RE.match(line)
+            if m:
+                status[(switch, m.group(1))] = m.group(2)
+    return cards, status
+
+
+def _apply_module_status(modules, status):
+    """Fill each module row's empty status from the parsed status table."""
+    if not status:
+        return modules
+    for mod in modules:
+        m = {str(k).lower(): v for k, v in mod.items()}
+        if m.get("status"):
+            continue
+        num = str(m.get("module") or "")
+        sw = str(m.get("switch_number") or "")
+        value = status.get((sw, num)) or (status.get(("", num)) if sw else None)
+        if value is None and not sw:
+            hits = [v for (s, n), v in status.items() if n == num]
+            value = hits[0] if len(hits) == 1 else None
+        if value:
+            mod["status"] = value
+    return modules
+
+
+# IOS-XE 'show platform' slot table (ASR1000, ISR4000, Catalyst 8000):
+# "Slot      Type                State                 Insert time (ago)"
+# "R0        ASR1001-X           ok, active            1y2w"
+# " 0/0      BUILT-IN-2T+6X1GE   ok                    1y2w"
+_PLATFORM_HEADER_RE = re.compile(r"^\s*Slot\s+Type\s+State\b", re.I)
+_PLATFORM_ROW_RE = re.compile(r"^\s*(\S+)\s+(\S+)\s+(\S.*?)(?:\s{2,}\S+)?\s*$")
+
+
+def _parse_show_platform(raw):
+    """[{slot, type, state}] from the IOS-XE show platform slot table."""
+    rows = []
+    in_table = False
+    for line in (_usable(raw) or "").splitlines():
+        if _PLATFORM_HEADER_RE.match(line):
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if not line.strip():
+            if rows:
+                break
+            continue
+        if line.strip().startswith("-"):
+            continue
+        m = _PLATFORM_ROW_RE.match(line)
+        if m:
+            rows.append({"slot": m.group(1), "type": m.group(2),
+                         "state": m.group(3).strip()})
+    return rows
 
 
 _INTF_RE = re.compile(r"\b([A-Za-z][A-Za-z-]*\d+(?:/\d+)+(?:\.\d+)?)\b")
@@ -636,6 +742,12 @@ class DeviceInventoryCollector(BaseCollector):
         modules = _ntc_parse(
             raw_outputs.get(mod_cmd, ""), device_type, mod_cmd
         ) if mod_cmd else []
+        if mod_cmd and device_type in ("cisco_ios", "cisco_xe"):
+            cards, mod_status = _parse_ios_show_module(
+                _usable(raw_outputs.get(mod_cmd, "")))
+            if not modules:
+                modules = cards
+            _apply_module_status(modules, mod_status)
 
         # Stack members: show switch detail (Cisco), show virtual-chassis (Juniper),
         # show switch (Extreme)
@@ -662,6 +774,11 @@ class DeviceInventoryCollector(BaseCollector):
             "modules": modules,
             "stack_members": stack_members,
         }
+
+        if "show platform" in commands:
+            platform_slots = _parse_show_platform(raw_outputs.get("show platform", ""))
+            if platform_slots:
+                result["platform_slots"] = platform_slots
 
         version_details = (_parse_version_details(raw_outputs.get(version_cmd, ""))
                            if version_cmd else {})

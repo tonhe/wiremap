@@ -81,6 +81,58 @@ def derive_site(hostname, rules=None):
     return default_site(hostname)
 
 
+def _rule_matches(hostname, rules):
+    return any(regex.search(hostname) for regex, _ in rules)
+
+
+def _shape(token):
+    """'AB001' -> 'AA999'. Site codes in one estate are usually one width."""
+    return "".join("9" if c.isdigit() else "A" if c.isalpha() else c
+                   for c in token.upper())
+
+
+_IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+
+# Below this many names, or when no shape covers this share of them, there
+# is no convention to measure against and nothing is flagged.
+MIN_NAMES = 5
+MIN_SHARE = 0.5
+
+
+def naming_flags(hostnames, rules=None):
+    """{hostname: note} for names whose site came from the default
+    first-token rule and doesn't look like the estate's other site codes.
+
+    A site_rules match is never flagged: the operator has said where it
+    belongs. Records keyed by IP (neighbours with no name) are ignored.
+    """
+    if rules is None:
+        rules = _configured_rules()
+    candidates = [h for h in hostnames
+                  if h and not _IP_RE.match(h) and not _rule_matches(h, rules)]
+    shapes = {}
+    for hostname in candidates:
+        site = default_site(hostname)
+        if site:
+            shape = _shape(site)
+            shapes[shape] = shapes.get(shape, 0) + 1
+    if len(candidates) < MIN_NAMES or not shapes:
+        return {}
+    dominant, count = max(shapes.items(), key=lambda kv: kv[1])
+    if count < MIN_SHARE * len(candidates):
+        return {}
+
+    flags = {}
+    for hostname in candidates:
+        site = default_site(hostname)
+        if not site:
+            flags[hostname] = "no site token; add a site rule"
+        elif _shape(site) != dominant:
+            flags[hostname] = (f"site '{site}' unlike most ({dominant}); "
+                               f"check the name or add a site rule")
+    return flags
+
+
 # Reports call derive_site once per row, so the configured rules are cached
 # and re-read only when the settings file changes.
 _cache_lock = threading.Lock()

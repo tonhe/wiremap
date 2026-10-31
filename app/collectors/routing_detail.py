@@ -112,20 +112,55 @@ def _parse_ntc(raw: str, device_type: str, command: str) -> list[dict]:
         return []
 
 
+# Rows of the IOS summary table that are not a route source. "internal" is
+# the RIB's own bookkeeping (memory), "Total" sums the other rows.
+_SUMMARY_NON_SOURCES = {"total", "internal", "route", "maximum"}
+
+
+def _to_int(value):
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return 0
+
+
+def normalize_route_summary(entries):
+    """[{source, count}] from either our own rows or ntc-templates rows.
+
+    The ntc template for 'show ip route summary' yields ROUTE_SOURCE,
+    NETWORKS and SUBNETS, not source/count. A route source's route count is
+    networks + subnets. Safe to run on already-normalized rows.
+    """
+    result = []
+    for e in entries or []:
+        e = {str(k).lower(): v for k, v in e.items()}
+        source = str(e.get("source") or e.get("route_source") or "").strip()
+        if not source or source.lower() in _SUMMARY_NON_SOURCES:
+            continue
+        if "count" in e:
+            count = _to_int(e.get("count"))
+        else:
+            count = _to_int(e.get("networks")) + _to_int(e.get("subnets"))
+        result.append({"source": source, "count": count})
+    return result
+
+
 def _parse_route_summary_regex(raw: str) -> list[dict]:
-    """Regex fallback for 'show ip route summary'."""
+    """Regex fallback for 'show ip route summary'.
+
+    Columns are Route Source, Networks, Subnets, then Overhead/Memory on
+    IOS 15 or Replicates/Overhead/Memory on IOS-XE 16+. Either way the
+    route count is Networks + Subnets.
+    """
     results = []
-    # Match lines like: "ospf 1          15    12    3    0    0"
-    # or "connected       5     5     0    0    0"
     for line in raw.splitlines():
-        # Protocol with optional single-space process id, then 2+ spaces before numbers
-        m = re.match(r"^(\w+(?:\s\d+)?)\s{2,}(\d+)\s+", line)
+        # "ospf 1          15    12    3    0    0", "connected   0   12 ..."
+        m = re.match(r"^([A-Za-z][\w-]*(?:\s\d+)?)\s{2,}(\d+)(?:\s+(\d+))?", line)
         if m:
             source = m.group(1).strip()
-            count = int(m.group(2))
-            # Skip header/total lines
-            if source.lower() in ("route", "total", "maximum"):
+            if source.lower() in _SUMMARY_NON_SOURCES:
                 continue
+            count = int(m.group(2)) + _to_int(m.group(3))
             results.append({"source": source, "count": count})
     return results
 
@@ -157,25 +192,85 @@ def _parse_ospf_regex(raw: str) -> list[dict]:
     return processes
 
 
-def _parse_ospf_interfaces_regex(raw: str) -> list[dict]:
-    """Regex fallback for 'show ip ospf interface brief'."""
+# IOS/IOS-XE: Interface PID Area IP Address/Mask Cost State Nbrs F/C
+# "Lo4          100   0.0.0.0         10.0.0.4/32        1     LOOP  0/0"
+_OSPF_BRIEF_IOS_RE = re.compile(
+    r"^(\S+)\s+(\d+)\s+(\S+)\s+(\d+\.\d+\.\d+\.\d+/\d+)\s+(\d+)\s+(\S+)"
+    r"\s+(\d+)/(\d+)\s*$")
+# NX-OS, per process: Interface ID Area Cost State Neighbors Status
+# " Eth1/1                  2      0.0.0.0         40     P2P      1         up"
+_OSPF_BRIEF_NXOS_RE = re.compile(
+    r"^\s*(\S+)\s+(\d+)\s+(\S+)\s+(\d+)\s+(\S+)\s+(\d+)\s+(up|down)\s*$")
+_OSPF_BRIEF_NXOS_PROC_RE = re.compile(r"OSPF Process ID (\S+) VRF (\S+)")
+
+
+def parse_ospf_interfaces_brief(raw: str) -> list[dict]:
+    """Parse 'show ip ospf interface brief' (IOS, IOS-XE and NX-OS).
+
+    The ntc IOS template only accepts a decimal area, so any row whose area
+    is dotted ("0.0.0.0") is silently dropped. Matching the whole row here
+    keeps the columns where they belong.
+    """
     results = []
-    for line in raw.splitlines():
-        # Typical: "Gi0/1    10.0.0.1   YES  0    1     DR     1"
-        parts = line.split()
-        if len(parts) >= 5 and not parts[0].lower().startswith("interface"):
-            # Try to extract: interface, area, cost, state, neighbors
-            try:
-                results.append({
-                    "interface": parts[0],
-                    "area": parts[1],
-                    "cost": parts[2],
-                    "state": parts[3],
-                    "neighbors": parts[4] if len(parts) > 4 else "0",
-                })
-            except (IndexError, ValueError):
-                continue
+    process, vrf = "", ""
+    for line in (raw or "").splitlines():
+        h = _OSPF_BRIEF_NXOS_PROC_RE.search(line)
+        if h:
+            process, vrf = h.group(1), h.group(2)
+            continue
+        m = _OSPF_BRIEF_IOS_RE.match(line)
+        if m:
+            results.append({
+                "interface": m.group(1),
+                "process": m.group(2),
+                "area": m.group(3),
+                "ip_address": m.group(4),
+                "cost": m.group(5),
+                "state": m.group(6),
+                "neighbors": m.group(7),
+                "neighbors_total": m.group(8),
+            })
+            continue
+        m = _OSPF_BRIEF_NXOS_RE.match(line)
+        if m:
+            results.append({
+                "interface": m.group(1),
+                "process": process,
+                "vrf": vrf,
+                "area": m.group(3),
+                "ip_address": "",
+                "cost": m.group(4),
+                "state": m.group(5),
+                "neighbors": m.group(6),
+                "status": m.group(7),
+            })
     return results
+
+
+def _normalize_ospf_interfaces_ntc(entries):
+    """ntc rows use process/neighbors_fc; give them our field names."""
+    result = []
+    for e in entries or []:
+        e = {str(k).lower(): v for k, v in e.items()}
+        full, _, total = str(e.get("neighbors_fc", "")).partition("/")
+        ip = e.get("ip_address", "")
+        if ip and e.get("prefix_length"):
+            ip = f"{ip}/{e['prefix_length']}"
+        row = {
+            "interface": e.get("interface", ""),
+            "process": e.get("process", ""),
+            "area": e.get("area", ""),
+            "ip_address": ip,
+            "cost": e.get("cost", ""),
+            "state": e.get("state", ""),
+            "neighbors": e.get("neighbors", full),
+        }
+        if total:
+            row["neighbors_total"] = total
+        if e.get("vrf"):
+            row["vrf"] = e["vrf"]
+        result.append(row)
+    return result
 
 
 # Neighbor row shared by IOS, IOS-XE and NX-OS summary tables:
@@ -576,7 +671,14 @@ class RoutingDetailCollector(BaseCollector):
         # --- route summary ---
         route_sum_cmd = "show ip route summary"
         route_sum_raw = raw_outputs.get(route_sum_cmd, "")
-        route_summary = _parse_ntc(route_sum_raw, device_type, route_sum_cmd)
+        route_summary = normalize_route_summary(
+            _parse_ntc(route_sum_raw, device_type, route_sum_cmd))
+        if not route_summary and device_type == "cisco_nxos":
+            # NX-OS prints "direct : 3" under 'Best paths per protocol'.
+            nx = _parse_nxos_route_summary_vrf_all(
+                _usable(raw_outputs, route_sum_cmd))
+            route_summary = nx.get(DEFAULT_VRF) or (
+                next(iter(nx.values())) if len(nx) == 1 else [])
         if not route_summary:
             route_summary = _parse_route_summary_regex(route_sum_raw)
 
@@ -590,9 +692,10 @@ class RoutingDetailCollector(BaseCollector):
         # --- ospf interfaces ---
         ospf_int_cmd = "show ip ospf interface brief"
         ospf_int_raw = raw_outputs.get(ospf_int_cmd, "")
-        ospf_interfaces = _parse_ntc(ospf_int_raw, device_type, ospf_int_cmd)
+        ospf_interfaces = parse_ospf_interfaces_brief(ospf_int_raw)
         if not ospf_interfaces:
-            ospf_interfaces = _parse_ospf_interfaces_regex(ospf_int_raw)
+            ospf_interfaces = _normalize_ospf_interfaces_ntc(
+                _parse_ntc(ospf_int_raw, device_type, ospf_int_cmd))
 
         # --- bgp summary ---
         bgp_cmd = "show ip bgp summary"

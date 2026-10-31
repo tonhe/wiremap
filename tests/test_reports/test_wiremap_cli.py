@@ -47,8 +47,8 @@ def test_format_applies_where_supported_and_native_elsewhere(scan_file, tmp_path
     main(no_plugins + ["report", str(scan_file), "-f", "csv", "-o", str(out),
                        "-r", "device_inventory", "-r", "topology_map"])
 
-    suffixes = sorted(p.suffix for p in out.iterdir())
-    assert suffixes == [".csv", ".html"]
+    suffixes = {p.suffix for p in out.iterdir()}
+    assert suffixes == {".csv", ".html"}
 
 
 def test_named_report_that_cannot_run_exits_nonzero(scan_file, tmp_path, no_plugins, capsys):
@@ -188,7 +188,8 @@ def test_menu_runs_selected_reports(tmp_path, sample_inventory, no_plugins, caps
     rc = wiremap_cli.cmd_menu(args, input_fn=lambda prompt: next(answers))
 
     assert rc == 0
-    assert len(list(out.iterdir())) == 1
+    assert {p.suffix for p in out.iterdir()} == {".csv"}
+    assert all(p.name.startswith("arp_summary_") for p in out.iterdir())
 
 
 def test_menu_reprompts_on_bad_choice(tmp_path, sample_inventory, no_plugins, capsys):
@@ -214,3 +215,89 @@ def test_runs_with_only_app_on_path_like_the_container(scan_file, tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert len(list(out.glob("device_inventory_*.xlsx"))) == 1
+
+
+def test_multi_sheet_csv_writes_one_readable_file_per_sheet(scan_file, tmp_path, no_plugins):
+    import csv as csvmod
+    out = tmp_path / "out"
+
+    main(no_plugins + ["report", str(scan_file), "-r", "device_inventory",
+                       "-f", "csv", "-o", str(out)])
+
+    files = sorted(out.glob("device_inventory_*.csv"))
+    assert len(files) > 1
+    assert any(f.name.endswith("_devices.csv") for f in files)
+    for f in files:
+        text = f.read_text()
+        assert "--- Sheet:" not in text
+        rows = list(csvmod.reader(text.splitlines()))
+        assert rows and all(len(r) == len(rows[0]) for r in rows)
+
+
+def test_summary_counts_collected_devices_on_old_scans(tmp_path, sample_inventory,
+                                                       no_plugins, capsys):
+    """Scans from before login_succeeded was recorded reported 0 logged into."""
+    for device in sample_inventory["devices"].values():
+        device.pop("login_succeeded", None)
+    path = tmp_path / "old.json"
+    path.write_text(json.dumps(sample_inventory))
+
+    main(no_plugins + ["summary", str(path)])
+
+    collected = sum(1 for d in sample_inventory["devices"].values()
+                    if d.get("collector_data"))
+    assert collected
+    assert f"({collected} logged into)" in capsys.readouterr().out
+
+
+def test_summary_prints_warning_message_not_dict(tmp_path, sample_inventory,
+                                                 no_plugins, capsys):
+    sample_inventory["scan_summary"] = {"source_access_warnings": [
+        {"kind": "snmp", "acl": "10", "device": "SW1", "source_ip": "192.0.2.10",
+         "message": "SW1: SNMP ACL 10 does not permit 192.0.2.10"}]}
+    path = tmp_path / "scan.json"
+    path.write_text(json.dumps(sample_inventory))
+
+    main(no_plugins + ["summary", str(path)])
+
+    text = capsys.readouterr().out
+    assert "  warning: SW1: SNMP ACL 10 does not permit 192.0.2.10" in text
+    assert "{'kind'" not in text
+
+
+def _menu_args(tmp_path, sample_inventory, no_plugins):
+    scans = tmp_path / "inventories"
+    scans.mkdir()
+    (scans / "scan.json").write_text(json.dumps(sample_inventory))
+    return wiremap_cli.build_parser().parse_args(
+        no_plugins + ["--inventory-dir", str(scans)])
+
+
+@pytest.mark.parametrize("answers", [["q"], ["", "quit"], ["", "", "q"],
+                                     ["", "", "", "q"]])
+def test_menu_quits_cleanly(tmp_path, sample_inventory, no_plugins, answers):
+    args = _menu_args(tmp_path, sample_inventory, no_plugins)
+    it = iter(answers)
+
+    assert wiremap_cli.cmd_menu(args, input_fn=lambda p: next(it)) == 0
+    assert not (tmp_path / sample_inventory["discovery_id"]).exists()
+
+
+def test_menu_exits_zero_on_end_of_input(tmp_path, sample_inventory, no_plugins):
+    args = _menu_args(tmp_path, sample_inventory, no_plugins)
+
+    def eof(prompt):
+        raise EOFError
+
+    assert wiremap_cli.cmd_menu(args, input_fn=eof) == 0
+
+
+def test_menu_explains_non_numeric_input(tmp_path, sample_inventory, no_plugins, capsys):
+    args = _menu_args(tmp_path, sample_inventory, no_plugins)
+    it = iter(["x", "q"])
+
+    wiremap_cli.cmd_menu(args, input_fn=lambda p: next(it))
+
+    out = capsys.readouterr().out
+    assert "'x' is not a number or range" in out
+    assert "invalid literal" not in out

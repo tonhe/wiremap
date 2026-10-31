@@ -111,6 +111,13 @@
         .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
         .form-row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }
 
+        /* Additional credential sets */
+        .cred-extra { display: grid; grid-template-columns: 1fr 1fr auto; gap: 12px; align-items: end; margin-bottom: 12px; }
+        .cred-extra .form-group { margin-bottom: 0; }
+        .cred-extra .btn-sm { padding: 9px 12px; }
+        .cred-actions { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+        .cred-actions .helper-text { margin-bottom: 0; }
+
         input, select {
             background: var(--bg-input);
             color: var(--text-bright);
@@ -515,7 +522,7 @@
         }
 
         @media (max-width: 768px) {
-            .form-row, .form-row-3 { grid-template-columns: 1fr; }
+            .form-row, .form-row-3, .cred-extra { grid-template-columns: 1fr; }
             .checkbox-grid { grid-template-columns: 1fr; }
             .stat-grid { grid-template-columns: 1fr 1fr; }
         }
@@ -635,8 +642,13 @@
                         </div>
                         <div class="form-group">
                             <label for="password">Password *</label>
-                            <input type="password" id="password" name="password" placeholder="********" required>
+                            <input type="password" id="password" name="password" placeholder="********" required autocomplete="off">
                         </div>
+                    </div>
+                    <div class="cred-sets" data-prefix="disc"></div>
+                    <div class="cred-actions">
+                        <button type="button" class="btn-sm cred-add" data-prefix="disc">+ Add credentials</button>
+                        <span class="helper-text">Up to 5 sets, tried in order. The next set is only tried when a device rejects the login.</span>
                     </div>
 
                     <div class="form-group">
@@ -855,8 +867,13 @@ fw1.example.com paloalto_panos"></textarea>
                         </div>
                         <div class="form-group">
                             <label for="ts_password">Password *</label>
-                            <input type="password" name="password" id="ts_password" required>
+                            <input type="password" name="password" id="ts_password" required autocomplete="off">
                         </div>
+                    </div>
+                    <div class="cred-sets" data-prefix="ts"></div>
+                    <div class="cred-actions">
+                        <button type="button" class="btn-sm cred-add" data-prefix="ts">+ Add credentials</button>
+                        <span class="helper-text">Up to 5 sets, tried in order. The next set is only tried when a device rejects the login.</span>
                     </div>
                     <div style="display: grid; grid-template-columns: 1fr; gap: 12px;">
                         <div class="form-group">
@@ -1241,6 +1258,73 @@ fw1.example.com paloalto_panos"></textarea>
         });
     })();
 
+    // Extra credential sets 2..5, posted as username_N / password_N.
+    // Nothing here is saved: no settings, no localStorage.
+    (function () {
+        var MAX_SETS = 5;
+
+        function renumber(container) {
+            var rows = container.querySelectorAll('.cred-extra');
+            rows.forEach(function (row, i) {
+                var n = i + 2;
+                var prefix = container.dataset.prefix;
+                var user = row.querySelector('input[type=text]');
+                var pass = row.querySelector('input[type=password]');
+                var labels = row.querySelectorAll('label');
+                user.name = 'username_' + n;
+                user.id = prefix + '_username_' + n;
+                pass.name = 'password_' + n;
+                pass.id = prefix + '_password_' + n;
+                labels[0].htmlFor = user.id;
+                labels[0].textContent = 'Username (set ' + n + ')';
+                labels[1].htmlFor = pass.id;
+                labels[1].textContent = 'Password (set ' + n + ')';
+            });
+            var add = document.querySelector('.cred-add[data-prefix="' + container.dataset.prefix + '"]');
+            if (add) add.style.display = rows.length + 1 >= MAX_SETS ? 'none' : '';
+        }
+
+        function field(type) {
+            var group = document.createElement('div');
+            group.className = 'form-group';
+            var label = document.createElement('label');
+            var input = document.createElement('input');
+            input.type = type;
+            input.autocomplete = 'off';
+            if (type === 'password') input.placeholder = '********';
+            group.appendChild(label);
+            group.appendChild(input);
+            return group;
+        }
+
+        function addRow(container) {
+            if (container.querySelectorAll('.cred-extra').length + 1 >= MAX_SETS) return;
+            var row = document.createElement('div');
+            row.className = 'cred-extra';
+            row.appendChild(field('text'));
+            row.appendChild(field('password'));
+            var remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'btn-sm';
+            remove.textContent = '×';
+            remove.title = 'Remove this credential set';
+            remove.addEventListener('click', function () {
+                row.remove();
+                renumber(container);
+            });
+            row.appendChild(remove);
+            container.appendChild(row);
+            renumber(container);
+            row.querySelector('input[type=text]').focus();
+        }
+
+        document.querySelectorAll('.cred-add').forEach(function (btn) {
+            var container = document.querySelector('.cred-sets[data-prefix="' + btn.dataset.prefix + '"]');
+            if (!container) return;
+            btn.addEventListener('click', function () { addRow(container); });
+        });
+    })();
+
     function startScan(formEl, scanType) {
         var formData = new FormData(formEl);
         formData.append('scan_type', scanType);
@@ -1358,7 +1442,9 @@ fw1.example.com paloalto_panos"></textarea>
         });
         _eventSource.addEventListener('device_authenticated', function(e) {
             var d = JSON.parse(e.data);
-            logEvent('Authenticated to ' + d.ip + ' (' + d.protocol + ')', 'ok');
+            var who = (d.credential_set && d.credential_set > 1)
+                ? ', ' + d.login_user + ' (set ' + d.credential_set + ')' : '';
+            logEvent('Authenticated to ' + d.ip + ' (' + d.protocol + who + ')', 'ok');
         });
         _eventSource.addEventListener('connection_fallback', function(e) {
             var d = JSON.parse(e.data);
@@ -1581,7 +1667,7 @@ fw1.example.com paloalto_panos"></textarea>
             var secs = Math.round(s.elapsed % 60);
             elapsedStr = String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
         }
-        addTile('ELAPSED', elapsedStr, 'var(--cyan)');
+        addTile(s.elapsed_summed ? 'ELAPSED (SUMMED)' : 'ELAPSED', elapsedStr, 'var(--cyan)');
 
         var dateStr = '--';
         if (s.timestamp) {

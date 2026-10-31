@@ -13,7 +13,7 @@ import requests
 from device_detector import DeviceTypeDetector
 from discovery_engine import DiscoveryEngine, DiscoveryError
 from inventory import DiscoveryInventory
-from inventory_merge import merge_inventories as merge_inventory_dicts
+from inventory_merge import claim_unused_id, merge_inventories as merge_inventory_dicts
 from neighbors import CrawlScope, get_registry as get_neighbor_sources
 from snmp_probe import SnmpCredentials
 from scan_manager import ScanManager
@@ -27,6 +27,10 @@ try:
 except ImportError:
     from collectors import get_registry as get_collector_registry
     from reports import get_registry as get_report_registry, get_report
+try:
+    from app.credentials import parse_credential_form
+except ImportError:
+    from credentials import parse_credential_form
 
 # Read version
 VERSION = "0.2"
@@ -105,8 +109,6 @@ def scan_start():
         return jsonify({"error": "A scan is already running"}), 409
 
     scan_type = request.form.get('scan_type', 'discovery')
-    username = request.form.get('username', '').strip()
-    password = request.form.get('password', '')
     protocol = request.form.get('protocol', 'ssh')
     disc_settings = get_discovery_settings()
     max_workers = disc_settings.get("max_workers", 10)
@@ -122,8 +124,11 @@ def scan_start():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    if not username or not password:
-        return jsonify({"error": "Username and password are required"}), 400
+    # Up to five sets: username/password, then username_2/password_2 ...
+    try:
+        credentials = parse_credential_form(request.form)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
     target_resolution = None
     if scan_type == 'targeted':
@@ -195,8 +200,9 @@ def scan_start():
         engine = DiscoveryEngine(
             seed_ip=seed_ip,
             seed_device_type=seed_type,
-            username=username,
-            password=password,
+            username=credentials[0].username,
+            password=credentials[0].password,
+            credentials=credentials,
             max_depth=max_depth,
             protocol=protocol,
             filters=filters,
@@ -306,6 +312,7 @@ def merge_inventories_route():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
+    claim_unused_id(merged_data, INVENTORY_DIR)
     merged = DiscoveryInventory(merged_data)
     merged.save(INVENTORY_DIR)
 

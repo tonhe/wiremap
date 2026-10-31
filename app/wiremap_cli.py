@@ -21,8 +21,10 @@ host checkout, or --config-dir). Without them it is skipped. --offline skips
 it regardless, since it is the only report that makes network calls.
 """
 import argparse
+import csv
 import json
 import os
+import re
 import sys
 
 if __name__ == "__main__":
@@ -99,6 +101,32 @@ def pick_format(report, requested):
     return report.supported_formats[0]
 
 
+def sheet_slug(name):
+    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    return slug or "sheet"
+
+
+def write_csv(report, data, content, stem):
+    """One csv per sheet, so each opens as a table. The single-file csv the
+    web download gives separates sheets with marker lines no csv reader
+    understands. Returns the paths written."""
+    tabular = report.generate_tabular_data(data)
+    if not tabular or len(tabular) == 1:
+        path = f"{stem}.csv"
+        with open(path, "wb") as f:
+            f.write(content)
+        return [path]
+    paths = []
+    for sheet_name, (headers, rows) in tabular.items():
+        path = f"{stem}_{sheet_slug(sheet_name)}.csv"
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+            writer.writerows(rows)
+        paths.append(path)
+    return paths
+
+
 def select_reports(registry, names):
     """Reports to run, in registry order. Unknown names raise ValueError."""
     if not names:
@@ -158,6 +186,10 @@ def cmd_report(args):
         except Exception as e:
             failed.append((report.name, f"{type(e).__name__}: {e}"))
             continue
+        if fmt == "csv":
+            written.extend(write_csv(report, data, content,
+                                     os.path.join(outdir, f"{report.name}_{key}")))
+            continue
         path = os.path.join(outdir, f"{report.name}_{key}.{fmt}")
         with open(path, "wb") as f:
             f.write(content)
@@ -180,13 +212,21 @@ def cmd_report(args):
     return 0
 
 
+def logged_into(device):
+    """Scans before login_succeeded was recorded: a device with collected
+    data was logged into."""
+    if "login_succeeded" in device:
+        return bool(device["login_succeeded"])
+    return bool(device.get("collector_data"))
+
+
 def cmd_summary(args):
     data, files = load_inputs(args.paths)
     inventory = DiscoveryInventory(data)
     s = inventory.get_summary()
     stored = data.get("scan_summary") or {}
     devices = data.get("devices") or {}
-    logged_in = sum(1 for d in devices.values() if d.get("login_succeeded"))
+    logged_in = sum(1 for d in devices.values() if logged_into(d))
 
     print(f"Scan:      {data.get('discovery_id', '-')}")
     if len(files) > 1:
@@ -215,6 +255,9 @@ def cmd_summary(args):
     if s["source_access_line"]:
         print(s["source_access_line"])
     for warning in s["source_access_warnings"]:
+        if isinstance(warning, dict):
+            warning = warning.get("message") or ", ".join(
+                f"{k}={v}" for k, v in warning.items())
         print(f"  warning: {warning}")
     if s["refused_hint"]:
         print(s["refused_hint"])
@@ -242,11 +285,15 @@ def parse_choice(text, count):
     for part in text.replace(" ", ",").split(","):
         if not part:
             continue
-        if "-" in part:
-            lo, hi = part.split("-", 1)
-            nums = range(int(lo), int(hi) + 1)
-        else:
-            nums = [int(part)]
+        try:
+            if "-" in part:
+                lo, hi = part.split("-", 1)
+                nums = range(int(lo), int(hi) + 1)
+            else:
+                nums = [int(part)]
+        except ValueError:
+            raise ValueError(f"'{part}' is not a number or range "
+                             f"(q to quit)") from None
         for n in nums:
             if not 1 <= n <= count:
                 raise ValueError(f"{n} is not between 1 and {count}")
@@ -255,16 +302,35 @@ def parse_choice(text, count):
     return picked
 
 
+class Quit(Exception):
+    pass
+
+
+QUIT_WORDS = ("q", "quit", "exit")
+
+
 def ask(prompt, count, input_fn):
     while True:
+        text = input_fn(prompt)
+        if text.strip().lower() in QUIT_WORDS:
+            raise Quit()
         try:
-            return parse_choice(input_fn(prompt), count)
+            return parse_choice(text, count)
         except ValueError as e:
             print(f"  {e}")
 
 
 def cmd_menu(args, input_fn=input):
-    """Pick scans, reports and format from numbered lists."""
+    """Pick scans, reports and format from numbered lists. q at any prompt,
+    or end of input, leaves without writing anything."""
+    try:
+        return _menu(args, input_fn)
+    except (Quit, EOFError):
+        print()
+        return 0
+
+
+def _menu(args, input_fn):
     scan_dir = args.inventory_dir or default_inventory_dir()
     files = sorted(merge_scans.expand_paths([scan_dir]),
                    key=os.path.getmtime, reverse=True) if os.path.isdir(scan_dir) else []
@@ -275,7 +341,7 @@ def cmd_menu(args, input_fn=input):
     print(f"Scans in {scan_dir}, newest first:")
     for i, path in enumerate(files, 1):
         print(f"  {i:>2}. {os.path.basename(path)}")
-    picked = ask("Scan(s) to use, e.g. 1 or 1,3 (several are merged) [1]: ",
+    picked = ask("Scan(s) to use, e.g. 1 or 1,3 (several are merged, q quits) [1]: ",
                  len(files), lambda p: input_fn(p) or "1")
     paths = [files[i] for i in picked]
     data, _ = load_inputs(paths)
@@ -295,6 +361,8 @@ def cmd_menu(args, input_fn=input):
     fmt_idx = ask("Format [1]: ", len(formats), lambda p: input_fn(p) or "1")[0]
     key = data.get("discovery_id") or "scan"
     outdir = input_fn(f"Output directory [{key}]: ").strip() or key
+    if outdir.lower() in QUIT_WORDS:
+        raise Quit()
 
     report_args = argparse.Namespace(
         paths=paths, report=[r.name for r in chosen],

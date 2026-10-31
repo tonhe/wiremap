@@ -4,7 +4,7 @@ import sys
 import pytest
 
 from app.site_mapping import (
-    compile_rules, default_site, derive_site, parse_rules_text,
+    compile_rules, default_site, derive_site, naming_flags, parse_rules_text,
 )
 from app.settings import get_discovery_settings, save_discovery_settings
 
@@ -95,3 +95,34 @@ def test_report_site_uses_configured_rules(tmp_path, monkeypatch):
     bare_settings.save_discovery_settings({"site_rules": "^AB001- => HQ"})
     assert _derive_site("AB001-IDF-SWA-01.example.net") == "HQ"
     assert _derive_site("CD002-CORE-01") == "CD002"
+
+
+_ESTATE = ["AB001-IDF-SWA-01", "AB002-MDF-STK-01", "CD103-IDF-SWA-02",
+           "EF204-MDF-RTR-01", "GH305-IDF-SWA-01"]
+
+
+def test_naming_flags_off_pattern_site_tokens():
+    flags = naming_flags(_ESTATE + ["Switch-exec", "SW4-lab", "CORE"], rules=[])
+
+    assert set(flags) == {"Switch-exec", "SW4-lab", "CORE"}
+    assert "site 'Switch' unlike most (AA999)" in flags["Switch-exec"]
+    assert flags["CORE"].startswith("no site token")
+
+
+def test_naming_flags_conforming_estate_flags_nothing():
+    assert naming_flags(_ESTATE, rules=[]) == {}
+
+
+def test_naming_flags_skips_rule_matches_and_ip_keyed_records():
+    rules = compile_rules([{"pattern": "^Switch-", "site": "AB001"}])
+
+    flags = naming_flags(_ESTATE + ["Switch-exec", "192.0.2.7"], rules=rules)
+
+    assert flags == {}
+
+
+def test_naming_flags_needs_a_convention_to_measure_against():
+    # Too few names, or no dominant site-code shape: nothing to compare to.
+    assert naming_flags(["Switch-exec", "AB001-SW"], rules=[]) == {}
+    mixed = ["A1-x", "BB22-x", "CCC333-x", "D-x", "EE-x", "FFF-x"]
+    assert naming_flags(mixed, rules=[]) == {}

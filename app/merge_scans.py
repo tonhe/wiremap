@@ -28,11 +28,11 @@ if __name__ == "__main__":
 
 try:
     from app.inventory import DiscoveryInventory
-    from app.inventory_merge import merge_inventories
+    from app.inventory_merge import claim_unused_id, merge_inventories
     from app.redact import redact_config
 except ImportError:
     from inventory import DiscoveryInventory
-    from inventory_merge import merge_inventories
+    from inventory_merge import claim_unused_id, merge_inventories
     from redact import redact_config
 
 
@@ -82,7 +82,9 @@ def write_output(merged, output):
         with open(output, "w") as f:
             json.dump(merged, f, indent=2, default=str)
         return output
-    return DiscoveryInventory(merged).save(output or ".")
+    directory = output or "."
+    claim_unused_id(merged, directory)
+    return DiscoveryInventory(merged).save(directory)
 
 
 def main(argv=None):

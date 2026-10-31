@@ -176,6 +176,8 @@ class DiscoveryInventory:
             "seed_ip": self._data.get("seed_ip", ""),
             "timestamp": self._data.get("timestamp", ""),
             "elapsed": stored.get("elapsed"),
+            # A merge's elapsed is the sum of its runs, not one wall-clock run.
+            "elapsed_summed": bool(stored.get("elapsed_summed")),
             "failed_count": stored.get("failed_count"),
             # Recomputed rather than read back, so scans saved before
             # failures were classified still get a breakdown.
@@ -303,6 +305,15 @@ class DiscoveryInventory:
                 dev["device_type"] = device_type
             if device_category:
                 dev["device_category"] = device_category
+
+    def set_login_credential(self, hostname, username, credential_set):
+        """Record which credential set logged in: its username and set
+        number. The password is never stored."""
+        with self._lock:
+            dev = self._data["devices"].get(hostname)
+            if dev is not None:
+                dev["login_user"] = username
+                dev["credential_set"] = credential_set
 
     def set_reached_ip(self, hostname, ip):
         """Record the address a login actually succeeded on."""

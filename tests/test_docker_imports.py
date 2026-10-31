@@ -45,6 +45,12 @@ CRITICAL_MODULES = [
     "collectors",
     "collectors.base",
     "collectors.errors",
+    "collectors.environment",
+    "collectors.redundancy",
+    "collectors.mgmt_security",
+    "collectors.interface_counters",
+    "collectors.cpu_memory",
+    "reports.platform_health",
     "neighbors",
     "reports",
 ]

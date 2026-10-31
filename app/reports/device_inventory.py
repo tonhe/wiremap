@@ -15,6 +15,10 @@ try:
 except ImportError:
     from device_facts import extract_device_facts, extract_version_details
 try:
+    from app.site_mapping import derive_site, naming_flags
+except ImportError:
+    from site_mapping import derive_site, naming_flags
+try:
     from app.failures import (failure_record, REASON_LABELS, SKIP_HINTS,
                               AUTH, REFUSED, TIMEOUT, LEGACY_CRYPTO,
                               NO_TELNET_DRIVER, OTHER)
@@ -161,6 +165,96 @@ def _is_real_module(model, mod_type):
     return True
 
 
+_MODULE_HEADERS = ["Hostname", "Mgmt IP", "Slot", "Type",
+                   "Model", "Serial", "Status", "Ports"]
+
+# show inventory names that point at a show platform slot:
+# "module R0", "module 0", "SPA subslot 0/0", "NIM subslot 1/0"
+_INV_SLOT_RE = re.compile(r"\b(?:module|subslot)\s+(\S+)\s*$", re.I)
+_INV_SWITCH_RE = re.compile(r"^\s*switch\s+(\d+)\s*$", re.I)
+
+
+def _module_status_sources(parsed):
+    """({stack member number: state}, {platform slot: state})."""
+    stack = {}
+    for member in parsed.get("stack_members", []) or []:
+        m = _normalize_keys(member)
+        num = str(m.get("switch") or m.get("member") or "")
+        state = m.get("state") or m.get("status") or ""
+        if num and state:
+            stack[num] = state
+    slots = {str(s.get("slot", "")): s.get("state", "")
+             for s in parsed.get("platform_slots", []) or []
+             if s.get("slot") and s.get("state")}
+    return stack, slots
+
+
+def _module_rows(inventory_data):
+    """Modules sheet rows: show module when the platform has it, otherwise
+    the non-chassis show inventory entries. Status comes from the platform's
+    own status column, the stack member state, or the show platform slot
+    state, whichever the device reports."""
+    rows = []
+    for hostname, device in sorted(inventory_data.get("devices", {}).items()):
+        parsed = (device.get("collector_data", {})
+                  .get("device_inventory", {}).get("parsed", {}))
+        modules = parsed.get("modules", [])
+        mgmt_ip = device.get("mgmt_ip", "")
+        stack_state, slot_state = _module_status_sources(parsed)
+
+        if modules:
+            for mod in modules:
+                m = _normalize_keys(mod)
+                model = m.get("model") or ""
+                # ntc's IOS template names these cardtype and port
+                mod_type = (m.get("type") or m.get("module_type")
+                            or m.get("cardtype") or "")
+                if not _is_real_module(model, mod_type):
+                    continue
+                slot = str(m.get("module") or m.get("slot") or "")
+                rows.append([
+                    hostname,
+                    mgmt_ip,
+                    slot,
+                    mod_type,
+                    model,
+                    m.get("serial") or m.get("serialnum") or "",
+                    m.get("status") or slot_state.get(slot, ""),
+                    m.get("ports") or m.get("port") or "",
+                ])
+        else:
+            for item in parsed.get("inventory", []):
+                it = _normalize_keys(item)
+                descr = (it.get("descr")
+                         or it.get("description") or "").lower()
+                name = (it.get("name") or "").lower()
+                if any(skip in descr or skip in name
+                       for skip in _SKIP_INVENTORY_TYPES):
+                    continue
+                if "chassis" in name:
+                    continue
+                raw_name = it.get("name") or ""
+                status = ""
+                sw = _INV_SWITCH_RE.match(raw_name)
+                if sw:
+                    status = stack_state.get(sw.group(1), "")
+                else:
+                    sl = _INV_SLOT_RE.search(raw_name)
+                    if sl:
+                        status = slot_state.get(sl.group(1), "")
+                rows.append([
+                    hostname,
+                    mgmt_ip,
+                    raw_name,
+                    it.get("descr") or it.get("description") or "",
+                    it.get("pid") or "",
+                    it.get("sn") or it.get("serial_number") or "",
+                    status,
+                    "",
+                ])
+    return rows
+
+
 def _get_platform_description(pid: str) -> str:
     """Look up friendly platform name from PID. Falls back to empty string."""
     if not pid:
@@ -209,7 +303,8 @@ def _pair_info(parsed):
 
 def _redundancy(device):
     """How this device is made redundant: standalone, stack, SVL, VSS, vPC,
-    an HSRP pair, or a firewall HA pair. Blank when nothing was collected."""
+    an HSRP/GLBP/VRRP pair, or a firewall HA pair. Blank when nothing was
+    collected."""
     inv = _parsed(device, "device_inventory")
     modes = []
     if inv.get("stackwise_virtual"):
@@ -222,9 +317,13 @@ def _redundancy(device):
         modes.append("vpc")
 
     hsrp = _parsed(device, "hsrp")
-    if any(str(e.get("state", "")).lower() in ("active", "standby")
-           for e in hsrp.get("entries") or []):
-        modes.append("hsrp-pair")
+    for proto, states in (("HSRP", ("active", "standby")),
+                          ("GLBP", ("active", "standby", "listen")),
+                          ("VRRP", ("master", "backup"))):
+        if any((e.get("protocol") or "HSRP") == proto
+               and str(e.get("state", "")).lower() in states
+               for e in hsrp.get("entries") or []):
+            modes.append(f"{proto.lower()}-pair")
     if device.get("ha_state") and not modes:
         modes.append("ha-pair")
 
@@ -366,6 +465,12 @@ class DeviceInventoryReport(BaseReport):
             self._build_licenses_sheet(wb, inventory_data)
             build_failed_devices_sheets(wb, inventory_data)
             build_targets_sheet(wb, inventory_data)
+            sources = self._extract_merge_sources(inventory_data)
+            if sources:
+                create_sheet(wb, "Merge Sources", *sources)
+            conflicts = self._extract_merge_conflicts(inventory_data)
+            if conflicts:
+                create_sheet(wb, "Merge Conflicts", *conflicts)
 
             buf = io.BytesIO()
             wb.save(buf)
@@ -452,7 +557,10 @@ class DeviceInventoryReport(BaseReport):
             "Serial Number", "Discovery Source", "Logged In", "Login Error",
             "Redundancy", "HA State", "Uptime", "Last Reload Reason",
             "Image", "License", "Discovered Via", "Collection Status",
+            "Site", "Site Naming", "Login User",
         ]
+        devices = inventory_data.get("devices", {})
+        site_flags = naming_flags(list(devices))
         # Only meaningful on a merged inventory, so the column is not there
         # to be ignored on every ordinary scan.
         merged = bool(inventory_data.get("merged_from"))
@@ -500,6 +608,9 @@ class DeviceInventoryReport(BaseReport):
                 details["license"],
                 _discovered_via(hostname, device, inventory_data),
                 _collection_status(device, inventory_data),
+                derive_site(hostname),
+                site_flags.get(hostname, ""),
+                device.get("login_user", "") or "",
             ]
             if merged:
                 row.append(device.get("source_scan", "") or "")
@@ -550,61 +661,7 @@ class DeviceInventoryReport(BaseReport):
         return (headers, rows)
 
     def _extract_modules_data(self, inventory_data):
-        headers = [
-            "Hostname", "Mgmt IP", "Slot", "Type",
-            "Model", "Serial", "Status", "Ports",
-        ]
-        rows = []
-        for hostname, device in sorted(
-            inventory_data.get("devices", {}).items()
-        ):
-            inv_data = (device.get("collector_data", {})
-                        .get("device_inventory", {}))
-            parsed = inv_data.get("parsed", {})
-            modules = parsed.get("modules", [])
-            mgmt_ip = device.get("mgmt_ip", "")
-
-            if modules:
-                for mod in modules:
-                    m = _normalize_keys(mod)
-                    model = m.get("model") or ""
-                    mod_type = m.get("type") or m.get("module_type") or ""
-                    if not _is_real_module(model, mod_type):
-                        continue
-                    rows.append([
-                        hostname,
-                        mgmt_ip,
-                        m.get("module") or m.get("slot") or "",
-                        mod_type,
-                        model,
-                        m.get("serial") or m.get("serialnum") or "",
-                        m.get("status") or "",
-                        m.get("ports") or "",
-                    ])
-            else:
-                inv_list = parsed.get("inventory", [])
-                for item in inv_list:
-                    it = _normalize_keys(item)
-                    descr = (it.get("descr")
-                             or it.get("description") or "").lower()
-                    name = (it.get("name") or "").lower()
-                    if any(skip in descr or skip in name
-                           for skip in _SKIP_INVENTORY_TYPES):
-                        continue
-                    if "chassis" in name:
-                        continue
-                    rows.append([
-                        hostname,
-                        mgmt_ip,
-                        it.get("name") or "",
-                        it.get("descr") or it.get("description") or "",
-                        it.get("pid") or "",
-                        it.get("sn") or it.get("serial_number") or "",
-                        "",
-                        "",
-                    ])
-
-        return (headers, rows)
+        return (list(_MODULE_HEADERS), _module_rows(inventory_data))
 
     def _extract_licenses_data(self, inventory_data):
         """One row per licence; a device with Smart Licensing or call-home
@@ -662,61 +719,8 @@ class DeviceInventoryReport(BaseReport):
         create_sheet(wb, "Stack Members", headers, rows)
 
     def _build_modules_sheet(self, wb, inventory_data):
-        headers = [
-            "Hostname", "Mgmt IP", "Slot", "Type",
-            "Model", "Serial", "Status", "Ports",
-        ]
-        rows = []
-        for hostname, device in sorted(
-            inventory_data.get("devices", {}).items()
-        ):
-            inv_data = (device.get("collector_data", {})
-                        .get("device_inventory", {}))
-            parsed = inv_data.get("parsed", {})
-            modules = parsed.get("modules", [])
-            mgmt_ip = device.get("mgmt_ip", "")
-
-            if modules:
-                for mod in modules:
-                    m = _normalize_keys(mod)
-                    model = m.get("model") or ""
-                    mod_type = m.get("type") or m.get("module_type") or ""
-                    if not _is_real_module(model, mod_type):
-                        continue
-                    rows.append([
-                        hostname,
-                        mgmt_ip,
-                        m.get("module") or m.get("slot") or "",
-                        mod_type,
-                        model,
-                        m.get("serial") or m.get("serialnum") or "",
-                        m.get("status") or "",
-                        m.get("ports") or "",
-                    ])
-            else:
-                inv_list = parsed.get("inventory", [])
-                for item in inv_list:
-                    it = _normalize_keys(item)
-                    descr = (it.get("descr")
-                             or it.get("description") or "").lower()
-                    name = (it.get("name") or "").lower()
-                    if any(skip in descr or skip in name
-                           for skip in _SKIP_INVENTORY_TYPES):
-                        continue
-                    if "chassis" in name:
-                        continue
-                    rows.append([
-                        hostname,
-                        mgmt_ip,
-                        it.get("name") or "",
-                        it.get("descr") or it.get("description") or "",
-                        it.get("pid") or "",
-                        it.get("sn") or it.get("serial_number") or "",
-                        "",
-                        "",
-                    ])
-
-        create_sheet(wb, "Modules", headers, rows)
+        create_sheet(wb, "Modules", list(_MODULE_HEADERS),
+                     _module_rows(inventory_data))
 
 
 
@@ -767,8 +771,9 @@ NOT_ATTEMPTED_HINT = ("Discovered but never logged into: the scan ended "
                       "before this host was reached")
 
 
-def _format_attempt(attempt):
-    """One attempt as 'ssh/22 (cisco_ios): Connection refused, 12ms'."""
+def _format_attempt(attempt, show_credential=True):
+    """One attempt as 'ssh/22 (cisco_ios): Connection refused, 12ms'.
+    With several credential sets offered, which one was tried is added."""
     proto = attempt.get("protocol") or ""
     port = attempt.get("port")
     where = f"{proto}/{port}" if port else proto
@@ -777,9 +782,22 @@ def _format_attempt(attempt):
     reason = attempt.get("reason")
     what = (REASON_LABELS.get(reason) if reason else None) \
         or attempt.get("exception_class") or attempt.get("message") or "failed"
+    if show_credential and attempt.get("credential_set"):
+        where += f" as {attempt.get('username') or '?'} (set {attempt['credential_set']})"
     elapsed = attempt.get("elapsed_ms")
     took = f", {elapsed}ms" if elapsed else ""
     return f"{where.strip()}: {what}{took}".strip()
+
+
+def _likely_cause(record):
+    """The hint, prefixed for an auth failure that tried several sets."""
+    if record["reason"] == AUTH:
+        sets = {a.get("credential_set") for a in record["attempts"]
+                if a.get("credential_set")}
+        if len(sets) > 1:
+            return (f"All {len(sets)} credential sets were rejected; "
+                    f"{record['hint']}")
+    return record["hint"]
 
 
 def _failed_sort_key(row):
@@ -793,6 +811,9 @@ def extract_failed_devices_data(inventory_data):
     summary = inventory_data.get("scan_summary") or {}
     headers = ["Category", "Mgmt IP", "Hostname", "Platform",
                "Likely cause", "Attempts", "Error"]
+    # One set offered: naming it on every attempt is noise.
+    several_sets = len((inventory_data.get("params") or {})
+                       .get("credential_usernames") or []) > 1
     rows = []
     for ip, value in (summary.get("failed") or {}).items():
         record = failure_record(value)
@@ -802,8 +823,10 @@ def extract_failed_devices_data(inventory_data):
             ip,
             record["hostname"] or device.get("hostname") or "",
             device.get("platform") or "",
-            record["hint"],
-            "; ".join(_format_attempt(a) for a in record["attempts"]),
+            _likely_cause(record),
+            "; ".join(_format_attempt(a, several_sets or len(
+                {x.get("credential_set") for x in record["attempts"]}) > 1)
+                      for a in record["attempts"]),
             record["message"],
         ])
     for entry in summary.get("unresolved") or []:

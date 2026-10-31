@@ -122,7 +122,7 @@ class _Conn:
     def __init__(self, outputs):
         self._outputs = outputs
 
-    def send_command(self, cmd):
+    def send_command(self, cmd, **kwargs):
         return self._outputs.get(cmd, "")
 
 

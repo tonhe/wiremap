@@ -78,9 +78,10 @@ Total           52          44          8           0           0"""
     assert "connected" in sources
     assert "static" in sources
     # Check a count value
+    # A source's route count is networks + subnets
     for entry in summary:
         if entry["source"] == "connected":
-            assert entry["count"] == 5
+            assert entry["count"] == 10
             break
 
 

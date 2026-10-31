@@ -13,6 +13,7 @@ from .acl_usage import classify_acls, UNKNOWN, UNREFERENCED, COUNTED, FILTERING
 from .findings import (
     CRITICAL, WARNING, INFO, make_finding, overfire_check, summary_count_rows,
 )
+from .fhrp import FHRP_HEADERS, fhrp_rows, fhrp_state_findings, has_fhrp_data
 from .l2_discovery import _derive_site, _has_collector_data, _extract_ip_interfaces
 from .routing_summary import (
     HEADER_BG, _write_header_row, _write_row, _finalize,
@@ -322,15 +323,7 @@ def _analyze_edge(inventory_data):
             usage_unknown_hosts.append(hostname)
 
         # --- FHRP unexpected state ---
-        hsrp_parsed = cd.get("hsrp", {}).get("parsed", {})
-        for e in hsrp_parsed.get("entries", []):
-            state = e.get("state", "")
-            if state and state.lower() not in ("active", "standby", "listen", ""):
-                findings.append(make_finding(
-                    hostname, WARNING, "FHRP group in unexpected state",
-                    (f"Interface {e.get('interface', '?')} group {e.get('group', '?')} "
-                     f"VIP {e.get('virtual_ip', '?')} state: {state}"),
-                ))
+        findings.extend(fhrp_state_findings(hostname, device, make_finding, WARNING))
 
     if usage_unknown_hosts:
         findings.append(make_finding(
@@ -460,25 +453,11 @@ def _acl_rows(analysis, inventory_data):
     return rows
 
 
-_FHRP_HEADERS = ["Device", "Site/Location", "Interface", "Group",
-                 "Priority", "State", "Virtual IP"]
+_FHRP_HEADERS = FHRP_HEADERS
 
 
 def _fhrp_rows(inventory_data):
-    rows = []
-    for hostname, device in sorted(inventory_data.get("devices", {}).items()):
-        hsrp = device.get("collector_data", {}).get("hsrp", {}).get("parsed", {})
-        site = _derive_site(hostname)
-        for e in hsrp.get("entries", []):
-            rows.append([
-                hostname, site,
-                e.get("interface", ""),
-                e.get("group", ""),
-                e.get("priority", ""),
-                e.get("state", ""),
-                e.get("virtual_ip", ""),
-            ])
-    return rows
+    return fhrp_rows(inventory_data, _derive_site)
 
 
 _PUBLIC_HEADERS = ["Device", "Site/Location", "Interface", "IP", "Prefix", "VRF"]
@@ -600,7 +579,7 @@ class InternetEdgeReport(BaseReport):
             _build_nat_overview_sheet(wb, inventory_data)
             _build_acl_audit_sheet(wb, analysis, inventory_data)
 
-        if _has_collector_data(inventory_data, "hsrp"):
+        if _has_collector_data(inventory_data, "hsrp") or has_fhrp_data(inventory_data):
             _build_fhrp_sheet(wb, inventory_data)
 
         if _has_collector_data(inventory_data, "edge_services"):
@@ -630,7 +609,7 @@ class InternetEdgeReport(BaseReport):
             sheets["ACL Audit"] = (list(_ACL_HEADERS),
                                    _acl_rows(analysis, inventory_data))
 
-        if _has_collector_data(inventory_data, "hsrp"):
+        if _has_collector_data(inventory_data, "hsrp") or has_fhrp_data(inventory_data):
             sheets["FHRP Status"] = (list(_FHRP_HEADERS), _fhrp_rows(inventory_data))
 
         # Edge Interfaces

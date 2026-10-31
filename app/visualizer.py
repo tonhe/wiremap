@@ -155,7 +155,7 @@ class NetworkVisualizer:
         """
         self.generate_graph_data()
         
-        html_content = f"""<!DOCTYPE html>
+        html_content = rf"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">

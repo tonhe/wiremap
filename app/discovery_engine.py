@@ -62,6 +62,10 @@ except ImportError:
         learn_source_ip, summary_line, SOURCE_CONFIGURED, SOURCE_LOCAL_SOCKET)
     from scan_timing import collector_ms, summarize as summarize_timing
     import target_outcomes
+try:
+    from app.credentials import Credential, CredentialChain
+except ImportError:
+    from credentials import Credential, CredentialChain
 
 logger = logging.getLogger(__name__)
 
@@ -161,11 +165,15 @@ class DiscoveryEngine:
                  collect_controller_managed: bool = False,
                  max_logins_per_minute: int = 0,
                  allow_telnet: bool = False,
-                 source_ip=None):
+                 source_ip=None,
+                 credentials=None):
         self.seed_ip = seed_ip
         self.seed_device_type = seed_device_type
-        self.username = username
-        self.password = password
+        # Credential sets in configured order; username/password alone is a
+        # single set. The chain keeps the last set that worked at the front.
+        self._credentials = CredentialChain(
+            credentials or [Credential(1, username, password)])
+        self.username = self._credentials.first.username
         self.target_hosts = target_hosts
         self.disable_autodetect = disable_autodetect
         self.crawl_from_targets = crawl_from_targets
@@ -340,6 +348,8 @@ class DiscoveryEngine:
         }
         params.update(self._target_params())
         params["expand_non_cdp_neighbors"] = self.expand_non_cdp_neighbors
+        # Which accounts were offered, in order -- never a password.
+        params["credential_usernames"] = self._credentials.usernames()
 
         if self.base_inventory is not None:
             params["continued_from"] = self.base_inventory.discovery_id
@@ -621,7 +631,8 @@ class DiscoveryEngine:
             explicit_type = bool(device_type)
             conn_mgr = ConnectionManager(
                 host=ip, device_type=device_type,
-                username=self.username, password=self.password,
+                username=self.username, password=None,
+                credentials=self._credentials.ordered(),
                 protocol=proto,
                 allow_fallback=not (explicit_type or self.disable_autodetect),
                 platform=known.get("platform"),
@@ -632,6 +643,8 @@ class DiscoveryEngine:
             result = conn_mgr.connect()
             connect_ms = _ms_since(connect_started)
             conn = result.connection
+            login_cred = conn_mgr.credential
+            self._credentials.mark_success(login_cred)
             if result.fallback_occurred:
                 self._progress_cb({
                     "event": "connection_fallback",
@@ -644,6 +657,8 @@ class DiscoveryEngine:
                 "ip": ip,
                 "protocol": result.protocol_used,
                 "device_type_effective": conn_mgr.effective_device_type,
+                "login_user": login_cred.username if login_cred else None,
+                "credential_set": login_cred.number if login_cred else None,
             })
             prompt_facts = ConnectionManager.get_prompt_facts(conn)
             hostname = prompt_facts["hostname"]
@@ -695,6 +710,9 @@ class DiscoveryEngine:
             )
             inventory.set_reached_ip(hostname, ip)
             inventory.mark_login_succeeded(hostname)
+            if login_cred is not None:
+                inventory.set_login_credential(
+                    hostname, login_cred.username, login_cred.number)
             # A device that failed in the scan being continued and works now
             # must stop being reported as a failure.
             with self._failed_lock:
@@ -706,7 +724,7 @@ class DiscoveryEngine:
 
             self._maybe_learn_source_ip(
                 conn, conn_mgr.effective_device_type or device_type, ip,
-                result.protocol_used)
+                result.protocol_used, username=conn_mgr.username)
 
             self._progress_cb({
                 "event": "collecting_data",
@@ -992,7 +1010,8 @@ class DiscoveryEngine:
         return summary_line(self.source_ip, self.source_ip_method,
                             self.source_access)
 
-    def _maybe_learn_source_ip(self, conn, device_type, ip, protocol):
+    def _maybe_learn_source_ip(self, conn, device_type, ip, protocol,
+                               username=None):
         """Ask the first device that can tell which address it sees us as.
 
         Tried once per scan on a platform that supports it (normally the
@@ -1008,7 +1027,7 @@ class DiscoveryEngine:
             self._source_learned = True
         try:
             addr, method = learn_source_ip(conn, device_type,
-                                           username=self.username,
+                                           username=username or self.username,
                                            local_ip=ip, protocol=protocol)
         except Exception as e:
             logger.info(f"Could not learn source address: "

@@ -1,6 +1,6 @@
 import pytest
 
-from app.redact import REDACTED, redact_config, redact_line
+from app.redact import REDACTED, redact_config, redact_config_counted, redact_line
 
 R = REDACTED
 
@@ -145,6 +145,78 @@ R = REDACTED
     ('    encrypted-password "$6$abcdef"; ## SECRET-DATA',
      f"    encrypted-password {R}; ## SECRET-DATA"),
     ('    secret "$9$abcdef"; ## SECRET-DATA', f"    secret {R}; ## SECRET-DATA"),
+    # Untyped mid-line passwords
+    ("ip ftp password Plain123", f"ip ftp password {R}"),
+    ("ip ftp password 0 Plain123", f"ip ftp password 0 {R}"),
+    ("ip ftp password 7 0822455D0A16", f"ip ftp password 7 {R}"),
+    (" ppp chap password Plain123", f" ppp chap password {R}"),
+    (" ppp pap sent-username u1 password Plain123",
+     f" ppp pap sent-username u1 password {R}"),
+    ("ip http client password Plain123", f"ip http client password {R}"),
+    (" l2tp tunnel password Plain123", f" l2tp tunnel password {R}"),
+    ("cts credentials id SW1 password Plain123",
+     f"cts credentials id SW1 password {R}"),
+    (" bind authenticate root-dn cn=svc,dc=example,dc=com password Plain123",
+     f" bind authenticate root-dn cn=svc,dc=example,dc=com password {R}"),
+    # ASA
+    ("failover key Plain123", f"failover key {R}"),
+    ("failover key hex 0a1b2c3d", f"failover key hex {R}"),
+    (" ldap-login-password Plain123", f" ldap-login-password {R}"),
+    ("enable password 8Ry2YjIyt7RRXU24 encrypted",
+     f"enable password {R} encrypted"),
+    ("username admin password $sha512$5000$abc$def pbkdf2 privilege 15",
+     f"username admin password {R} pbkdf2 privilege 15"),
+    # URL credentials
+    (" path ftp://u1:Plain123@192.0.2.9/$h", f" path ftp://u1:{R}@192.0.2.9/$h"),
+    # GLBP
+    (" glbp 10 authentication text Plain123", f" glbp 10 authentication text {R}"),
+    (" glbp 10 authentication md5 key-string Plain123",
+     f" glbp 10 authentication md5 key-string {R}"),
+    (" glbp 10 authentication md5 key-string 7 0822455D0A16",
+     f" glbp 10 authentication md5 key-string 7 {R}"),
+    # NX-OS forms
+    ("username admin password 5 $5$Q1x$yz  role network-admin",
+     f"username admin password 5 {R}  role network-admin"),
+    ("snmp-server user u1 network-admin auth sha $1$abc$def priv aes-128 "
+     "$1$ghi$jkl localizedkey",
+     f"snmp-server user u1 network-admin auth sha {R} priv aes-128 {R} localizedkey"),
+    ("  ip ospf authentication-key 3 0822455D0A16",
+     f"  ip ospf authentication-key 3 {R}"),
+    ("  ospf authentication-key 7 0822455D0A16", f"  ospf authentication-key 7 {R}"),
+    # Other routing / tunnel keys
+    ("ipv6 ospf authentication ipsec spi 256 md5 0123456789ABCDEF",
+     f"ipv6 ospf authentication ipsec spi 256 md5 {R}"),
+    ("  ospfv3 authentication ipsec spi 256 sha1 0 0123456789ABCDEF",
+     f"  ospfv3 authentication ipsec spi 256 sha1 0 {R}"),
+    ("  authentication mode hmac-sha-256 7 0822455D0A16",
+     f"  authentication mode hmac-sha-256 7 {R}"),
+    ("  authentication mode hmac-sha-256 Plain123",
+     f"  authentication mode hmac-sha-256 {R}"),
+    ("  hello-password hmac-md5 encrypted 0822455D0A16",
+     f"  hello-password hmac-md5 encrypted {R}"),
+    ("  lsp-password text Plain123", f"  lsp-password text {R}"),
+    ("  bfd authentication keyed-sha1 key-id 1 key Plain123",
+     f"  bfd authentication keyed-sha1 key-id 1 key {R}"),
+    (" ip nhrp authentication Plain123", f" ip nhrp authentication {R}"),
+    # Type 8/9 hashes
+    ("username admin secret 8 $8$abc$def", f"username admin secret 8 {R}"),
+    ("username admin algorithm-type scrypt secret $9$abc$def",
+     f"username admin algorithm-type scrypt secret {R}"),
+    # Safety net: crypt hash on a line no rule knows
+    ("some new-feature credential $1$abcd$efghijkl",
+     f"some new-feature credential {R}"),
+    ("  token $9$abcdefgh trailing", f"  token {R} trailing"),
+    ("  hashed $14$abc$def", f"  hashed {R}"),
+    # NX-OS style user line pasted into IOS-XE: both secret tokens go
+    ("username admin password 0 Plain123 $1$abcd$efghijkl role network-admin",
+     f"username admin password 0 {R} {R} role network-admin"),
+    ("username admin secret 0 Plain123 $1$abcd$efgh", f"username admin secret 0 {R} {R}"),
+    # Hex net: MD5/SHA-1/SHA-256 sized blob after a secret-ish word
+    ("  some-auth md5 0123456789abcdef0123456789abcdef",
+     f"  some-auth md5 {R}"),
+    ("  psk-hash sha1 0123456789abcdef0123456789abcdef01234567 x",
+     f"  psk-hash sha1 {R} x"),
+    ("  secret-hash " + "ab" * 32, f"  secret-hash {R}"),
 ])
 def test_redacts_secret(line, expected):
     assert redact_line(line) == expected
@@ -187,6 +259,26 @@ def test_redacts_secret(line, expected):
     " set community 65000:100",
     "set protocols bgp 65000 neighbor 192.0.2.1 remote-as 65001",
     "    members 65000:100;",
+    "ip ftp username ftpuser",
+    " glbp 10 authentication md5 key-chain GLBP-KEYS",
+    "  mka pre-shared-key key-chain MKA-KEYS",
+    "  hello-password keychain ISIS-KEYS",
+    "aaa password restriction",
+    "password policy P1",
+    "username u1 nopassword",
+    "ip ssh pubkey-chain",
+    " ip nhrp network-id 10",
+    " glbp 10 ip 192.0.2.1",
+    " glbp 10 priority 110",
+    " path flash:archive-$h-$t",
+    "  cryptographic-algorithm hmac-sha-256",
+    # Hex that is not keyed to a secret word stays: cert chain bodies,
+    # engine IDs, MACs, serial-like tokens
+    "  3082036C 30820254 A0030201 02020101 300D0609 2A864886 F70D0101 05050030",
+    " certificate self-signed 01",
+    "snmp-server engineID local 800000090300AABBCCDDEEFF",
+    "mac address-table static 0011.2233.4455 vlan 10 interface Gi1/0/1",
+    "  description link-id 0123456789abcdef0123456789abcdef",
     "!",
     "",
 ])
@@ -228,3 +320,56 @@ def test_redact_config_crlf_and_idempotent():
 def test_redact_config_empty():
     assert redact_config("") == ""
     assert redact_config(None) is None
+
+
+SWEEP_CONFIG = """\
+hostname RTR-A
+enable secret 5 $1$mERr$hx5rVt7rPNoS4wqbXKX7m0
+enable password 7 0822455D0A16
+username admin privilege 15 secret 9 $9$nhEmQVczB7dqsO$X.HsgL6x1il0RxkOSSvyQYwucySCt7qFm4v7pqCxkKM
+username ops secret 8 $8$dsYGNam3K1SIJO$7nv/35M/qr6t.dVc7UY9zrJDWRVqncHub1PE9UlMQFs
+username backup password 7 0822455D0A16
+username nxadmin password 5 $5$KJLPNE$sY9Fqfz2yN0fbQpLCZpjtM8YSS0z0ZSRvKhjrjtBnD8  role network-admin
+username fwadmin password $sha512$5000$Rz5vdq$Fz0kB4mXGQ== pbkdf2 privilege 15
+ip ftp username ftpuser
+ip ftp password Plain123
+ip http client password 0 Plain123
+snmp-server user u1 network-admin auth sha $1$abcd$efgh priv aes-128 $1$ijkl$mnop localizedkey
+crypto isakmp key 6 $8$abcd address 192.0.2.1
+ntp authentication-key 1 md5 $1$abcd$efgh 7
+key chain KC1
+ key 1
+  key-string 7 0822455D0A16
+interface Vlan10
+ glbp 10 ip 192.0.2.1
+ glbp 10 authentication text Plain123
+ standby 20 authentication md5 key-string 7 0822455D0A16
+ ppp chap password Plain123
+failover key Plain123
+archive
+ path ftp://u1:Plain123@192.0.2.9/$h
+line vty 0 4
+ password 7 0822455D0A16
+banner motd ^C $1$leftover$hash ^C
+end
+"""
+
+
+def test_sweep_leaves_no_hash_or_clear_secret():
+    out = redact_config(SWEEP_CONFIG)
+    assert out.count("\n") == SWEEP_CONFIG.count("\n")
+    for marker in ("$1$", "$5$", "$8$", "$9$", "$sha512$",
+                   "0822455D0A16", "Plain123"):
+        assert marker not in out, marker
+    assert "hostname RTR-A\n" in out
+    assert "ip ftp username ftpuser\n" in out
+    assert " glbp 10 ip 192.0.2.1\n" in out
+
+
+def test_redact_config_counted_counts_only_clear_tokens():
+    text = "enable secret 5 <REDACTED>\nip ftp password Plain123\nhostname R1\n"
+    out, n = redact_config_counted(text)
+    assert n == 1
+    assert "Plain123" not in out
+    assert redact_config_counted(out) == (out, 0)
+    assert redact_config_counted("") == ("", 0)

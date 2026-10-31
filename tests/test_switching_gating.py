@@ -169,3 +169,25 @@ def test_port_security_error_text_not_fed_to_ntc():
     assert parsed["port_security_addresses"] == []
     assert parsed["errdisable_recovery"] == []
     assert parsed["storm_control"] == []
+
+
+
+HEALTH_SWITCHING_CMDS = {"show power inline", "show vstack config",
+                         "show switch stack-ports", "show switch stack-ring speed"}
+HEALTH_GENERAL_CMDS = {"show environment all", "show redundancy", "show ip ssh",
+                       "show interfaces", "show processes cpu history",
+                       "show processes memory sorted"}
+
+
+def test_router_skips_switch_only_health_commands():
+    inventory, sent = _discover("RTR-B", ASR_SHOW_VERSION)
+    assert not HEALTH_SWITCHING_CMDS & set(sent)
+    assert HEALTH_GENERAL_CMDS <= set(sent)
+    cdata = inventory.devices["RTR-B"]["collector_data"]
+    assert "show power inline" not in cdata["environment"]["raw"]
+    assert "show vstack config" not in cdata["mgmt_security"]["raw"]
+
+
+def test_switch_gets_all_health_commands():
+    _, sent = _discover("SW2", C9300_SHOW_VERSION)
+    assert (HEALTH_SWITCHING_CMDS | HEALTH_GENERAL_CMDS) <= set(sent)

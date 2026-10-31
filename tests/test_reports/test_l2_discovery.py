@@ -123,7 +123,7 @@ def l2_inventory():
                     "config": {
                         "raw": {},
                         "parsed": {
-                            "config": "hostname CORE-SW-01\n!\nspanning-tree portfast bpduguard default\n!",
+                            "config": "hostname CORE-SW-01\n!\nspanning-tree portfast default\nspanning-tree portfast bpduguard default\n!",
                         },
                     },
                 },

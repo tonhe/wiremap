@@ -119,3 +119,30 @@ def test_runs_as_a_script_without_loading_the_web_app(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "flask" not in result.stderr.lower()
     assert set(json.loads(out.read_text())["devices"]) == {"SW1", "SW2"}
+
+
+def test_two_merges_in_one_second_do_not_overwrite(tmp_path, monkeypatch):
+    a = _write(tmp_path / "a.json", _scan("a", {"SW1": _device("SW1", "192.0.2.1")}))
+    b = _write(tmp_path / "b.json", _scan("b", {"SW2": _device("SW2", "192.0.2.2")}))
+    c = _write(tmp_path / "c.json", _scan("c", {"SW3": _device("SW3", "192.0.2.3")}))
+    outdir = tmp_path / "out"
+    outdir.mkdir()
+    import app.inventory_merge as im
+    from datetime import datetime, timezone
+    fixed = datetime(2026, 10, 31, 12, 0, 0, tzinfo=timezone.utc)
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed
+    monkeypatch.setattr(im, "datetime", _Clock)
+
+    main([a, b, "-o", str(outdir)])
+    main([a, c, "-o", str(outdir)])
+
+    written = sorted(p.name for p in outdir.glob("*.json"))
+    assert written == ["2026-10-31_12-00-00_merged-2.json",
+                       "2026-10-31_12-00-00_merged.json"]
+    second = json.loads((outdir / written[0]).read_text())
+    assert second["discovery_id"] == "2026-10-31_12-00-00_merged-2"
+    assert set(second["devices"]) == {"SW1", "SW3"}

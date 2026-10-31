@@ -429,10 +429,15 @@ def _analyze_vlans(inventory_data):
             m = re.match(r"^[Vv]lan(\d+)$", iface)
             if m:
                 vid = m.group(1)
+                state = entry.get("state", "")
+                proto = entry.get("protocol") or "HSRP"
+                if proto != "HSRP":
+                    # The column is headed HSRP VIP; name the other FHRPs.
+                    state = f"{proto} {state}".strip()
                 hsrp_vips[vid].append({
                     "hostname": hostname,
                     "virtual_ip": entry.get("virtual_ip", ""),
-                    "state": entry.get("state", ""),
+                    "state": state,
                     "priority": entry.get("priority", ""),
                     "group": entry.get("group", ""),
                 })
@@ -956,34 +961,89 @@ def _build_stp_topology_sheet(wb, inventory_data):
     return ws
 
 
-def _build_port_security_sheet(wb, inventory_data):
-    """Port Security tab -- access port hardening analysis."""
-    ws = wb.create_sheet(title="Port Security")
+_PORT_SECURITY_HEADERS = ["Device", "Site/Location", "Interface", "Mode", "BPDU Guard",
+                          "Root Guard", "Storm Control", "Port Security", "Voice VLAN"]
 
-    headers = ["Device", "Site/Location", "Interface", "Mode", "BPDU Guard",
-               "Root Guard", "Storm Control", "Port Security", "Voice VLAN"]
-    _write_header_row(ws, headers, row=1)
 
-    row = 2
+def _interface_config_blocks(config_text):
+    """{canonical interface name: [config lines, lowercased]} from a
+    running-config."""
+    blocks = {}
+    current = None
+    for line in (config_text or "").splitlines():
+        if line.startswith("interface "):
+            current = blocks.setdefault(
+                canonical_ifname(line.split(None, 1)[1].strip()), [])
+            continue
+        if current is None:
+            continue
+        if line[:1] in (" ", "\t"):
+            current.append(" ".join(line.split()).lower())
+        else:
+            current = None
+    return blocks
+
+
+def _global_stp_flags(config_text):
+    lines = {" ".join(l.split()).lower() for l in (config_text or "").splitlines()
+             if l.startswith("spanning-tree ")}
+    return {
+        # IOS, IOS-XE ("portfast edge ..."), NX-OS ("port type edge ...")
+        "bpduguard_default": bool(lines & {
+            "spanning-tree portfast bpduguard default",
+            "spanning-tree portfast edge bpduguard default",
+            "spanning-tree port type edge bpduguard default"}),
+        "portfast_default": bool(lines & {
+            "spanning-tree portfast default",
+            "spanning-tree portfast edge default",
+            "spanning-tree port type edge default"}),
+    }
+
+
+def _is_edge_port(block, is_access, portfast_default):
+    """PortFast/edge on this port, configured or by default for access ports."""
+    if any(l in ("spanning-tree portfast disable", "spanning-tree portfast network",
+                 "spanning-tree port type network", "spanning-tree port type normal")
+           for l in block):
+        return False
+    if any(l.startswith(("spanning-tree portfast", "spanning-tree port type edge"))
+           for l in block):
+        return True
+    return portfast_default and is_access
+
+
+def _bpdu_guard(block, is_access, flags):
+    """BPDU guard is on when the port enables it, or when it is an edge port
+    and the global edge-port default is set. The global default never
+    covers trunks or other non-edge ports."""
+    if "spanning-tree bpduguard disable" in block:
+        return False
+    if "spanning-tree bpduguard enable" in block:
+        return True
+    return flags["bpduguard_default"] and _is_edge_port(
+        block, is_access, flags["portfast_default"])
+
+
+def _port_security_rows(inventory_data):
+    """[(row values, mode)] for the Port Security tab."""
+    rows = []
     for hostname in sorted(inventory_data.get("devices", {}).keys()):
         device = inventory_data["devices"][hostname]
         sw_data = device.get("collector_data", {}).get("switchport", {})
         parsed = sw_data.get("parsed", {})
         site = _derive_site(hostname)
 
-        # Get running config for BPDU/root guard detection
         config_text = device.get("collector_data", {}).get(
             "config", {}).get("parsed", {}).get("config", "")
-        global_bpdu = ("spanning-tree portfast bpduguard default" in config_text)
+        blocks = _interface_config_blocks(config_text)
+        flags = _global_stp_flags(config_text)
 
-        # Build storm control lookup by interface
         storm_lookup = {}
         for sc in parsed.get("storm_control", []):
             iface = sc.get("interface", "")
             if iface:
                 storm_lookup[iface.lower()] = sc
 
-        # Build port security lookup by interface
         ps_lookup = {}
         for ps in parsed.get("port_security", []):
             iface = ps.get("interface", "")
@@ -993,57 +1053,54 @@ def _build_port_security_sheet(wb, inventory_data):
         for port in parsed.get("switchports", []):
             iface = port.get("interface", "")
             mode = port.get("mode", "")
+            block = blocks.get(canonical_ifname(iface), [])
+            if "switchport mode trunk" in block:
+                is_access = False
+            else:
+                is_access = ("switchport mode access" in block
+                             or "access" in mode.lower()
+                             or "access" in str(port.get("operational_mode", "")).lower())
 
-            # BPDU Guard: global or per-interface in config
-            has_bpdu = global_bpdu
-            if not has_bpdu and config_text and iface:
-                if "spanning-tree bpduguard enable" in config_text:
-                    has_bpdu = True
-            bpdu_str = "Yes" if has_bpdu else "No"
+            has_bpdu = _bpdu_guard(block, is_access, flags)
+            has_root_guard = "spanning-tree guard root" in block
 
-            # Root Guard
-            has_root_guard = False
-            if config_text:
-                if "spanning-tree guard root" in config_text:
-                    has_root_guard = True
-            root_guard_str = "Yes" if has_root_guard else "No"
+            rows.append([
+                hostname, site, iface, mode,
+                "Yes" if has_bpdu else "No",
+                "Yes" if has_root_guard else "No",
+                "Yes" if iface.lower() in storm_lookup else "No",
+                "Yes" if iface.lower() in ps_lookup else "No",
+                port.get("voice_vlan", ""),
+            ])
+    return rows
 
-            # Storm Control
-            has_storm = iface.lower() in storm_lookup
-            storm_str = "Yes" if has_storm else "No"
 
-            # Port Security
-            has_ps = iface.lower() in ps_lookup
-            ps_str = "Yes" if has_ps else "No"
+def _build_port_security_sheet(wb, inventory_data):
+    """Port Security tab -- access port hardening analysis."""
+    ws = wb.create_sheet(title="Port Security")
 
-            # Voice VLAN
-            voice_vlan = port.get("voice_vlan", "")
+    headers = _PORT_SECURITY_HEADERS
+    _write_header_row(ws, headers, row=1)
 
-            ws.cell(row=row, column=1, value=hostname)
-            ws.cell(row=row, column=2, value=site)
-            ws.cell(row=row, column=3, value=iface)
-            ws.cell(row=row, column=4, value=mode)
-            ws.cell(row=row, column=5, value=bpdu_str)
-            ws.cell(row=row, column=6, value=root_guard_str)
-            ws.cell(row=row, column=7, value=storm_str)
-            ws.cell(row=row, column=8, value=ps_str)
-            ws.cell(row=row, column=9, value=voice_vlan)
+    row = 2
+    for values in _port_security_rows(inventory_data):
+        for col, value in enumerate(values, start=1):
+            ws.cell(row=row, column=col, value=value)
 
-            # Highlight missing security features based on port mode:
-            #   ACCESS: BPDU Guard (5), Storm Control (7)
-            #   TRUNK:  Root Guard (6), Storm Control (7)
-            is_trunk = "trunk" in mode.lower()
-            is_access = "access" in mode.lower() or "static access" in mode.lower()
-            highlight_cols = []
-            if is_access:
-                highlight_cols = [5, 7]   # BPDU Guard, Storm Control
-            elif is_trunk:
-                highlight_cols = [6, 7]   # Root Guard, Storm Control
-            for col in highlight_cols:
-                if ws.cell(row=row, column=col).value == "No":
-                    ws.cell(row=row, column=col).fill = _ROOT_BAD_FILL
+        # Highlight missing security features based on port mode:
+        #   ACCESS: BPDU Guard (5), Storm Control (7)
+        #   TRUNK:  Root Guard (6), Storm Control (7)
+        mode = values[3].lower()
+        highlight_cols = []
+        if "access" in mode:
+            highlight_cols = [5, 7]   # BPDU Guard, Storm Control
+        elif "trunk" in mode:
+            highlight_cols = [6, 7]   # Root Guard, Storm Control
+        for col in highlight_cols:
+            if ws.cell(row=row, column=col).value == "No":
+                ws.cell(row=row, column=col).fill = _ROOT_BAD_FILL
 
-            row += 1
+        row += 1
 
     _add_table(ws, "PortSecurity", len(headers), row - 1)
     _auto_width(ws)
@@ -1360,62 +1417,8 @@ class L2DiscoveryReport(BaseReport):
 
         # ---- Port Security sheet (conditional) ----
         if _has_collector_data(inventory_data, "switchport"):
-            ps_headers = [
-                "Device", "Site/Location", "Interface", "Mode", "BPDU Guard",
-                "Root Guard", "Storm Control", "Port Security", "Voice VLAN",
-            ]
-            ps_rows = []
-            for hostname in sorted(inventory_data.get("devices", {}).keys()):
-                device = inventory_data["devices"][hostname]
-                sw_data = device.get("collector_data", {}).get("switchport", {})
-                parsed = sw_data.get("parsed", {})
-                site = _derive_site(hostname)
-
-                config_text = device.get("collector_data", {}).get(
-                    "config", {}).get("parsed", {}).get("config", "")
-                global_bpdu = ("spanning-tree portfast bpduguard default" in config_text)
-
-                storm_lookup = {}
-                for sc in parsed.get("storm_control", []):
-                    iface = sc.get("interface", "")
-                    if iface:
-                        storm_lookup[iface.lower()] = sc
-
-                ps_lookup = {}
-                for ps in parsed.get("port_security", []):
-                    iface = ps.get("interface", "")
-                    if iface:
-                        ps_lookup[iface.lower()] = ps
-
-                for port in parsed.get("switchports", []):
-                    iface = port.get("interface", "")
-                    mode = port.get("mode", "")
-
-                    has_bpdu = global_bpdu
-                    if not has_bpdu and config_text and iface:
-                        if "spanning-tree bpduguard enable" in config_text:
-                            has_bpdu = True
-                    bpdu_str = "Yes" if has_bpdu else "No"
-
-                    has_root_guard = False
-                    if config_text:
-                        if "spanning-tree guard root" in config_text:
-                            has_root_guard = True
-                    root_guard_str = "Yes" if has_root_guard else "No"
-
-                    has_storm = iface.lower() in storm_lookup
-                    storm_str = "Yes" if has_storm else "No"
-
-                    has_ps = iface.lower() in ps_lookup
-                    ps_str = "Yes" if has_ps else "No"
-
-                    voice_vlan = port.get("voice_vlan", "")
-
-                    ps_rows.append([
-                        hostname, site, iface, mode, bpdu_str,
-                        root_guard_str, storm_str, ps_str, voice_vlan,
-                    ])
-            sheets["Port Security"] = (ps_headers, ps_rows)
+            sheets["Port Security"] = (list(_PORT_SECURITY_HEADERS),
+                                       _port_security_rows(inventory_data))
 
             # ---- Trunk Summary sheet (conditional, same gate) ----
             trunk_headers = [

@@ -52,6 +52,14 @@ _COMMANDS = {
         "show log system direction equal backward",
     ],
 }
+_LOG_COMMANDS = frozenset({
+    "show logging",
+    "show log tail",
+    "show log",
+    "show log system direction equal backward",
+})
+LOG_READ_TIMEOUT = 180
+
 _DEFAULT_COMMANDS = [
     "show ntp status",
     "show ntp associations",
@@ -305,7 +313,13 @@ class NtpLoggingCollector(BaseCollector):
         raw_outputs = {}
         for cmd in cmds:
             try:
-                raw_outputs[cmd] = connection.send_command(cmd)
+                if cmd in _LOG_COMMANDS:
+                    # A full buffer is hundreds of KB; netmiko's default
+                    # 10s read timeout gave up on it and the log was lost.
+                    raw_outputs[cmd] = connection.send_command(
+                        cmd, read_timeout=LOG_READ_TIMEOUT)
+                else:
+                    raw_outputs[cmd] = connection.send_command(cmd)
             except Exception as e:
                 raw_outputs[cmd] = send_failure_output(e)
 

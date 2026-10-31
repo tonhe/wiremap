@@ -272,12 +272,55 @@ def test_merge_cannot_escape_inventory_dir(client):
     assert resp.status_code in (400, 404)
 
 
+def _scan_file(inventory_dir, discovery_id, hostnames, timestamp):
+    data = {
+        "discovery_id": discovery_id, "seed_ip": "192.0.2.1",
+        "timestamp": timestamp, "params": {},
+        "devices": {h: {"hostname": h, "login_succeeded": True,
+                        "collector_data": {}} for h in hostnames},
+    }
+    with open(os.path.join(inventory_dir, f"{discovery_id}.json"), "w") as f:
+        json.dump(data, f)
+    return data
+
+
+def test_remerge_lists_originals_in_saved_scans(inventory_dir, client):
+    """Merging a merge again lists the original scans, so the Saved Scans
+    badge counts them rather than counting the merge file as one."""
+    from app.inventory_merge import merge_inventories
+    a = _scan_file(inventory_dir, "scan-a", ["SW1", "SW2"],
+                   "2026-08-25T10:00:00+00:00")
+    b = _scan_file(inventory_dir, "scan-b", ["SW1", "SW3"],
+                   "2026-08-27T10:00:00+00:00")
+    first = merge_inventories([a, b], filenames=["scan-a.json", "scan-b.json"])
+    first["discovery_id"] = "2026-08-28_00-00-00_merged"
+    with open(os.path.join(inventory_dir, "2026-08-28_00-00-00_merged.json"),
+              "w") as f:
+        json.dump(first, f)
+
+    resp = client.post("/inventories/merge", json={
+        "filenames": ["2026-08-28_00-00-00_merged.json", "scan-b.json"]})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert [m["discovery_id"] for m in body["merged_from"]] == ["scan-a", "scan-b"]
+
+    listed = {i["discovery_id"]: i for i in client.get("/inventories").get_json()}
+    assert len(listed[body["inventory_key"]]["merged_from"]) == 2
+
+
 def test_merge_ui_present_in_saved_scans(client):
     _point_at_repo_templates()
     body = client.get("/").get_data(as_text=True)
     assert "merge-bar" in body
     assert "mergeSelectedScans" in body
     assert "Merge selected" in body
+
+
+def test_summed_elapsed_is_labelled_in_the_ui(client):
+    _point_at_repo_templates()
+    body = client.get("/").get_data(as_text=True)
+    assert "elapsed_summed" in body
+    assert "ELAPSED (SUMMED)" in body
 
 
 class _CapturedScan:
@@ -496,3 +539,59 @@ def test_ui_has_source_ip_fields_and_console_line(client):
     assert 'id="ts_source_ip"' in body
     assert "addEventListener('source_access'" in body
     assert "source_access_line" in body
+
+
+# --- multiple credential sets ---------------------------------------------
+
+DISCOVERY = {"scan_type": "discovery", "seed_ip": "192.0.2.1",
+             "device_type": "cisco_ios"}
+
+
+def test_scan_start_passes_extra_credential_sets(client, monkeypatch):
+    scan = _CapturedScan(monkeypatch)
+    resp = client.post("/scan/start", data=dict(
+        DISCOVERY, username="netops", password="pw-one",
+        username_2="", password_2="",
+        username_3="backup-admin", password_3="pw-three"))
+    assert resp.status_code == 200, resp.get_json()
+    creds = scan.engine_kwargs["credentials"]
+    assert [(c.number, c.username) for c in creds] == [(1, "netops"), (3, "backup-admin")]
+    assert scan.engine_kwargs["username"] == "netops"
+
+
+def test_scan_start_single_set_still_works(client, monkeypatch):
+    scan = _CapturedScan(monkeypatch)
+    resp = client.post("/scan/start", data=dict(TARGETED, host_list="192.0.2.5"))
+    assert resp.status_code == 200, resp.get_json()
+    assert [c.username for c in scan.engine_kwargs["credentials"]] == ["u"]
+
+
+def test_scan_start_rejects_username_without_password(client, monkeypatch):
+    _CapturedScan(monkeypatch)
+    resp = client.post("/scan/start", data=dict(
+        TARGETED, host_list="192.0.2.5", username_2="backup-admin"))
+    assert resp.status_code == 400
+    assert "set 2" in resp.get_json()["error"]
+
+
+def test_scan_start_requires_a_complete_set(client, monkeypatch):
+    _CapturedScan(monkeypatch)
+    resp = client.post("/scan/start", data=dict(DISCOVERY, username="", password=""))
+    assert resp.status_code == 400
+    assert "required" in resp.get_json()["error"].lower()
+
+
+def test_scan_start_error_never_echoes_a_password(client, monkeypatch):
+    _CapturedScan(monkeypatch)
+    resp = client.post("/scan/start", data=dict(
+        DISCOVERY, username="netops", password="pw-one",
+        password_2="Sekr1t-Echo-55"))
+    assert resp.status_code == 400
+    assert "Sekr1t-Echo-55" not in resp.get_data(as_text=True)
+
+
+def test_index_offers_add_credentials_on_both_forms(client):
+    _point_at_repo_templates()
+    body = client.get("/").get_data(as_text=True)
+    assert body.count('class="btn-sm cred-add"') == 2
+    assert 'data-prefix="disc"' in body and 'data-prefix="ts"' in body
