@@ -251,6 +251,50 @@ def test_2960x_stack_members_take_state_with_classic_master_role():
     assert status["Switch 1 - FlexStackPlus Module"] == "Ready"
 
 
+def test_single_3850_bundle_pid_takes_its_member_state():
+    # show module in the stack layout, one row, bundle PID C1-...
+    device = _logged_in("switch", parsed={
+        "modules": [{"module": "1", "switch_number": "", "port": "20", "cardtype": "",
+                     "model": "C1-WS3850-12S/-S", "serial": "FOC0000X0AA", "status": ""}],
+        "stack_members": [{"switch": "1", "role": "Active", "state": "Ready"}]})
+    rows = _modules_sheet(device)
+    assert [(r[2], r[3], r[4], r[6], r[7]) for r in rows] == [
+        ("Switch 1", "Stack member", "C1-WS3850-12S/-S", "Ready", "20")]
+
+
+def test_fru_uplink_modules_listed_and_follow_their_member():
+    device = _logged_in("switch", parsed={
+        "modules": [{"module": "1", "port": "41", "model": "C9300-48P", "serial": "FOC0000X0AA"},
+                    {"module": "2", "port": "41", "model": "C9300-48P", "serial": "FOC0000X0AB"}],
+        "stack_members": [{"switch": "1", "state": "Ready"},
+                          {"switch": "2", "state": "Removed"}],
+        "inventory": [
+            {"name": "c93xx Stack", "descr": "c93xx Stack", "pid": "C9300-48P"},
+            {"name": "Switch 1", "descr": "C9300-48P", "pid": "C9300-48P"},
+            {"name": "Switch 1 - Power Supply A", "descr": "Switch 1 - Power Supply A",
+             "pid": "PWR-C1-715WAC"},
+            {"name": "Switch 1 FRU Uplink Module 1", "descr": "8x10G Uplink Module",
+             "pid": "C9300-NM-8X", "sn": "FOC0000X0AC"},
+            {"name": "Switch 2 FRU Uplink Module 1", "descr": "8x10G Uplink Module",
+             "pid": "C9300-NM-8X", "sn": "FOC0000X0AD"}]})
+    status = {r[2]: r[6] for r in _modules_sheet(device)}
+    assert status == {"Switch 1 FRU Uplink Module 1": "Ready",
+                      "Switch 2 FRU Uplink Module 1": "Removed",
+                      "Switch 1": "Ready", "Switch 2": "Removed"}
+
+
+def test_svl_pair_uplink_modules_take_the_chassis_state():
+    device = _logged_in("switch", parsed={
+        "modules": [{"module": "1", "port": "48", "model": "C9500-48Y4C", "serial": "FOC0000X0AA"}],
+        "stack_members": [
+            {"switch": "1", "state": "Ready", "stack_type": "stackwise-virtual"},
+            {"switch": "2", "state": "Ready", "stack_type": "stackwise-virtual"}],
+        "inventory": [{"name": "Switch 2 FRU Uplink Module 1", "descr": "8x10G Uplink Module",
+                       "pid": "C9500-NM-8X", "sn": "FOC0000X0AE"}]})
+    rows = _modules_sheet(device)
+    assert [(r[2], r[6]) for r in rows] == [("Switch 2 FRU Uplink Module 1", "Ready")]
+
+
 def test_standalone_switch_gets_no_member_row():
     device = _logged_in("switch", parsed={"stack_members": [
         {"switch": "1", "role": "Active", "state": "Ready"}]})

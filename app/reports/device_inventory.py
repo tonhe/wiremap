@@ -141,8 +141,8 @@ _SKIP_INVENTORY_TYPES = {
 # Patterns for models that are chassis/switch PIDs, not real modules.
 _CHASSIS_MODEL_RE = re.compile(
     r"^("
-    r"WS-C\d|"            # Catalyst 2960/3560/3750/3850/4500
-    r"C9[2-6]\d{2}[LX]?-\d|"  # Catalyst 9200/9300/9400/9500/9600
+    r"(?:WS-C|C1-WS)\d|"     # Catalyst 2960/3560/3750/3850/4500; C1- bundle PIDs
+    r"(?:C1-)?C9[2-6]\d{2}[LX]?-\d|"  # Catalyst 9200/9300/9400/9500/9600
     r"CISCO\d|"           # CISCO871, CISCO881, etc.
     r"ISR\d.*/K9|"        # ISR4331/K9, ISR4451-X/K9
     r"VG[23]\d{2}"        # VG224, VG310, VG320 chassis
@@ -178,11 +178,12 @@ _MODULE_HEADERS = ["Hostname", "Mgmt IP", "Slot", "Type",
 # "module R0", "module 0", "SPA subslot 0/0", "NIM subslot 1/0"
 _INV_SLOT_RE = re.compile(r"\b(?:module|subslot)\s+(\S+)\s*$", re.I)
 _INV_SWITCH_RE = re.compile(r"^\s*(?:switch\s+)?(\d+)\s*$", re.I)
-# A member's sub-component: "Switch 1 - FlexStackPlus Module"
-_INV_MEMBER_PART_RE = re.compile(r"^\s*switch\s+(\d+)\s+-\s+\S", re.I)
+# A member's sub-component: "Switch 1 - FlexStackPlus Module",
+# "Switch 1 FRU Uplink Module 1"
+_INV_MEMBER_PART_RE = re.compile(r"^\s*switch\s+(\d+)\s+(?:-\s+)?\S", re.I)
 
 
-def _stack_members(parsed, raw):
+def _stack_members(parsed, raw, include_pairs=False):
     """{member number: normalized member} from show switch detail.
 
     Scans collected before the status tables were parsed still hold the raw
@@ -197,7 +198,7 @@ def _stack_members(parsed, raw):
     for member in members:
         m = _normalize_keys(member)
         num = str(m.get("switch") or m.get("member") or "")
-        if num and not m.get("stack_type"):
+        if num and (include_pairs or not m.get("stack_type")):
             out[num] = m
     return out
 
@@ -230,6 +231,20 @@ def _module_status(m, slot, slot_state, module_status):
             or slot_state.get(slot, ""))
 
 
+def _inventory_skipped(it):
+    descr = (it.get("descr") or it.get("description") or "").lower()
+    name = (it.get("name") or "").lower()
+    return (any(skip in descr or skip in name for skip in _SKIP_INVENTORY_TYPES)
+            or "chassis" in name)
+
+
+def _inventory_row(hostname, mgmt_ip, it, status):
+    return [hostname, mgmt_ip, it.get("name") or "",
+            it.get("descr") or it.get("description") or "",
+            it.get("pid") or "", it.get("sn") or it.get("serial_number") or "",
+            status, ""]
+
+
 def _module_rows(inventory_data):
     """Modules sheet rows: show module when the platform has it, otherwise
     the non-chassis show inventory entries. Status comes from the platform's
@@ -249,7 +264,11 @@ def _module_rows(inventory_data):
         # chassis is missing from the parsed modules.
         if len(cards) > len(modules):
             modules = cards
+        # Sub-components take their member's state, an SVL chassis included.
+        part_state = {num: m.get("state") or m.get("status") or ""
+                      for num, m in _stack_members(parsed, raw, True).items()}
         members_shown = set()
+        stack_table = False
 
         if modules:
             for mod in modules:
@@ -267,6 +286,9 @@ def _module_rows(inventory_data):
                         _CHASSIS_MODEL_RE.match(model)
                         and _table_status(m, slot, module_status)
                         and not _SKIP_MODULE_RE.search(mod_type)):
+                    # A stack-layout show module row is the member itself.
+                    if _CHASSIS_MODEL_RE.match(model) and slot in stack_state:
+                        stack_table = True
                     continue
                 sw = str(m.get("switch_number") or "")
                 rows.append([
@@ -279,16 +301,18 @@ def _module_rows(inventory_data):
                     status,
                     m.get("ports") or m.get("port") or "",
                 ])
+            # show module has no row for a member's uplink module; show
+            # inventory does.
+            for item in parsed.get("inventory", []):
+                it = _normalize_keys(item)
+                part = _INV_MEMBER_PART_RE.match(it.get("name") or "")
+                if part and not _inventory_skipped(it):
+                    rows.append(_inventory_row(hostname, mgmt_ip, it,
+                                               part_state.get(part.group(1), "")))
         else:
             for item in parsed.get("inventory", []):
                 it = _normalize_keys(item)
-                descr = (it.get("descr")
-                         or it.get("description") or "").lower()
-                name = (it.get("name") or "").lower()
-                if any(skip in descr or skip in name
-                       for skip in _SKIP_INVENTORY_TYPES):
-                    continue
-                if "chassis" in name:
+                if _inventory_skipped(it):
                     continue
                 raw_name = it.get("name") or ""
                 status = ""
@@ -304,20 +328,12 @@ def _module_rows(inventory_data):
                     elif part:
                         # Nothing reports a stack module's own state; it is
                         # present exactly when its member is.
-                        status = stack_state.get(part.group(1), "")
-                rows.append([
-                    hostname,
-                    mgmt_ip,
-                    raw_name,
-                    it.get("descr") or it.get("description") or "",
-                    it.get("pid") or "",
-                    it.get("sn") or it.get("serial_number") or "",
-                    status,
-                    "",
-                ])
+                        status = part_state.get(part.group(1), "")
+                rows.append(_inventory_row(hostname, mgmt_ip, it, status))
 
-        # A one-member "stack" is a standalone switch; nothing to add.
-        if len(stack_state) > 1:
+        # A standalone switch is not a module, unless show module lists it
+        # as a member row the way show inventory does on a 2960-X.
+        if len(stack_state) > 1 or stack_table:
             by_num = {str(_normalize_keys(c).get("module") or ""): _normalize_keys(c)
                       for c in parsed.get("modules", []) or []}
             for num in sorted(set(stack_state) - members_shown, key=int):
