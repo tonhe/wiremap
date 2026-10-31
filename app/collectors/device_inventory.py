@@ -745,7 +745,9 @@ class DeviceInventoryCollector(BaseCollector):
         if mod_cmd and device_type in ("cisco_ios", "cisco_xe"):
             cards, mod_status = _parse_ios_show_module(
                 _usable(raw_outputs.get(mod_cmd, "")))
-            if not modules:
+            # ntc stops at the first status table, so a VSS pair's second
+            # chassis never reaches its output.
+            if len(cards) > len(modules):
                 modules = cards
             _apply_module_status(modules, mod_status)
 

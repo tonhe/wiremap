@@ -33,10 +33,12 @@ except ImportError:
 try:
     from app.target_outcomes import (COLLECTED, MERGED, FAILED, SKIPPED,
                                      UNRESOLVED, NOT_ATTEMPTED, outcome_counts,
+                                     owned_outcome, owners_by_address,
                                      reconcile, target_list)
 except ImportError:
     from target_outcomes import (COLLECTED, MERGED, FAILED, SKIPPED,
                                  UNRESOLVED, NOT_ATTEMPTED, outcome_counts,
+                                 owned_outcome, owners_by_address,
                                  reconcile, target_list)
 
 logger = logging.getLogger(__name__)
@@ -253,13 +255,14 @@ def _scan_targets(inventory):
                        [(ip, None) for ip in ips])
 
 
-def _merge_targets(inventories, reached_by_ip, failed, skipped):
+def _merge_targets(inventories, devices, reached_by_ip, failed, skipped):
     """One target per requested host across every scan.
 
     A host listed in several scans takes its best outcome, then is checked
     against the merged set: failed in one scan but collected in another is
-    collected.
+    collected, and so is an address that belongs to a collected device.
     """
+    owners = owners_by_address(devices)
     best = {}
     best_resolved = {}
     for inventory in inventories:
@@ -286,6 +289,10 @@ def _merge_targets(inventories, reached_by_ip, failed, skipped):
                 target["outcome"] = COLLECTED
                 target.pop("reason", None)
             target["hostname"] = hostname
+        elif ip and ip in owners and target.get("outcome") != MERGED:
+            target.pop("reason", None)
+            target.update({k: v for k, v in
+                           owned_outcome(ip, devices, owners).items() if v})
         elif (target.get("outcome") == FAILED
               and ip in skipped and ip not in failed):
             entry = skipped[ip] if isinstance(skipped[ip], dict) else {}
@@ -529,7 +536,8 @@ def merge_inventories(inventories: list, filenames: list = None) -> dict:
     for ip in skipped:
         failed.pop(ip, None)
 
-    targets = _merge_targets(inventories, reached_by_ip, failed, skipped)
+    targets = _merge_targets(inventories, merged_devices, reached_by_ip,
+                             failed, skipped)
     not_attempted = _merge_not_attempted(
         summaries, reached | set(failed) | set(skipped))
 

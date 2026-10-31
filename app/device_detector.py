@@ -9,6 +9,11 @@ import logging
 from pathlib import Path
 from typing import Optional, Dict, List
 
+try:
+    from app.device_role import category_for_model
+except ImportError:
+    from device_role import category_for_model
+
 logger = logging.getLogger(__name__)
 
 # Used when the patterns file predates the controller_managed section.
@@ -146,6 +151,12 @@ class DeviceTypeDetector:
         text_to_check = (platform + " " + system_desc).lower()
         if any(keyword in text_to_check for keyword in firewall_keywords):
             return ('firewall', has_routing)
+
+        # A known hardware model beats the capability bits: an ISR4351 doing
+        # CUBE advertises Switch, a VG310 advertises Router.
+        by_model = category_for_model(platform)
+        if by_model:
+            return (by_model, has_routing)
 
         # Access Point detection (check BEFORE bridge, since Trans-Bridge = AP)
         if any(c in caps for c in ['WLAN', 'W', 'AP']):

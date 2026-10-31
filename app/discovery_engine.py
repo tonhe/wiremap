@@ -1538,6 +1538,8 @@ class DiscoveryEngine:
         category_filter_map = {
             "router": "include_routers",
             "firewall": "include_routers",
+            # Crawled as routers before they had a category of their own.
+            "voice-gateway": "include_routers",
             "switch": "include_switches",
             "fabric-interconnect": "include_switches",
             "phone": "include_phones",

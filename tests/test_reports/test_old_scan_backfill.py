@@ -36,15 +36,15 @@ def test_stack_with_no_platform_takes_category_from_parsed_model():
     assert data["devices"]["STK-A"]["device_category"] == "switch"
 
 
-def test_unknown_model_and_neighbour_only_devices_are_left_alone():
+def test_unknown_model_is_left_alone():
     data = {"devices": {
         "FW-A": _logged_in("firewall", platform="PA-3220"),
-        "SEEN": {"login_succeeded": False, "device_category": "switch",
-                 "platform": "cisco ISR4351/K9"},
+        "SEEN": {"login_succeeded": False, "device_category": "phone",
+                 "platform": "Cisco IP Phone 8851"},
     }}
     assert refresh_categories(data) == []
     assert data["devices"]["FW-A"]["device_category"] == "firewall"
-    assert data["devices"]["SEEN"]["device_category"] == "switch"
+    assert data["devices"]["SEEN"]["device_category"] == "phone"
 
 
 def test_merge_refreshes_categories_from_older_inputs():
@@ -111,3 +111,103 @@ def test_merge_rebuilds_targets_from_scans_without_outcomes():
         {"filename": "a.json", "source_ip": "198.51.100.5"},
         {"filename": "b.json", "source_ip": "198.51.100.6"}]
     assert "source_ip" not in summary
+
+
+def _router_with_loopback(hostname, mgmt_ip, loopback):
+    return {"hostname": hostname, "mgmt_ip": mgmt_ip, "login_succeeded": True,
+            "collector_data": {"interfaces": {"parsed": {"ip_interfaces": [
+                {"interface": "GigabitEthernet0/0/0", "ip_address": mgmt_ip},
+                {"interface": "GigabitEthernet0/0/1", "ip_address": f"{loopback}/24"}]}}}}
+
+
+def test_merged_target_on_a_collected_device_interface_is_collected():
+    a = _old_targeted("scan-a", ["192.0.2.4", "192.0.2.19"], {
+        "RTR-A": _router_with_loopback("RTR-A", "192.0.2.4", "192.0.2.19")})
+    b = _old_targeted("scan-b", ["192.0.2.4"], {})
+    merged = merge_inventories([a, b])
+    by_input = {t["input"]: t for t in merged["scan_summary"]["targets"]}
+    owned = by_input["192.0.2.19"]
+    assert owned["outcome"] == "collected"
+    assert owned["hostname"] == "RTR-A"
+    assert owned["reason"] == "collected via 192.0.2.4"
+
+
+def test_scan_reconcile_counts_a_target_on_a_collected_device_interface():
+    from app import target_outcomes as to
+    devices = {"RTR-A": _router_with_loopback("RTR-A", "192.0.2.4", "192.0.2.19")}
+    out = to.reconcile([{"input": "192.0.2.19", "resolved_ip": "192.0.2.19"}],
+                       devices, {}, {}, {}, {})
+    assert out[0]["outcome"] == "collected"
+    assert out[0]["hostname"] == "RTR-A"
+
+
+SHOW_MODULE_4500X_VSS_PAIR = """ Switch Number:     1   Role:  Virtual Switch Active
+----------------------  -----------------------------
+Chassis Type : WS-C4500X-16
+
+Mod Ports Card Type                              Model              Serial No.
+---+-----+--------------------------------------+------------------+-----------
+ 1    16  4500X-16 10GE (SFP+)                   WS-C4500X-16       JAE00000AAC
+ 2     8  4500X 8 port 10GE (SFP+) Uplink Module C4KX-NM-8SFP+      JAE00000AAD
+
+ M MAC addresses                    Hw  Fw           Sw               Status
+--+--------------------------------+---+------------+----------------+---------
+ 1 00aa.bb00.0200 to 00aa.bb00.020f 1.0 15.0(1r)SG10 03.11.03.E       Ok
+ 2 00aa.bb00.0210 to 00aa.bb00.0217 1.0                               Ok
+
+ Switch Number:     2   Role:  Virtual Switch Standby
+----------------------  -----------------------------
+Chassis Type : WS-C4500X-16
+
+Mod Ports Card Type                              Model              Serial No.
+---+-----+--------------------------------------+------------------+-----------
+ 1    16  4500X-16 10GE (SFP+)                   WS-C4500X-16       JAE00000AAE
+ 2     8  4500X 8 port 10GE (SFP+) Uplink Module C4KX-NM-8SFP+      JAE00000AAF
+
+ M MAC addresses                    Hw  Fw           Sw               Status
+--+--------------------------------+---+------------+----------------+---------
+ 1 00aa.bb00.0300 to 00aa.bb00.030f 1.0 15.0(1r)SG10 03.11.03.E       Ok
+ 2 00aa.bb00.0310 to 00aa.bb00.0317 1.0                               Ok
+"""
+
+
+def test_vss_pair_lists_both_uplink_cards_when_ntc_kept_only_the_first():
+    # ntc's template ends at the first status table: one card, no switch.
+    device = _logged_in("switch", parsed={"modules": [
+        {"module": "2", "port": "8", "cardtype": "4500X 8 port 10GE (SFP+) Uplink Module",
+         "model": "C4KX-NM-8SFP+", "serial": "JAE00000AAD", "switch_number": ""}]})
+    device["collector_data"]["device_inventory"]["raw"][
+        "show module"] = SHOW_MODULE_4500X_VSS_PAIR
+    rows = _modules_sheet(device)
+    assert [(r[5], r[6]) for r in rows] == [("JAE00000AAD", "Ok"),
+                                            ("JAE00000AAF", "Ok")]
+
+
+STACK_WITH_REMOVED = """Switch/Stack Mac Address : 00aa.bb00.0600 - Local Mac Address
+Mac persistency wait time: Indefinite
+                                             H/W   Current
+Switch#   Role    Mac Address     Priority Version  State
+-------------------------------------------------------------
+*1       Active   00aa.bb00.0600     15     V02     Ready
+ 2       Standby  00aa.bb00.0700     14     V02     Ready
+ 3       Member   0000.0000.0000     0      V02     Removed
+"""
+
+
+def test_every_stack_member_has_a_modules_row_with_its_state():
+    # 9300 show module: one row per present member, no status column.
+    device = _logged_in("switch", parsed={"modules": [
+        {"module": "1", "port": "41", "model": "C9300-48P", "serial": "FOC0000X0AA"},
+        {"module": "2", "port": "41", "model": "C9300-48P", "serial": "FOC0000X0AB"}]})
+    device["collector_data"]["device_inventory"]["raw"][
+        "show switch detail"] = STACK_WITH_REMOVED
+    rows = _modules_sheet(device)
+    assert [(r[2], r[4], r[6]) for r in rows] == [
+        ("Switch 1", "C9300-48P", "Ready"), ("Switch 2", "C9300-48P", "Ready"),
+        ("Switch 3", "", "Removed")]
+
+
+def test_standalone_switch_gets_no_member_row():
+    device = _logged_in("switch", parsed={"stack_members": [
+        {"switch": "1", "role": "Active", "state": "Ready"}]})
+    assert _modules_sheet(device) == []

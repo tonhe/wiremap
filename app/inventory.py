@@ -19,25 +19,28 @@ except ImportError:
 
 
 def refresh_categories(data):
-    """Re-derive each logged-in device's category from its hardware model.
+    """Re-derive each device's category from its hardware model.
 
     Scans saved before the category followed the model keep whatever the
     first neighbour's CDP capabilities suggested: a CUBE router as switch, a
-    voice gateway as router, a stack with no platform as blank. Returns the
-    hostnames changed.
+    voice gateway as router, a stack with no platform as blank. A device
+    that was logged into is judged by show version; one that was not, by the
+    platform its neighbours advertised. Returns the hostnames changed.
     """
     changed = []
     for hostname, dev in (data.get("devices") or {}).items():
-        if not isinstance(dev, dict) or not dev.get("login_succeeded"):
+        if not isinstance(dev, dict):
             continue
-        inv = (dev.get("collector_data") or {}).get("device_inventory") or {}
-        raw = inv.get("raw") if isinstance(inv.get("raw"), dict) else {}
         platform = dev.get("platform")
         if isinstance(platform, list):
             platform = platform[0] if platform else ""
-        model = (model_from_show_version(raw.get("show version") or "")
-                 or extract_device_facts(inv.get("parsed") or {})["model"]
-                 or platform or "")
+        model = ""
+        if dev.get("login_succeeded"):
+            inv = (dev.get("collector_data") or {}).get("device_inventory") or {}
+            raw = inv.get("raw") if isinstance(inv.get("raw"), dict) else {}
+            model = (model_from_show_version(raw.get("show version") or "")
+                     or extract_device_facts(inv.get("parsed") or {})["model"])
+        model = model or platform or ""
         # A stack lists one model per member; they share a category.
         category = category_for_model(str(model).split(",")[0])
         if category and dev.get("device_category") != category:

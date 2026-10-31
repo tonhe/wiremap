@@ -7,9 +7,9 @@ reached at all (a cancelled run). Without an explicit outcome the last two
 cases simply vanish from the results, which reads as "not on the list".
 """
 try:
-    from app.identity import normalize_hostname
+    from app.identity import interface_addresses, normalize_hostname
 except ImportError:
-    from identity import normalize_hostname
+    from identity import interface_addresses, normalize_hostname
 
 COLLECTED = "collected"
 MERGED = "merged_into"
@@ -71,7 +71,33 @@ def _surviving_name(devices, hostname, serial, ip):
     return hostname
 
 
-def _outcome_for(ip, devices, collected, merged, failed, skipped, cancelled):
+def owners_by_address(devices):
+    """IP -> hostname for every interface address on a logged-in device.
+
+    A target can be a loopback or LAN gateway on a device the scan logged
+    into through another address; the dedupe leaves no result under the
+    target's own address.
+    """
+    owners = {}
+    for name, dev in (devices or {}).items():
+        if isinstance(dev, dict) and dev.get("login_succeeded"):
+            for addr in interface_addresses(dev):
+                owners.setdefault(addr, name)
+    return owners
+
+
+def owned_outcome(ip, devices, owners):
+    """Collected outcome for an address another collected device owns."""
+    hostname = owners.get(ip)
+    if not hostname:
+        return None
+    via = (devices.get(hostname) or {}).get("mgmt_ip") or ""
+    return {"outcome": COLLECTED, "hostname": hostname,
+            "reason": f"collected via {via}" if via and via != ip else None}
+
+
+def _outcome_for(ip, devices, collected, merged, failed, skipped, cancelled,
+                 owners=None):
     if ip in collected:
         info = collected[ip]
         hostname = info.get("hostname")
@@ -83,6 +109,9 @@ def _outcome_for(ip, devices, collected, merged, failed, skipped, cancelled):
         hostname = merged[ip]
         return {"outcome": MERGED,
                 "hostname": _surviving_name(devices, hostname, None, None)}
+    owned = owned_outcome(ip, devices, owners or {})
+    if owned:
+        return owned
     if ip in skipped:
         entry = skipped[ip] or {}
         return {"outcome": SKIPPED, "hostname": entry.get("hostname"),
@@ -106,6 +135,7 @@ def reconcile(targets, devices, collected, merged, failed, skipped,
     collected under another address; failed and skipped are the scan
     summary maps.
     """
+    owners = owners_by_address(devices)
     out = []
     for target in targets:
         entry = {k: v for k, v in target.items() if k != "error"}
@@ -116,7 +146,7 @@ def reconcile(targets, devices, collected, merged, failed, skipped,
         else:
             result = _outcome_for(ip, devices or {}, collected or {},
                                   merged or {}, failed or {}, skipped or {},
-                                  cancelled)
+                                  cancelled, owners)
             entry.update({k: v for k, v in result.items() if v is not None})
         out.append(entry)
     return out

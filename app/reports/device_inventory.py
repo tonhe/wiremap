@@ -177,33 +177,40 @@ _MODULE_HEADERS = ["Hostname", "Mgmt IP", "Slot", "Type",
 # show inventory names that point at a show platform slot:
 # "module R0", "module 0", "SPA subslot 0/0", "NIM subslot 1/0"
 _INV_SLOT_RE = re.compile(r"\b(?:module|subslot)\s+(\S+)\s*$", re.I)
-_INV_SWITCH_RE = re.compile(r"^\s*switch\s+(\d+)\s*$", re.I)
+_INV_SWITCH_RE = re.compile(r"^\s*(?:switch\s+)?(\d+)\s*$", re.I)
+
+
+def _stack_members(parsed, raw):
+    """{member number: normalized member} from show switch detail.
+
+    Scans collected before the status tables were parsed still hold the raw
+    output, so members are read from there when the parsed data has no
+    state. Virtual-pair chassis are left out; they are not stack members.
+    """
+    members = parsed.get("stack_members", []) or []
+    if not any(_normalize_keys(m).get("state") for m in members):
+        members = _parse_show_switch_detail(
+            _usable(raw.get("show switch detail"))) or members
+    out = {}
+    for member in members:
+        m = _normalize_keys(member)
+        num = str(m.get("switch") or m.get("member") or "")
+        if num and not m.get("stack_type"):
+            out[num] = m
+    return out
 
 
 def _module_status_sources(parsed, raw=None):
     """({stack member number: state}, {platform slot: state},
-    {(switch, module): show module status}).
-
-    Scans collected before the status tables were parsed still hold the raw
-    show module and show switch detail output, so status is read from there
-    when the parsed data has none.
-    """
+    {(switch, module): show module status}, [show module cards])."""
     raw = raw or {}
-    members = parsed.get("stack_members", []) or []
-    if not any(_normalize_keys(m).get("state") for m in members):
-        members = _parse_show_switch_detail(_usable(raw.get("show switch detail")))
-    stack = {}
-    for member in members:
-        m = _normalize_keys(member)
-        num = str(m.get("switch") or m.get("member") or "")
-        state = m.get("state") or m.get("status") or ""
-        if num and state:
-            stack[num] = state
+    stack = {num: m.get("state") or m.get("status") or ""
+             for num, m in _stack_members(parsed, raw).items()}
     slots = {str(s.get("slot", "")): s.get("state", "")
              for s in parsed.get("platform_slots", []) or []
              if s.get("slot") and s.get("state")}
-    _, module_status = _parse_ios_show_module(_usable(raw.get("show module")))
-    return stack, slots, module_status
+    cards, module_status = _parse_ios_show_module(_usable(raw.get("show module")))
+    return stack, slots, module_status, cards
 
 
 def _module_status(m, slot, slot_state, module_status):
@@ -221,7 +228,8 @@ def _module_rows(inventory_data):
     """Modules sheet rows: show module when the platform has it, otherwise
     the non-chassis show inventory entries. Status comes from the platform's
     own status column, the stack member state, or the show platform slot
-    state, whichever the device reports."""
+    state, whichever the device reports. Every stack member gets a row, so a
+    Removed or Provisioned member is visible here."""
     rows = []
     for hostname, device in sorted(inventory_data.get("devices", {}).items()):
         inv = device.get("collector_data", {}).get("device_inventory", {})
@@ -229,8 +237,13 @@ def _module_rows(inventory_data):
         raw = inv.get("raw") if isinstance(inv.get("raw"), dict) else {}
         modules = parsed.get("modules", [])
         mgmt_ip = device.get("mgmt_ip", "")
-        stack_state, slot_state, module_status = _module_status_sources(
+        stack_state, slot_state, module_status, cards = _module_status_sources(
             parsed, raw)
+        # ntc stops at the first status table, so a VSS pair's second
+        # chassis is missing from the parsed modules.
+        if len(cards) > len(modules):
+            modules = cards
+        members_shown = set()
 
         if modules:
             for mod in modules:
@@ -269,6 +282,7 @@ def _module_rows(inventory_data):
                 sw = _INV_SWITCH_RE.match(raw_name)
                 if sw:
                     status = stack_state.get(sw.group(1), "")
+                    members_shown.add(sw.group(1))
                 else:
                     sl = _INV_SLOT_RE.search(raw_name)
                     if sl:
@@ -283,6 +297,16 @@ def _module_rows(inventory_data):
                     status,
                     "",
                 ])
+
+        # A one-member "stack" is a standalone switch; nothing to add.
+        if len(stack_state) > 1:
+            by_num = {str(_normalize_keys(c).get("module") or ""): _normalize_keys(c)
+                      for c in parsed.get("modules", []) or []}
+            for num in sorted(set(stack_state) - members_shown, key=int):
+                card = by_num.get(num, {})
+                rows.append([hostname, mgmt_ip, f"Switch {num}", "Stack member",
+                             card.get("model") or "", card.get("serial") or "",
+                             stack_state[num], card.get("port") or ""])
     return rows
 
 
