@@ -249,6 +249,9 @@ def test_2960x_stack_members_take_state_with_classic_master_role():
     assert status["3"] == "Removed"
     # The stacking module has no state of its own; it follows its member.
     assert status["Switch 1 - FlexStackPlus Module"] == "Ready"
+    # Port counts from the show version switch table.
+    ports = {r[2]: r[7] for r in _modules_sheet(device)}
+    assert (ports["1"], ports["3"]) == ("52", "28")
 
 
 def test_single_3850_bundle_pid_takes_its_member_state():

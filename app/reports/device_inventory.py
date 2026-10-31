@@ -16,10 +16,12 @@ except ImportError:
     from device_facts import extract_device_facts, extract_version_details
 try:
     from app.collectors.device_inventory import (
-        _parse_ios_show_module, _parse_show_switch_detail, _usable)
+        _parse_ios_show_module, _parse_show_switch_detail,
+        _parse_version_switch_table, _usable)
 except ImportError:
     from collectors.device_inventory import (
-        _parse_ios_show_module, _parse_show_switch_detail, _usable)
+        _parse_ios_show_module, _parse_show_switch_detail,
+        _parse_version_switch_table, _usable)
 try:
     from app.site_mapping import derive_site, naming_flags
 except ImportError:
@@ -277,6 +279,10 @@ def _module_rows(inventory_data):
         # Sub-components take their member's state, an SVL chassis included.
         part_state = {num: m.get("state") or m.get("status") or ""
                       for num, m in _stack_members(parsed, raw, True).items()}
+        # show version's switch table counts each member's ports; read from
+        # the raw output so scans parsed before it was kept get it too.
+        member_ports = {r["switch"]: r["ports"] for r in
+                        _parse_version_switch_table(raw.get("show version") or "")}
         members_shown = set()
         stack_table = False
 
@@ -326,9 +332,11 @@ def _module_rows(inventory_data):
                     continue
                 raw_name = it.get("name") or ""
                 status = ""
+                ports = ""
                 sw = _INV_SWITCH_RE.match(raw_name)
                 if sw:
                     status = stack_state.get(sw.group(1), "")
+                    ports = member_ports.get(sw.group(1), "")
                     members_shown.add(sw.group(1))
                 else:
                     sl = _INV_SLOT_RE.search(raw_name)
@@ -339,7 +347,10 @@ def _module_rows(inventory_data):
                         # Nothing reports a stack module's own state; it is
                         # present exactly when its member is.
                         status = part_state.get(part.group(1), "")
-                rows.append(_inventory_row(hostname, mgmt_ip, it, status))
+                row = _inventory_row(hostname, mgmt_ip, it, status)
+                if ports:
+                    row[7] = ports
+                rows.append(row)
 
         # A standalone switch is not a module, unless show module lists it
         # as a member row the way show inventory does on a 2960-X.
@@ -350,7 +361,8 @@ def _module_rows(inventory_data):
                 card = by_num.get(num, {})
                 rows.append([hostname, mgmt_ip, f"Switch {num}", "Stack member",
                              card.get("model") or "", card.get("serial") or "",
-                             stack_state[num], card.get("port") or ""])
+                             stack_state[num],
+                             card.get("port") or member_ports.get(num, "")])
     return rows
 
 

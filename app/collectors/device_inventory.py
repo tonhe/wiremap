@@ -370,7 +370,7 @@ _SWITCH_TABLE_HEAD_RE = re.compile(r"^[ \t]*Switch[ \t]+Ports[ \t]+Model\b", re.
 # IOS-XE adds a Mode column (INSTALL/BUNDLE); classic IOS (2960-X, 3750-X)
 # stops at SW Image.
 _SWITCH_ROW_RE = re.compile(
-    r"^[ \t]*(?:(\*)[ \t]*)?(\d+)[ \t]+\d+[ \t]+(\S+)[ \t]+(\S+)[ \t]+(\S+)"
+    r"^[ \t]*(?:(\*)[ \t]*)?(\d+)[ \t]+(\d+)[ \t]+(\S+)[ \t]+(\S+)[ \t]+(\S+)"
     r"(?:[ \t]+(\S+))?[ \t]*$")
 
 
@@ -399,8 +399,8 @@ def _parse_version_switch_table(raw):
                 break
             continue
         rows.append({"switch": m.group(2), "local": bool(m.group(1)),
-                     "model": m.group(3), "sw_version": m.group(4),
-                     "sw_image": m.group(5)})
+                     "ports": m.group(3), "model": m.group(4),
+                     "sw_version": m.group(5), "sw_image": m.group(6)})
     return rows
 
 
