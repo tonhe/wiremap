@@ -92,7 +92,7 @@ A dedicated **Reports** tab serves as the single destination for all report gene
 
 **Internet edge.** A device counts as edge when it has BGP to a public AS, a public address on an interface, NAT configured, or a static default pointing outside the IGP, and the Edge Devices sheet says which. The ACL audit classifies each ACL by what references it in the running config (interface filter, management, QoS, route-map, NAT, crypto, or unreferenced), so a QoS class-map ACL with zero hits is not reported as dead. A device with no NAT config reads "not configured" rather than 0 translations.
 
-**Voice and QoS.** The config shows what a QoS policy was meant to do; the counters show whether it is working. Classic Catalyst switches (2960/3560/3750) are judged on `mls qos`, port trust and the egress expedite queue. Catalyst 9000, 3850 and 4500-X trust DSCP by default, so a voice port there is only flagged if a policy says otherwise. Routers are judged on their egress LLQ: an interface with no CDP neighbour is treated as a WAN or DCI circuit and flagged without a priority class, while router interfaces facing a switch are listed but not flagged. Every drop count carries its counter window ("cleared 1d02h ago" or "since boot (36 weeks, ...)"), because counters that have run since boot are totals, not rates. Critical: QoS off on a switch with voice endpoints, untrusted voice ports with no marking policy, uplinks or WAN circuits with no priority queue, EF mapped outside the priority queue. Warning: priority-queue drops, EF arriving on access ports but leaving the uplink re-marked, a policy-map name with more than one version across the fleet. Info: auto-QoS on some phone ports but not others, counters never cleared on a device up more than 12 weeks.
+**Voice and QoS.** The config shows what a QoS policy was meant to do; the counters show whether it is working. Classic Catalyst switches (2960/3560/3750) are judged on `mls qos`, port trust and the egress expedite queue. Catalyst 9000, 3850 and 4500-X trust DSCP by default, so a voice port there is only flagged if a policy says otherwise. Routers are judged on their egress LLQ. A router interface counts as a WAN or DCI circuit only with evidence, shown in the WAN Evidence column: a public address, a BGP peer on its subnet, `ip nat outside`, or a description naming WAN, MPLS, INET, ISP, DCI or Megaport. Subinterfaces take their parent's evidence. WAN circuits without a priority class are flagged; interfaces facing a switch, and port-channels or other interfaces with no CDP neighbour and no WAN evidence, are listed but not flagged. Every drop count carries its counter window ("cleared 1d02h ago" or "since boot (36 weeks, ...)"), because counters that have run since boot are totals, not rates. Critical: QoS off on a switch with voice endpoints, untrusted voice ports with no marking policy, uplinks or WAN circuits with no priority queue, EF mapped outside the priority queue. Warning: priority-queue drops, EF arriving on access ports but leaving the uplink re-marked, a policy-map name with more than one version across the fleet. Info: auto-QoS on some phone ports but not others, counters never cleared on a device up more than 12 weeks.
 
 ### Targeted Scan
 Connect to a specific list of devices without BFS crawling. Designed for edge assessments where you know exactly which devices to audit (firewalls, border routers). Enter one device per line in the format `host [device_type]`, where host is an IPv4 address, hostname or FQDN. Device type is optional (auto-detect if omitted).
@@ -218,13 +218,20 @@ Scans that never went through this instance (copied off another host, or run
 from different boxes at one site) can be merged from the command line:
 
 ```bash
-python app/merge_scans.py scan-a.json scan-b.json -o merged.json
-python app/merge_scans.py ./inventories/ -o ./inventories/   # every .json in it
+python app/merge_scans.py scan-a.json.gz scan-b.json -o merged.json.gz
+python app/merge_scans.py ./inventories/ -o ./inventories/   # every scan in it
 
 # or inside the container
 docker compose exec wiremap python merge_scans.py \
-    /app/inventories/a.json /app/inventories/b.json -o /app/inventories
+    /app/inventories/a.json.gz /app/inventories/b.json.gz -o /app/inventories
 ```
+
+Scans are saved as gzip-compressed JSON (`<scan id>.json.gz`), which is about
+a twentieth of the plain size on a large network. Everything that reads a scan
+(the web app, the upload button, the merge and the CLI) takes either form, so
+older `.json` scans still load.
+`zcat scan.json.gz` or `gunzip -k` gets the plain JSON back. A named merge
+output is compressed when it ends in `.gz`.
 
 Configs in the output are redacted unless you pass `--no-redact`. Older scans
 predate collection-time redaction, and the merged file is usually the one that
@@ -240,7 +247,7 @@ and later that includes the `standard-telnetlib` backport netmiko needs).
 
 ```bash
 python app/wiremap_cli.py                         # menu: pick scans, reports, format
-python app/wiremap_cli.py list scan.json          # which reports apply to this scan
+python app/wiremap_cli.py list scan.json.gz       # which reports apply to this scan
 python app/wiremap_cli.py report scan.json        # every report that applies, into ./<scan id>/
 python app/wiremap_cli.py report scan.json -r device_inventory -r link_inventory -f csv -o out/
 python app/wiremap_cli.py report a.json b.json    # several scans are merged first
@@ -250,7 +257,7 @@ python app/wiremap_cli.py merge a.json b.json -o merged.json
 # or inside the container
 docker compose exec wiremap python wiremap_cli.py
 docker compose exec wiremap python wiremap_cli.py report \
-    /app/inventories/<scan>.json -o /app/inventories/reports
+    /app/inventories/<scan>.json.gz -o /app/inventories/reports
 ```
 
 `-f` picks csv, json, xml or xlsx where a report offers it; the config archive

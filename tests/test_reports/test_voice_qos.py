@@ -189,14 +189,15 @@ def test_wan_interface_without_llq_and_lan_interface_left_alone():
     qos = _router([shape_only], interfaces=[
         _intf("GigabitEthernet0/0/2", neighbor="LAB-DIST-01", neighbor_class="switch")])
     inv = _inv(RTR1=_device(qos, model="ASR1001-HX", counters=[
-        _up("GigabitEthernet0/0/1"), _up("GigabitEthernet0/0/2"),
-        _up("Loopback0"), _up("GigabitEthernet0")]))
+        _up("GigabitEthernet0/0/1", description="LAB MPLS circuit"),
+        _up("GigabitEthernet0/0/2"), _up("Loopback0"), _up("GigabitEthernet0")]))
     [f] = _findings(inv, "qos:wan_no_llq")
     assert f["interface"] == "GigabitEthernet0/0/1"
     assert "without a priority class" in f["description"]
     rows = {r["Interface"]: r for r in _rows(_sheets(inv), "Uplinks and WAN")}
     assert set(rows) == {"GigabitEthernet0/0/1", "GigabitEthernet0/0/2"}
-    assert rows["GigabitEthernet0/0/1"]["Role"] == "Router WAN/DCI (no CDP neighbour)"
+    assert rows["GigabitEthernet0/0/1"]["Role"] == "Router WAN/DCI"
+    assert rows["GigabitEthernet0/0/1"]["WAN Evidence"] == "description (MPLS)"
     assert rows["GigabitEthernet0/0/1"]["Flag"] == "No priority class"
     assert rows["GigabitEthernet0/0/2"]["Role"] == "Router LAN (to switch)"
     assert rows["GigabitEthernet0/0/2"]["Flag"] == ""
@@ -206,14 +207,82 @@ def test_subinterface_covered_by_parent_policy():
     llq = _out_policy("GigabitEthernet0/0/1", "LAB-WAN",
                       [_class("LAB-RT", is_priority=True, priority_percent=20)])
     inv = _inv(RTR1=_device(_router([llq]), model="ISR4351/K9", counters=[
-        _up("GigabitEthernet0/0/1"), _up("GigabitEthernet0/0/1.100")]))
+        _up("GigabitEthernet0/0/1", description="LAB-WAN-1"),
+        _up("GigabitEthernet0/0/1.100")]))
     assert not _findings(inv, "qos:wan_no_llq")
+    rows = {r["Interface"]: r for r in _rows(_sheets(inv), "Uplinks and WAN")}
+    assert rows["GigabitEthernet0/0/1.100"]["Role"] == "Router WAN/DCI"
+    assert rows["GigabitEthernet0/0/1.100"]["Priority Class"] == "LAB-RT"
 
 
 def test_voice_gateway_is_not_flagged_for_wan_llq():
     inv = _inv(VG1=_device(_router([], family="router"), model="VG310",
                            counters=[_up("GigabitEthernet0/0")]))
     assert not _findings(inv, "qos:wan_no_llq")
+
+
+def _router_device(counters, **collectors):
+    dev = _device(_router([]), model="ASR1001-HX", counters=counters)
+    for name, parsed in collectors.items():
+        dev["collector_data"][name] = {"parsed": parsed}
+    return dev
+
+
+def _ip_intf(name, ip, prefix):
+    return {"interface": name, "ip_address": [ip], "prefix_length": [prefix]}
+
+
+def _uplink_roles(inv):
+    return {r["Interface"]: (r["Role"], r["WAN Evidence"])
+            for r in _rows(_sheets(inv), "Uplinks and WAN")}
+
+
+def test_port_channel_subinterfaces_without_evidence_are_lan():
+    names = ["Port-channel51", "Port-channel51.996", "Port-channel52.993"]
+    inv = _inv(RTR1=_router_device([_up(n) for n in names] + [_up("GigabitEthernet0/0/3")]))
+    roles = _uplink_roles(inv)
+    for n in names:
+        assert roles[n] == ("Router LAN (no CDP neighbour)", "")
+    assert roles["GigabitEthernet0/0/3"] == ("Router, unclassified (no CDP neighbour)", "")
+    assert not _findings(inv, "qos:wan_no_llq")
+
+
+def test_wan_from_public_address_bgp_peer_and_nat_outside():
+    inv = _inv(RTR1=_router_device(
+        [_up("GigabitEthernet0/0/0"), _up("GigabitEthernet0/0/1"),
+         _up("GigabitEthernet0/0/2"), _up("Port-channel10"), _up("Port-channel10.20")],
+        interfaces={"ip_interfaces_full": [
+            _ip_intf("GigabitEthernet0/0/0", "198.51.100.2", "30"),
+            _ip_intf("GigabitEthernet0/0/1", "10.255.0.1", "30"),
+            _ip_intf("Port-channel10.20", "10.20.0.1", "24")]},
+        routing_detail={"bgp_summary": [
+            {"neighbor": "10.255.0.2", "asn": "65010"},
+            {"neighbor": "10.99.0.1", "asn": "65010"}]},
+        config={"config": ("interface GigabitEthernet0/0/2\n"
+                           " ip nat outside\n"
+                           "!\n"
+                           "interface Port-channel10\n"
+                           " ip nat inside\n")}))
+    roles = _uplink_roles(inv)
+    assert roles["GigabitEthernet0/0/0"] == ("Router WAN/DCI", "public address 198.51.100.2")
+    assert roles["GigabitEthernet0/0/1"] == ("Router WAN/DCI", "BGP peer 10.255.0.2")
+    assert roles["GigabitEthernet0/0/2"] == ("Router WAN/DCI", "ip nat outside")
+    assert roles["Port-channel10"][0] == "Router LAN (no CDP neighbour)"
+    assert roles["Port-channel10.20"][0] == "Router LAN (no CDP neighbour)"
+    assert {f["interface"] for f in _findings(inv, "qos:wan_no_llq")} == {
+        "GigabitEthernet0/0/0", "GigabitEthernet0/0/1", "GigabitEthernet0/0/2"}
+
+
+def test_subinterface_inherits_parent_wan_evidence_and_neighbour():
+    qos = _router([], interfaces=[
+        _intf("Port-channel1", neighbor="LAB-DIST-01", neighbor_class="switch")])
+    dev = _device(qos, model="ASR1001-HX", counters=[
+        _up("Port-channel1"), _up("Port-channel1.10"),
+        _up("GigabitEthernet0/0/1", description="to LAB-ISP"),
+        _up("GigabitEthernet0/0/1.200")])
+    roles = _uplink_roles(_inv(RTR1=dev))
+    assert roles["Port-channel1.10"][0] == "Router LAN (to switch)"
+    assert roles["GigabitEthernet0/0/1.200"] == ("Router WAN/DCI", "description (ISP)")
 
 
 def test_priority_drops_with_counter_window():
@@ -298,9 +367,17 @@ def test_policy_map_versions_across_fleet():
         SW2=_device(_classic([], policy_defs=[_policy_def("LAB-MARK", hash_="aaaa")])),
         SW3=_device(_classic([], policy_defs=[_policy_def(
             "LAB-MARK", actions="set dscp cs5", hash_="bbbb")])))
-    [f] = _findings(inv, "qos:policy_drift")
-    assert f["severity"] == "Warning" and f["hostname"] == ""
-    assert "2 different versions" in f["description"]
+    found = _findings(inv, "qos:policy_drift")
+    assert sorted(f["hostname"] for f in found) == ["SW1", "SW2", "SW3"]
+    assert all(f["severity"] == "Warning" for f in found)
+    sw3 = next(f for f in found if f["hostname"] == "SW3")
+    assert "version 2 of 2" in sw3["description"]
+    [agg] = [r for r in _rows(_sheets(inv), "Findings")
+             if r["Finding"] == "Policy-map has multiple versions"]
+    assert "LAB-MARK exists in 2 versions" in agg["Details"]
+    assert agg["Device count"] == 3
+    assert agg["Devices"] == "SW1, SW2, SW3"
+    assert not _findings(inv, "meta:overfire")
     rows = _rows(_sheets(inv), "Policy Catalog")
     assert [(r["Version"], r["Device Count"]) for r in rows] == [("1 of 2", 2), ("2 of 2", 1)]
     assert rows[1]["Classes and Actions"] == "LAB-VOICE: set dscp cs5"
@@ -373,11 +450,28 @@ def test_collection_errors_list_real_failures_and_capping():
         "command_error_kinds": {"show mls qos maps cos-output-q": "not_applicable",
                                 "show auto qos": "unauthorized"},
         "queue_stats_ports": {"selected": ["Gi1/0/1"], "eligible": 31, "cap": 24,
-                              "capped": True},
+                              "capped": True,
+                              "skipped": ["GigabitEthernet1/0/5", "GigabitEthernet1/0/7"]},
     })
     rows = _rows(_sheets(_inv(SW1=_device(qos))), "Collection Errors")
     assert [r["Command"] for r in rows] == ["show auto qos", "per-port queue counters"]
     assert "capped at 24 of 31" in rows[1]["Error"]
+    assert ("2 skipped, no uplinks among them: GigabitEthernet1/0/5, "
+            "GigabitEthernet1/0/7") in rows[1]["Error"]
+
+
+def test_capped_queue_ports_name_skipped_uplinks():
+    qos = _classic([_uplink("GigabitEthernet1/0/49")])
+    qos["queue_stats_ports"] = {"selected": [], "eligible": 25, "cap": 24,
+                                "capped": True, "skipped": ["GigabitEthernet1/0/49"]}
+    [row] = _rows(_sheets(_inv(SW1=_device(qos))), "Collection Errors")
+    assert "including uplinks GigabitEthernet1/0/49" in row["Error"]
+
+
+def test_posture_notes_device_with_no_policies_attached():
+    sheets = _sheets(_inv(SW1=_device(_classic([_phone_port("GigabitEthernet1/0/5")]))))
+    [row] = _rows(sheets, "Switch QoS Posture")
+    assert row["Access Policies"] == "No policies attached"
 
 
 def test_no_collection_errors_sheet_when_clean():

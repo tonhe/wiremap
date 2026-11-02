@@ -199,6 +199,6 @@ def summary_count_rows(findings):
     distinct (aggregated) counts by severity."""
     raw = count_by_severity(findings)
     distinct = count_by_severity(aggregate_findings(findings))
-    rows = [[f"{sev} Findings", raw[sev]] for sev in SEVERITIES]
+    rows = [[f"{sev} Finding Rows", raw[sev]] for sev in SEVERITIES]
     rows += [[f"{sev} Finding Types", distinct[sev]] for sev in SEVERITIES]
     return rows

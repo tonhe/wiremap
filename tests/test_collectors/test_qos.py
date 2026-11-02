@@ -612,6 +612,8 @@ def test_select_queue_ports_uplinks_first_and_capped():
     assert selected[:2] == ["TenGigabitEthernet1/1/1", "TenGigabitEthernet1/1/2"]
     assert "Port-channel1" not in selected
     assert "GigabitEthernet1/0/40" not in selected
+    everything, _ = select_queue_ports(_context(neighbors, switchports), cap=None)
+    assert len(everything) == 32 and everything[:QUEUE_STATS_CAP] == selected
 
 
 def test_fed_switch_keyword():
@@ -696,6 +698,10 @@ def test_collect_cat9k_runs_capped_queue_stats_per_member():
     assert parsed["qos_global"]["mls_qos_enabled"] is None
     assert parsed["queue_stats_ports"]["capped"] is True
     assert parsed["queue_stats_ports"]["eligible"] == 30
+    skipped = parsed["queue_stats_ports"]["skipped"]
+    assert len(skipped) == 30 - QUEUE_STATS_CAP
+    assert not set(skipped) & set(parsed["queue_stats_ports"]["selected"])
+    assert "GigabitEthernet1/0/48" not in skipped
     queues = [q for q in parsed["queues"] if q["interface"] == "GigabitEthernet1/0/48"]
     # Queue 0 holds the priority class, the first queuing class of LAB-OUT.
     assert [q["is_priority"] for q in queues] == [True, False, False]

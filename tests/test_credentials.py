@@ -1,4 +1,5 @@
 """Multiple credential sets: parsing, try order, stop rules, recording."""
+import gzip
 import json
 import logging
 from unittest.mock import MagicMock
@@ -311,7 +312,7 @@ def test_engine_records_login_user_and_never_the_password(tmp_path, handler, cap
     assert failed["reason"] == "auth"
     assert {a.get("credential_set") for a in failed["attempts"]} == {1, 2}
 
-    with open(path) as f:
+    with gzip.open(path, "rt") as f:
         saved = f.read()
     assert "backup-admin" in saved
     for pw in (PRIMARY_PW, BACKUP_PW):

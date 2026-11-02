@@ -2,9 +2,7 @@
 Discovery Inventory -- persistence layer for collected network data.
 Stores raw command output + parsed data from all collectors.
 """
-import json
 import os
-import tempfile
 import threading
 from datetime import datetime, timezone
 
@@ -12,10 +10,12 @@ try:
     from app.failures import failure_record, reason_counts, plain_failures  # noqa: F401
     from app.device_facts import extract_device_facts
     from app.device_role import category_for_model, model_from_show_version
+    from app.jsonio import GZ_SUFFIX, SUFFIXES, is_scan_file, load_json, write_json
 except ImportError:
     from failures import failure_record, reason_counts, plain_failures  # noqa: F401
     from device_facts import extract_device_facts
     from device_role import category_for_model, model_from_show_version
+    from jsonio import GZ_SUFFIX, SUFFIXES, is_scan_file, load_json, write_json
 
 
 def refresh_categories(data):
@@ -123,21 +123,19 @@ class DiscoveryInventory:
 
     @classmethod
     def load(cls, filepath: str):
-        """Load inventory from a JSON file."""
-        with open(filepath, "r") as f:
-            return cls(json.load(f))
+        """Load inventory from a JSON or gzip-compressed JSON file."""
+        return cls(load_json(filepath))
 
     @classmethod
     def list_inventories(cls, directory: str) -> list[dict]:
         """List all inventory files in a directory with summary info."""
         inventories = []
         for filename in sorted(os.listdir(directory), reverse=True):
-            if not filename.endswith(".json"):
+            if not is_scan_file(filename):
                 continue
             filepath = os.path.join(directory, filename)
             try:
-                with open(filepath, "r") as f:
-                    data = json.load(f)
+                data = load_json(filepath)
                 merged_from = data.get("merged_from") or []
                 inventories.append({
                     "filename": filename,
@@ -152,7 +150,7 @@ class DiscoveryInventory:
                     "merge_conflict_count": len(data.get("merge_conflicts") or []),
                     "continued_from": data.get("continued_from", ""),
                 })
-            except (json.JSONDecodeError, KeyError):
+            except (OSError, EOFError, ValueError, KeyError):
                 continue
         return inventories
 
@@ -578,16 +576,14 @@ class DiscoveryInventory:
         return self._data
 
     def save(self, directory: str) -> str:
-        """Save inventory to a JSON file atomically. Returns the filepath."""
-        os.makedirs(directory, exist_ok=True)
-        filename = f"{self._data['discovery_id']}.json"
-        filepath = os.path.join(directory, filename)
-        fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(self._data, f, indent=2, default=str)
-            os.replace(tmp_path, filepath)
-        except BaseException:
-            os.unlink(tmp_path)
-            raise
+        """Save inventory as <id>.json.gz atomically. Returns the filepath.
+
+        An uncompressed copy saved under the same id by an older build is
+        removed, so the scan is not listed twice.
+        """
+        stem = os.path.join(directory, self._data['discovery_id'])
+        filepath = write_json(self._data, stem + GZ_SUFFIX)
+        for suffix in SUFFIXES:
+            if suffix != GZ_SUFFIX and os.path.exists(stem + suffix):
+                os.remove(stem + suffix)
         return filepath

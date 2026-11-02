@@ -1072,7 +1072,7 @@ fw1.example.com paloalto_panos"></textarea>
                 <div style="margin-top: 16px; text-align: center;">
                     <label class="upload-link" style="display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-muted); cursor: pointer; margin-bottom: 0;">
                         <span style="font-size: 15px;">&#8593;</span> Upload scan data JSON
-                        <input type="file" id="upload-inventory-file" accept=".json" style="display: none;">
+                        <input type="file" id="upload-inventory-file" accept=".json,.gz" style="display: none;">
                     </label>
                 </div>
             </div>
@@ -1919,7 +1919,7 @@ fw1.example.com paloalto_panos"></textarea>
                     return;
                 }
                 items.forEach(function(inv) {
-                    var key = inv.filename.replace('.json', '');
+                    var key = inv.filename.replace(/\.json(\.gz)?$/, '');
                     var row = document.createElement('div');
                     row.className = 'inventory-row';
                     row.addEventListener('click', function() {

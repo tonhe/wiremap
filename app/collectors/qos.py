@@ -839,8 +839,9 @@ def stack_member_count(context):
 def select_queue_ports(context, cap=QUEUE_STATS_CAP):
     """Ports worth per-port queue counters: uplinks first, then voice ports.
 
-    Returns (selected, eligible_count). Port-channels are skipped; their
-    members show up individually through CDP.
+    Returns (selected, eligible_count); cap=None returns every eligible port
+    in rank order. Port-channels are skipped; their members show up
+    individually through CDP.
     """
     ports = port_context(context)
     ranked = {}
@@ -1019,12 +1020,13 @@ class QosCollector(BaseCollector):
                                           "reason": f"no commands defined for {device_type}"}}
         selection = None
         if family == FAMILY_CAT9K:
-            selected, eligible = select_queue_ports(context)
+            ranked, eligible = select_queue_ports(context, cap=None)
+            selected, skipped = ranked[:QUEUE_STATS_CAP], ranked[QUEUE_STATS_CAP:]
             stacked = stack_member_count(context) > 1
             cmds = cmds + [FED_QUEUE_STATS.format(
                 switch=fed_switch_keyword(p, stacked), intf=p) for p in selected]
-            selection = {"selected": selected, "eligible": eligible,
-                         "cap": QUEUE_STATS_CAP, "capped": eligible > len(selected)}
+            selection = {"selected": selected, "skipped": skipped, "eligible": eligible,
+                         "cap": QUEUE_STATS_CAP, "capped": bool(skipped)}
 
         raw_outputs = {}
         for cmd in cmds:

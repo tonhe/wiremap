@@ -373,3 +373,28 @@ def test_redact_config_counted_counts_only_clear_tokens():
     assert "Plain123" not in out
     assert redact_config_counted(out) == (out, 0)
     assert redact_config_counted("") == ("", 0)
+
+
+@pytest.mark.parametrize("line,expected", [
+    (" server-key 7 0822455D0A16", f" server-key 7 {R}"),
+    (" server-key Plain123", f" server-key {R}"),
+    (" client 192.0.2.20 server-key 7 0822455D0A16",
+     f" client 192.0.2.20 server-key 7 {R}"),
+    (" client 192.0.2.20 vrf MGMT server-key Plain123",
+     f" client 192.0.2.20 vrf MGMT server-key {R}"),
+    ("snmp mib community-map s3cr3tComm context CTX1",
+     f"snmp mib community-map {R} context CTX1"),
+    ("snmp mib community-map s3cr3tComm", f"snmp mib community-map {R}"),
+])
+def test_coa_server_key_and_community_map(line, expected):
+    assert redact_line(line) == expected
+
+
+def test_dynamic_author_block_redacted():
+    text = ("aaa server radius dynamic-author\n"
+            " client 192.0.2.20 server-key 7 0822455D0A16\n"
+            " server-key Plain123\n"
+            " auth-type any\n")
+    out = redact_config(text)
+    assert "0822455D0A16" not in out and "Plain123" not in out
+    assert " auth-type any\n" in out

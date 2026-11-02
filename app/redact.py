@@ -29,6 +29,8 @@ _RULES = [
     re.compile(r"^\s*snmp-server\s+community\s+" + _T + _S, _I),
     # ASA: snmp-server host <if> <ip> community <c> version 2c
     re.compile(r"^\s*snmp-server\s+host\s+.*?\bcommunity\s+" + _T + _S, _I),
+    # snmp mib community-map <c> context <ctx> [...]
+    re.compile(r"^\s*snmp\s+mib\s+community-map\s+" + _S, _I),
     # snmp-server user U G v3 auth sha <k> priv aes 128 <k>
     re.compile(r"^\s*snmp-server\s+user\s+.*?\bauth\s+(?:md5|sha\S*)\s+"
                + _T + _S, _I),
@@ -69,6 +71,9 @@ _RULES = [
     # --- AAA --------------------------------------------------------------
     re.compile(r"^\s*(?:tacacs-server|radius-server)\b.*?\bkey\s+" + _T + _S, _I),
     re.compile(r"\bserver-private\s+\S+\s+(?:.*?\s)?key\s+" + _T + _S, _I),
+    # CoA: "aaa server radius dynamic-author" block, " server-key [7] <x>"
+    # and " client <ip> server-key [7] <x>".
+    re.compile(r"\bserver-key\s+" + _T + _S, _I),
     # "tacacs server X" / "radius server X" block: " key 7 <x>". A bare
     # " key 1" is a key-chain key id, not a secret.
     re.compile(r"^\s+key\s+(?!\d+\s*$)" + _T + _S, _I),
