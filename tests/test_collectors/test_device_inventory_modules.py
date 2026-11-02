@@ -256,7 +256,8 @@ def test_stack_member_state_fills_inventory_rows(collector):
     assert status["Switch 1"] == "Ready"
     assert status["Switch 2"] == "Provisioned"
     # Show switch has no per-uplink-module state
-    assert status["Switch 1 - FRU Uplink Module 1"] == ""
+    # The uplink takes its member's state, not a slot lookup on "Module 1"
+    assert status["Switch 1 - FRU Uplink Module 1"] == "Ready"
     assert "platform_slots" not in parsed
 
 

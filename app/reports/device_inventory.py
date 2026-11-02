@@ -184,6 +184,15 @@ _PORTS_NOTE = (
     "not a hardware difference. For port utilisation use the interface "
     "counts, not this column.")
 
+# Status for a module nothing in the scan reports a state for: classic IOS
+# routers (ISR G2, VG) have no show platform, and show inventory has no state.
+STATUS_NOT_REPORTED = "n/a"
+_STATUS_NOTE = (
+    "From show module, show switch, or show platform, whichever the device "
+    "has. n/a means the device reports no module state: classic IOS routers "
+    "and voice gateways have no show platform, and show inventory carries "
+    "none.")
+
 # show inventory names that point at a show platform slot:
 # "module R0", "module 0", "SPA subslot 0/0", "NIM subslot 1/0"
 _INV_SLOT_RE = re.compile(r"\b(?:module|subslot)\s+(\S+)\s*$", re.I)
@@ -342,19 +351,20 @@ def _module_rows(inventory_data):
                 status = ""
                 ports = ""
                 sw = _INV_SWITCH_RE.match(raw_name)
+                part = _INV_MEMBER_PART_RE.match(raw_name)
+                sl = _INV_SLOT_RE.search(raw_name)
                 if sw:
                     status = stack_state.get(sw.group(1), "")
                     ports = member_ports.get(sw.group(1), "")
                     members_shown.add(sw.group(1))
-                else:
-                    sl = _INV_SLOT_RE.search(raw_name)
-                    part = _INV_MEMBER_PART_RE.match(raw_name)
-                    if sl:
-                        status = slot_state.get(sl.group(1), "")
-                    elif part:
-                        # Nothing reports a stack module's own state; it is
-                        # present exactly when its member is.
-                        status = part_state.get(part.group(1), "")
+                elif part:
+                    # Nothing reports a stack module's own state; it is
+                    # present exactly when its member is. Checked before the
+                    # slot pattern: "Switch 1 - FRU Uplink Module 1" also
+                    # ends in "Module 1".
+                    status = part_state.get(part.group(1), "")
+                elif sl:
+                    status = slot_state.get(sl.group(1), "")
                 row = _inventory_row(hostname, mgmt_ip, it, status)
                 if ports:
                     row[7] = ports
@@ -371,6 +381,9 @@ def _module_rows(inventory_data):
                              card.get("model") or "", card.get("serial") or "",
                              stack_state[num],
                              card.get("port") or member_ports.get(num, "")])
+    for row in rows:
+        if not row[6]:
+            row[6] = STATUS_NOT_REPORTED
     return rows
 
 
@@ -845,8 +858,10 @@ class DeviceInventoryReport(BaseReport):
     def _build_modules_sheet(self, wb, inventory_data):
         create_sheet(wb, "Modules", list(_MODULE_HEADERS),
                      _module_rows(inventory_data))
-        header = wb["Modules"].cell(row=1, column=_MODULE_HEADERS.index("Ports") + 1)
-        header.comment = Comment(_PORTS_NOTE, "wiremap")
+        for column, note in (("Ports", _PORTS_NOTE), ("Status", _STATUS_NOTE)):
+            header = wb["Modules"].cell(row=1,
+                                        column=_MODULE_HEADERS.index(column) + 1)
+            header.comment = Comment(note, "wiremap")
 
 
 

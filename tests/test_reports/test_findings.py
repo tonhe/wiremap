@@ -173,6 +173,6 @@ def test_summary_count_rows_raw_and_distinct():
     findings.append(make_finding("SW1", CRITICAL, "c", "d"))
     assert dict(summary_count_rows(findings)) == {
         "Critical Findings": 1, "Warning Findings": 0, "Info Findings": 3,
-        "Critical Findings (distinct)": 1, "Warning Findings (distinct)": 0,
-        "Info Findings (distinct)": 1,
+        "Critical Finding Types": 1, "Warning Finding Types": 0,
+        "Info Finding Types": 1,
     }

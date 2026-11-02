@@ -290,7 +290,7 @@ def test_template_acl_unreferenced_everywhere_is_one_row():
     assert dheaders == ["Device", "Site/Location", "Severity", "Finding", "Details"]
     assert sum(1 for r in drows if r[3] == "Unreferenced ACL") >= 12
     summary = dict(sheets["Summary"][1])
-    assert summary["Info Findings (distinct)"] == len(
+    assert summary["Info Finding Types"] == len(
         [r for r in rows if r[0] == "Info"])
 
 

@@ -9,7 +9,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
-    from app.connection_manager import ConnectionManager, ConnectionError
+    from app.connection_manager import (ConnectionManager, ConnectionError,
+                                        DEFAULT_CONNECT_TIMEOUT, TCP_PROBE_TIMEOUT)
     from app.collectors import get_registry, get_collector
     from app.inventory import DiscoveryInventory
     from app.identity import normalize_hostname, looks_like_mac, looks_like_host_nic
@@ -36,7 +37,8 @@ try:
     from app.scan_timing import collector_ms, summarize as summarize_timing
     from app import target_outcomes
 except ImportError:
-    from connection_manager import ConnectionManager, ConnectionError
+    from connection_manager import (ConnectionManager, ConnectionError,
+                                    DEFAULT_CONNECT_TIMEOUT, TCP_PROBE_TIMEOUT)
     from collectors import get_registry, get_collector
     from inventory import DiscoveryInventory
     from identity import normalize_hostname, looks_like_mac, looks_like_host_nic
@@ -166,8 +168,10 @@ class DiscoveryEngine:
                  max_logins_per_minute: int = 0,
                  allow_telnet: bool = False,
                  source_ip=None,
-                 credentials=None):
+                 credentials=None,
+                 connect_timeout: int = DEFAULT_CONNECT_TIMEOUT):
         self.seed_ip = seed_ip
+        self.connect_timeout = int(connect_timeout or DEFAULT_CONNECT_TIMEOUT)
         self.seed_device_type = seed_device_type
         # Credential sets in configured order; username/password alone is a
         # single set. The chain keeps the last set that worked at the front.
@@ -350,6 +354,12 @@ class DiscoveryEngine:
         params["expand_non_cdp_neighbors"] = self.expand_non_cdp_neighbors
         # Which accounts were offered, in order -- never a password.
         params["credential_usernames"] = self._credentials.usernames()
+        # How hard each login tried, so a short-timeout run can be told
+        # apart from an unreachable network when comparing scans.
+        params["connect_timeout_s"] = self.connect_timeout
+        params["telnet_probe_timeout_s"] = TCP_PROBE_TIMEOUT
+        params["allow_telnet"] = self.allow_telnet
+        params["max_logins_per_minute"] = self._login_limiter.per_minute
 
         if self.base_inventory is not None:
             params["continued_from"] = self.base_inventory.discovery_id
@@ -497,6 +507,7 @@ class DiscoveryEngine:
             source_access_warnings=list(self.source_access_warnings),
             refused_hint=hint,
             max_logins_per_minute=self._login_limiter.per_minute,
+            peak_logins_per_minute=self._login_limiter.peak_per_minute,
             timing=timing,
             slowest=slowest,
         )
@@ -638,6 +649,7 @@ class DiscoveryEngine:
                 platform=known.get("platform"),
                 login_limiter=self._login_limiter,
                 allow_telnet=self.allow_telnet,
+                connect_timeout=self.connect_timeout,
             )
             connect_started = time.monotonic()
             result = conn_mgr.connect()
@@ -944,7 +956,11 @@ class DiscoveryEngine:
                 hostname=self._find_hostname_by_ip(inventory, ip))
             # A device seen as a neighbour keeps its record but records why
             # the login attempt against it failed.
-            inventory.mark_login_failed_by_ip(ip, e.message)
+            kept = inventory.mark_login_failed_by_ip(ip, e.message)
+            if kept:
+                self._warn_kept_device(kept, ip, record)
+                self._record_failure(inventory, ip, record)
+                return []
             # The login is gone; SNMP may still say what this thing is. Every
             # login failure class qualifies: auth and refused prove the host
             # is up, and a TCP timeout says nothing about UDP 161. It is
@@ -977,6 +993,24 @@ class DiscoveryEngine:
             "message": message,
             "attempts": [],
         }
+
+    def _warn_kept_device(self, hostname, ip, record):
+        """A device already collected failed this login. Its data is kept,
+        but its neighbours were not crawled from it this run, so a
+        distribution switch failing here can hide a site's access layer."""
+        record["kept_collected"] = True
+        if normalize_hostname(hostname) in self._run_hostnames:
+            # Collected this run under another address; nothing was lost.
+            logger.info(f"{hostname} already collected this run; "
+                        f"{ip} failed ({record.get('reason')})")
+            return
+        message = (f"{hostname} ({ip}) was collected in the scan being "
+                   f"continued but failed this time ({record.get('reason')}); "
+                   f"its earlier data is kept, but its neighbours were not "
+                   f"crawled from it")
+        logger.warning(message)
+        self._progress_cb({"event": "device_kept", "ip": ip,
+                           "hostname": hostname, "message": message})
 
     def _record_failure(self, inventory, ip, record):
         """Store a structured failure and tell the UI why it failed."""
@@ -1457,6 +1491,7 @@ class DiscoveryEngine:
         return {
             "targets_file": resolution.get("targets_file") or None,
             "targets_count": len(self.target_hosts),
+            "resolver": resolution.get("resolver") or None,
             "target_hints": {ip: dtype for ip, dtype in self.target_hosts
                              if dtype},
         }

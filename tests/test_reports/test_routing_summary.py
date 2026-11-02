@@ -211,7 +211,7 @@ def test_findings_aggregate_static_routes_across_devices():
             if row[3] == "Static routes alongside dynamic protocol"] == ["SW1", "SW2", "SW3"]
     summary = dict(sheets["Summary"][1])
     assert summary["Warning Findings"] == 3
-    assert summary["Warning Findings (distinct)"] == 1
+    assert summary["Warning Finding Types"] == 1
 
     wb = load_workbook(io.BytesIO(r.generate(inv)))
     assert wb.sheetnames.index("Findings (detail)") == wb.sheetnames.index("Findings") + 1

@@ -404,13 +404,23 @@ class DiscoveryInventory:
             dev["login_error"] = error
 
     def mark_login_failed_by_ip(self, ip, error):
-        """Record a login failure against whichever record holds this IP."""
+        """Record a login failure against whichever record holds this IP.
+
+        A device already collected -- in the scan being continued, or under
+        another address this run -- keeps its data and its collected state;
+        the failure goes in last_login_error. Returns that device's hostname
+        in that case, else None.
+        """
         with self._lock:
-            for dev in self._data["devices"].values():
-                if dev.get("mgmt_ip") == ip:
-                    dev["login_succeeded"] = False
-                    dev["login_error"] = error
-                    return
+            for hostname, dev in self._data["devices"].items():
+                if dev.get("mgmt_ip") != ip:
+                    continue
+                if dev.get("login_succeeded"):
+                    dev["last_login_error"] = error
+                    return hostname
+                dev["login_succeeded"] = False
+                dev["login_error"] = error
+                return None
 
     def add_evidence(self, hostname, source, seen_from, remote_port=None,
                      mgmt_address=None):

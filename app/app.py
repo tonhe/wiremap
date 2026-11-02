@@ -20,7 +20,8 @@ from scan_manager import ScanManager
 from plugins import get_plugin_config, save_plugin_config, get_plugin_status, list_plugins
 from settings import get_discovery_settings, save_discovery_settings
 from source_access import clean_source_ip
-from target_list import WARN_TARGET_COUNT, parse_targets, resolve_targets
+from target_list import (WARN_TARGET_COUNT, make_resolver, parse_targets,
+                         resolve_targets)
 try:
     from app.collectors import get_registry as get_collector_registry
     from app.reports import get_registry as get_report_registry, get_report
@@ -117,6 +118,7 @@ def scan_start():
         disc_settings.get("collect_controller_managed", False))
     max_logins_per_minute = int(disc_settings.get("max_logins_per_minute") or 0)
     allow_telnet = bool(disc_settings.get("allow_telnet", False))
+    connect_timeout = int(disc_settings.get("connect_timeout_s") or 10)
     # Per-scan source address overrides the saved one; blank learns it.
     try:
         source_ip = (clean_source_ip(request.form.get('source_ip', ''))
@@ -225,6 +227,7 @@ def scan_start():
             max_logins_per_minute=max_logins_per_minute,
             allow_telnet=allow_telnet,
             source_ip=source_ip or None,
+            connect_timeout=connect_timeout,
         )
         inventory = engine.discover()
         inventory.save(INVENTORY_DIR)
@@ -240,6 +243,7 @@ def scan_start():
         response["resolved"] = len(target_resolution["targets"])
         response["unresolved"] = target_resolution["unresolved"]
         response["warnings"] = target_resolution["warnings"]
+        response["resolver"] = target_resolution.get("resolver")
     return jsonify(response)
 
 
@@ -613,9 +617,19 @@ def _build_target_hosts(form, files, valid_types):
             raise ValueError(f"{filename}: {e}")
     if not entries:
         raise ValueError("No valid hosts provided")
-    hosts, targets, unresolved = resolve_targets(entries)
+    disc_settings = get_discovery_settings()
+    resolver, resolver_name = make_resolver(
+        disc_settings.get("dns_server") or None,
+        disc_settings.get("dns_search") or [])
+    hosts, targets, unresolved = resolve_targets(entries, resolver=resolver)
     resolution = {"targets": targets, "unresolved": unresolved,
-                  "warnings": []}
+                  "warnings": [], "resolver": resolver_name}
+    names = len(targets) + len(unresolved)
+    if unresolved:
+        resolution["warnings"].append(
+            f"{len(unresolved)} of {names} hostname(s) did not resolve using "
+            f"{resolver_name}. If they are in a customer zone, set DNS Server "
+            f"and DNS Search Suffix in Settings")
     # Recorded in the scan params so a report says which list it ran from.
     resolution["targets_file"] = os.path.basename(filename) if filename else None
     if len(hosts) > WARN_TARGET_COUNT:
@@ -624,7 +638,7 @@ def _build_target_hosts(form, files, valid_types):
             f"check the list is network devices only")
     if not hosts:
         names = ", ".join(u["input"] for u in unresolved[:10])
-        raise ValueError(f"No hosts resolved: {names}")
+        raise ValueError(f"No hosts resolved using {resolver_name}: {names}")
     return hosts, resolution
 
 def _get_report_info():

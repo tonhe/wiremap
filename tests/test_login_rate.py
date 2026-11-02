@@ -69,6 +69,25 @@ def test_never_exceeds_rate_in_any_minute():
         assert len(in_window) <= 120
 
 
+def test_peak_is_counted_without_a_limit():
+    """max_logins_per_minute is the setting; the peak is what happened."""
+    limiter, clock = _limiter(0)
+    for _ in range(12):
+        limiter.acquire()
+        clock.now += 1
+    clock.now += 120
+    for _ in range(5):
+        limiter.acquire()
+    assert limiter.peak_per_minute == 12
+
+
+def test_peak_never_exceeds_the_limit():
+    limiter, clock = _limiter(30)
+    for _ in range(100):
+        limiter.acquire()
+    assert limiter.peak_per_minute == 30
+
+
 def test_concurrent_workers_get_distinct_slots():
     """Workers reserving at the same instant are queued, not released together."""
     clock = FakeClock()

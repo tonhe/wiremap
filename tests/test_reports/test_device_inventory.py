@@ -95,6 +95,33 @@ def test_generate_xlsx_modules_sheet(sample_inventory):
     assert "15.2(7)E" in ws.cell(row=1, column=8).comment.text
 
 
+def test_classic_ios_router_modules_read_na():
+    """An ISR G2 has no show platform and show inventory carries no state,
+    so its Status says n/a rather than looking like missing data."""
+    from app.reports.device_inventory import _module_rows
+    inventory = {"devices": {"BR01-RTR-01": {
+        "mgmt_ip": "192.0.2.1",
+        "collector_data": {"device_inventory": {"raw": {}, "parsed": {
+            "modules": [],
+            "inventory": [
+                {"name": "CISCO2921/K9 chassis", "descr": "CISCO2921/K9 chassis",
+                 "pid": "CISCO2921/K9", "sn": "FTX0000A0AA"},
+                {"name": "VWIC2-2MFT-T1/E1 - 2-Port RJ-48 Multiflex Trunk - T1/E1 on Slot 0 SubSlot 0",
+                 "descr": "VWIC2-2MFT-T1/E1 - 2-Port RJ-48 Multiflex Trunk - T1/E1",
+                 "pid": "VWIC2-2MFT-T1/E1", "sn": "FOC0000A0AB"},
+            ]}}}}}}
+    rows = _module_rows(inventory)
+    assert [r[4] for r in rows] == ["VWIC2-2MFT-T1/E1"]
+    assert rows[0][6] == "n/a"
+
+
+def test_modules_status_header_explains_na(sample_inventory):
+    data = DeviceInventoryReport().generate(sample_inventory)
+    ws = load_workbook(io.BytesIO(data))["Modules"]
+    assert ws.cell(row=1, column=7).value == "Status"
+    assert "n/a" in ws.cell(row=1, column=7).comment.text
+
+
 def test_modules_sheet_uses_inventory_fallback(sample_inventory):
     for dev in sample_inventory["devices"].values():
         dev["collector_data"]["device_inventory"]["parsed"]["modules"] = []

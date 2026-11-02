@@ -1,4 +1,7 @@
 cryptography
+# Resolves host-list names against the customer's DNS server when the
+# wiremap host's own resolver does not know their zones.
+dnspython==2.7.0
 flask==3.0.0
 netmiko==4.3.0
 # netmiko imports telnetlib, which Python 3.13 removed from the standard

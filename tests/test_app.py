@@ -383,6 +383,31 @@ def test_targeted_scan_with_nothing_resolvable_is_rejected(client, monkeypatch):
     resp = client.post("/scan/start", data=dict(TARGETED, host_list="gone.example.com"))
     assert resp.status_code == 400
     assert "gone.example.com" in resp.get_json()["error"]
+    assert "host's resolver" in resp.get_json()["error"]
+
+
+def test_unresolved_names_warn_with_the_resolver_used(client, monkeypatch):
+    """A list of names the host cannot resolve is caught before the run,
+    with the resolver named so the operator knows what to change."""
+    scan = _CapturedScan(monkeypatch)
+    _fake_dns(monkeypatch, {})
+    resp = client.post("/scan/start", data=dict(
+        TARGETED, host_list="192.0.2.1\ngone.example.com\nalso-gone"))
+    body = resp.get_json()
+    assert body["resolver"].startswith("the host's resolver")
+    [warning] = body["warnings"]
+    assert warning.startswith("2 of 2 hostname(s) did not resolve using "
+                              "the host's resolver")
+    assert "DNS Server" in warning
+    assert scan.engine_kwargs["target_resolution"]["resolver"] == body["resolver"]
+
+
+def test_scan_uses_the_connect_timeout_setting(client, monkeypatch):
+    scan = _CapturedScan(monkeypatch)
+    stored = dict(settings_module.DEFAULTS, connect_timeout_s=25)
+    monkeypatch.setattr(app_module, "get_discovery_settings", lambda: stored)
+    client.post("/scan/start", data=dict(TARGETED, host_list="192.0.2.1"))
+    assert scan.engine_kwargs["connect_timeout"] == 25
 
 
 def test_targeted_scan_accepts_uploaded_csv_with_paste(client, monkeypatch):

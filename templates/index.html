@@ -1117,9 +1117,24 @@ fw1.example.com paloalto_panos"></textarea>
                         <input type="number" id="settings-max-logins" min="0" max="600" step="1" value="0">
                     </div>
                     <div class="form-group">
+                        <label for="settings-connect-timeout">Connect Timeout (seconds)</label>
+                        <p class="helper-text">How long each login waits for the device to answer. Raise it for branches behind SD-WAN or satellite links, where a login can take 10 seconds or more (3-60).</p>
+                        <input type="number" id="settings-connect-timeout" min="3" max="60" step="1" value="10">
+                    </div>
+                    <div class="form-group">
                         <label for="settings-source-ip">Source IP</label>
                         <p class="helper-text">The address devices see wiremap as, for the vty and SNMP ACL check on the seed. Set it when wiremap sits behind NAT or in a container. Blank = learn it from the seed session (<span class="mono">show users</span> / <span class="mono">show tcp brief</span>). A scan form value overrides this.</p>
                         <input type="text" id="settings-source-ip" class="mono" placeholder="learned from the seed session" autocomplete="off">
+                    </div>
+                    <div class="form-group">
+                        <label for="settings-dns-server">DNS Server</label>
+                        <p class="helper-text">Resolves hostnames in a targeted host list. Set it to the customer's DNS server when this host's resolver does not know their zones. Blank = this host's resolver.</p>
+                        <input type="text" id="settings-dns-server" class="mono" placeholder="this host's resolver" autocomplete="off">
+                    </div>
+                    <div class="form-group">
+                        <label for="settings-dns-search">DNS Search Suffix</label>
+                        <p class="helper-text">Domains tried on bare hostnames in a host list, in order, separated by commas or spaces.</p>
+                        <input type="text" id="settings-dns-search" class="mono" placeholder="corp.example.com" autocomplete="off">
                     </div>
                     <div class="form-group">
                         <label for="settings-site-rules">Site Mapping Rules</label>
@@ -1355,6 +1370,8 @@ fw1.example.com paloalto_panos"></textarea>
         if (data.target_count === undefined) return;
         var msg = data.target_count + ' target(s)';
         if (data.resolved) msg += ', ' + data.resolved + ' hostname(s) resolved';
+        if (data.resolver && (data.resolved || (data.unresolved || []).length))
+            msg += ' via ' + data.resolver;
         logEvent(msg, 'muted');
         (data.warnings || []).forEach(function(w) { logEvent('Warning: ' + w, 'fail'); });
         var unresolved = data.unresolved || [];
@@ -1476,6 +1493,9 @@ fw1.example.com paloalto_panos"></textarea>
             var why = d.reason ? '[' + d.reason + '] ' : '';
             var snmp = (d.snmp && d.snmp !== 'no credentials') ? ' (SNMP: ' + d.snmp + ')' : '';
             logEvent(who + ' \u2717 ' + why + d.error + snmp, 'fail');
+        });
+        _eventSource.addEventListener('device_kept', function(e) {
+            logEvent('WARNING: ' + JSON.parse(e.data).message, 'warn');
         });
         _eventSource.addEventListener('device_snmp_identified', function(e) {
             var d = JSON.parse(e.data);
@@ -2158,10 +2178,16 @@ fw1.example.com paloalto_panos"></textarea>
                     !!settings.expand_non_cdp_neighbors;
                 document.getElementById('settings-max-logins').value =
                     settings.max_logins_per_minute || 0;
+                document.getElementById('settings-connect-timeout').value =
+                    settings.connect_timeout_s || 10;
                 document.getElementById('settings-allow-telnet').checked =
                     !!settings.allow_telnet;
                 document.getElementById('settings-source-ip').value =
                     settings.source_ip || '';
+                document.getElementById('settings-dns-server').value =
+                    settings.dns_server || '';
+                document.getElementById('settings-dns-search').value =
+                    (settings.dns_search || []).join(', ');
             })
             .catch(function() {});
     }
@@ -2178,8 +2204,11 @@ fw1.example.com paloalto_panos"></textarea>
                 collect_controller_managed: document.getElementById('settings-collect-controller-managed').checked,
                 expand_non_cdp_neighbors: document.getElementById('settings-expand-non-cdp').checked,
                 max_logins_per_minute: parseInt(document.getElementById('settings-max-logins').value || '0', 10),
+                connect_timeout_s: parseInt(document.getElementById('settings-connect-timeout').value || '10', 10),
                 allow_telnet: document.getElementById('settings-allow-telnet').checked,
-                source_ip: document.getElementById('settings-source-ip').value.trim()
+                source_ip: document.getElementById('settings-source-ip').value.trim(),
+                dns_server: document.getElementById('settings-dns-server').value.trim(),
+                dns_search: document.getElementById('settings-dns-search').value
             })
         })
         .then(function(r) { return r.json(); })
