@@ -620,3 +620,31 @@ def test_index_offers_add_credentials_on_both_forms(client):
     body = client.get("/").get_data(as_text=True)
     assert body.count('class="btn-sm cred-add"') == 2
     assert 'data-prefix="disc"' in body and 'data-prefix="ts"' in body
+
+
+def test_index_offers_optional_collectors_on_both_forms(client):
+    _point_at_repo_templates()
+    body = client.get("/").get_data(as_text=True)
+    assert body.count("name=\"collector_choice\"") == 2
+    assert body.count("name=\"collectors\" value=\"qos\"") == 2
+
+
+def test_unticked_optional_collector_is_skipped(client, monkeypatch):
+    scan = _CapturedScan(monkeypatch)
+    client.post("/scan/start", data=dict(TARGETED, host_list="192.0.2.1",
+                                         collector_choice="1"))
+    assert scan.engine_kwargs["skip_collectors"] == {"qos"}
+
+
+def test_ticked_optional_collector_runs(client, monkeypatch):
+    scan = _CapturedScan(monkeypatch)
+    client.post("/scan/start", data=dict(TARGETED, host_list="192.0.2.1",
+                                         collector_choice="1", collectors="qos"))
+    assert scan.engine_kwargs["skip_collectors"] == set()
+
+
+def test_scan_request_without_the_choice_runs_everything(client, monkeypatch):
+    """An API caller that never saw the form skips nothing."""
+    scan = _CapturedScan(monkeypatch)
+    client.post("/scan/start", data=dict(TARGETED, host_list="192.0.2.1"))
+    assert scan.engine_kwargs["skip_collectors"] == set()

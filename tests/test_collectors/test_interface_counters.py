@@ -116,6 +116,17 @@ def test_parse_ios():
     assert vlan["collisions"] is None
 
 
+def test_parse_rates_and_queueing_strategy():
+    rows = {r["interface"]: r for r in parse_interfaces(IOS_SHOW_INTERFACES)}
+    gi1 = rows["GigabitEthernet1/0/1"]
+    assert gi1["input_rate_bps"] == 2000
+    assert gi1["output_rate_bps"] == 5000
+    assert gi1["queueing_strategy"] == "fifo"
+    gi2 = rows["GigabitEthernet1/0/2"]
+    assert gi2["output_rate_bps"] is None
+    assert gi2["queueing_strategy"] == ""
+
+
 def test_parse_nxos():
     rows = {r["interface"]: r for r in parse_interfaces(NXOS_SHOW_INTERFACE)}
     assert list(rows) == ["Ethernet1/1", "Vlan1"]

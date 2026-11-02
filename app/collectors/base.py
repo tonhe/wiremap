@@ -90,6 +90,14 @@ class BaseCollector(ABC):
     # or post-collection processing (e.g. SNMP redaction).
     needs_custom_collect = False
 
+    # Custom collectors that need what the batch collectors already found
+    # (neighbours, switchports, the model) receive it as collect(context=...).
+    needs_device_context = False
+
+    # Collectors the operator can leave out of a scan. Everything else
+    # always runs.
+    optional = False
+
     # Platforms this collector cannot serve at all -- a VyOS box has no
     # switchports, a WLC has no Cisco-style routing table. Running the default
     # Cisco commands at them produces nothing but rejected-command noise.

@@ -98,9 +98,29 @@ def index():
          "enabled_by_default": s.enabled_by_default}
         for s in sorted(get_neighbor_sources().values(), key=lambda s: s.name)
     ]
+    optional_collectors = [
+        {"name": c.name, "label": c.label, "description": c.description,
+         "enabled_by_default": c.enabled_by_default}
+        for c in sorted(get_collector_registry().values(), key=lambda c: c.name)
+        if c.optional
+    ]
     return render_template('index.html', device_types=DEVICE_TYPES, version=VERSION,
                          report_registry=_get_report_info(),
-                         neighbor_sources=sources)
+                         neighbor_sources=sources,
+                         optional_collectors=optional_collectors)
+
+
+def _skipped_collectors(form):
+    """Optional collectors left unticked on the scan form.
+
+    Only a form that showed the choice can skip anything; a request without
+    the marker field runs every collector.
+    """
+    if form.get('collector_choice') != '1':
+        return set()
+    chosen = set(form.getlist('collectors'))
+    return {name for name, c in get_collector_registry().items()
+            if c.optional and name not in chosen}
 
 
 @app.route('/scan/start', methods=['POST'])
@@ -158,6 +178,7 @@ def scan_start():
     # Neighbour sources: which sightings are allowed to feed the crawl.
     submitted_sources = request.form.getlist('neighbor_sources')
     neighbor_sources = set(submitted_sources) if submitted_sources else None
+    skip_collectors = _skipped_collectors(request.form)
 
     try:
         crawl_scope = CrawlScope(
@@ -228,6 +249,7 @@ def scan_start():
             allow_telnet=allow_telnet,
             source_ip=source_ip or None,
             connect_timeout=connect_timeout,
+            skip_collectors=skip_collectors,
         )
         inventory = engine.discover()
         inventory.save(INVENTORY_DIR)

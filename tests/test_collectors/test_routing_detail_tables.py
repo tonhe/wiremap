@@ -210,9 +210,11 @@ def test_ospf_topology_sheet_columns_line_up():
     inv = {"devices": {"RTR-A": _ospf_device(XE_OSPF_BRIEF)}}
     headers, rows = RoutingSummaryReport().generate_tabular_data(inv)["OSPF Topology"]
     assert headers[2:] == ["Process ID", "Router ID", "Area", "Interface",
-                           "Cost", "State", "Neighbors"]
+                           "Cost", "State", "Neighbors", "Passive", "Network Type"]
     by_intf = {r[5]: r for r in rows}
-    assert by_intf["Lo4"][2:] == ["100", "10.0.0.4", "0.0.0.0", "Lo4", "1", "LOOP", "0"]
+    # No full show ip ospf interface in this scan: passive is unknown, not No.
+    assert by_intf["Lo4"][2:] == ["100", "10.0.0.4", "0.0.0.0", "Lo4", "1", "LOOP", "0",
+                                  "", ""]
     # Process and router ID follow the interface, not the first process
     assert by_intf["Gi1/0/1"][2:5] == ["110", "10.0.0.5", "0.0.0.10"]
 
@@ -227,3 +229,140 @@ def test_ospf_topology_repairs_rows_stored_shifted():
     assert row[4] == "0.0.0.0"
     assert row[6] == "1"
     assert row[7] == "LOOP"
+
+
+# Full "show ip ospf interface" for the XE_OSPF_BRIEF interfaces. Vlan100 is
+# passive and Gi1/0/1 is active with nobody up yet; the brief form shows both
+# as an interface with no full neighbours.
+XE_OSPF_DETAIL = """Loopback4 is up, line protocol is up 
+  Internet Address 10.0.0.4/32, Interface ID 14, Area 0
+  Attached via Network Statement
+  Process ID 100, Router ID 10.0.0.4, Network Type LOOPBACK, Cost: 1
+  Loopback interface is treated as a stub Host
+Vlan100 is up, line protocol is up 
+  Internet Address 10.0.1.1/24, Interface ID 22, Area 0
+  Attached via Network Statement
+  Process ID 100, Router ID 10.0.0.4, Network Type BROADCAST, Cost: 1
+  Topology-MTID    Cost    Disabled    Shutdown      Topology Name
+        0           1         no          no            Base
+  Transmit Delay is 1 sec, State DR, Priority 1
+  Designated Router (ID) 10.0.0.4, Interface address 10.0.1.1
+  No backup designated router on this network
+  Timer intervals configured, Hello 10, Dead 40, Wait 40, Retransmit 5
+    oob-resync timeout 40
+    No Hellos (Passive interface) 
+  Supports Link-local Signaling (LLS)
+  Neighbor Count is 0, Adjacent neighbor count is 0 
+TenGigabitEthernet1/1/1 is up, line protocol is up 
+  Internet Address 10.0.2.1/30, Interface ID 31, Area 0
+  Process ID 100, Router ID 10.0.0.4, Network Type POINT_TO_POINT, Cost: 10
+  Transmit Delay is 1 sec, State POINT_TO_POINT
+  Timer intervals configured, Hello 10, Dead 40, Wait 40, Retransmit 5
+    Hello due in 00:00:03
+  Neighbor Count is 1, Adjacent neighbor count is 1 
+GigabitEthernet1/0/1 is up, line protocol is up 
+  Internet Address 10.0.3.1/24, Interface ID 9, Area 10
+  Process ID 110, Router ID 10.0.0.5, Network Type BROADCAST, Cost: 10
+  Transmit Delay is 1 sec, State DROTHER, Priority 1
+  Timer intervals configured, Hello 5, Dead 20, Wait 20, Retransmit 5
+    Hello due in 00:00:01
+  Neighbor Count is 4, Adjacent neighbor count is 2 
+"""
+
+NXOS_OSPF_DETAIL = """ Ethernet1/1 is up, line protocol is up
+    IP address 192.0.2.1/30
+    Process ID 1 VRF default, area 0.0.0.0
+    Enabled by interface configuration
+    State P2P, Network type P2P, cost 40
+    Index 3, Transmit delay 1 sec
+    1 Neighbors, flooding to 1, adjacent with 1
+    Timer intervals: Hello 10, Dead 40, Wait 40, Retransmit 5
+      Hello timer due in 00:00:05
+ Vlan20 is up, line protocol is up
+    IP address 198.51.100.1/24
+    Process ID 2 VRF CUST-A, area 0.0.0.1
+    State DR, Network type BROADCAST, cost 40
+    Passive interface
+    0 Neighbors, flooding to 0, adjacent with 0
+    Timer intervals: Hello 10, Dead 40, Wait 40, Retransmit 5
+"""
+
+
+def test_full_ospf_interface_command_is_collected(collector):
+    for device_type in ("cisco_ios", "cisco_xe", "cisco_nxos"):
+        assert "show ip ospf interface" in collector.get_commands(device_type)
+
+
+def test_ospf_detail_iosxe_passive_vs_active():
+    from app.collectors.routing_detail import parse_ospf_interface_detail
+    rows = {r["interface"]: r for r in parse_ospf_interface_detail(XE_OSPF_DETAIL)}
+    assert set(rows) == {"Loopback4", "Vlan100", "TenGigabitEthernet1/1/1",
+                         "GigabitEthernet1/0/1"}
+    vl = rows["Vlan100"]
+    assert vl["passive"] is True
+    assert (vl["process"], vl["area"], vl["network_type"], vl["cost"], vl["state"]) == \
+        ("100", "0", "BROADCAST", "1", "DR")
+    assert (vl["neighbors"], vl["adjacent"]) == ("0", "0")
+    te = rows["TenGigabitEthernet1/1/1"]
+    assert te["passive"] is False and te["network_type"] == "POINT_TO_POINT"
+    gi = rows["GigabitEthernet1/0/1"]
+    assert gi["passive"] is False
+    assert (gi["hello"], gi["dead"], gi["area"]) == ("5", "20", "10")
+    assert (gi["neighbors"], gi["adjacent"]) == ("4", "2")
+    assert rows["Loopback4"]["passive"] is False
+    assert rows["Loopback4"]["network_type"] == "LOOPBACK"
+
+
+def test_ospf_detail_nxos_passive():
+    from app.collectors.routing_detail import parse_ospf_interface_detail
+    rows = {r["interface"]: r for r in parse_ospf_interface_detail(NXOS_OSPF_DETAIL)}
+    assert rows["Ethernet1/1"]["passive"] is False
+    assert rows["Ethernet1/1"]["vrf"] == "default"
+    assert rows["Ethernet1/1"]["area"] == "0.0.0.0"
+    assert rows["Ethernet1/1"]["cost"] == "40"
+    assert rows["Vlan20"]["passive"] is True
+    assert rows["Vlan20"]["vrf"] == "CUST-A"
+    assert (rows["Vlan20"]["neighbors"], rows["Vlan20"]["adjacent"]) == ("0", "0")
+
+
+def test_ospf_detail_rejected_or_empty():
+    from app.collectors.routing_detail import parse_ospf_interface_detail
+    assert parse_ospf_interface_detail("") == []
+    assert parse_ospf_interface_detail(
+        "% Invalid input detected at \x27^\x27 marker.") == []
+
+
+def test_parse_marks_passive_on_brief_rows(collector):
+    result = collector.parse({"show ip ospf interface brief": XE_OSPF_BRIEF,
+                              "show ip ospf interface": XE_OSPF_DETAIL}, "cisco_xe")
+    intfs = {i["interface"]: i for i in result["ospf_interfaces"]}
+    # Brief names (Vl100) match full names (Vlan100).
+    assert intfs["Vl100"]["passive"] is True
+    assert intfs["Vl100"]["state"] == "DR" and intfs["Vl100"]["neighbors"] == "0"
+    assert intfs["Te1/1/1"]["passive"] is False
+    assert intfs["Gi1/0/1"]["adjacent"] == "2"
+
+
+def test_parse_without_detail_leaves_passive_unknown(collector):
+    result = collector.parse({"show ip ospf interface brief": XE_OSPF_BRIEF,
+                              "show ip ospf interface": ""}, "cisco_xe")
+    assert all("passive" not in i for i in result["ospf_interfaces"])
+
+
+def test_detail_stands_in_when_brief_is_missing(collector):
+    result = collector.parse({"show ip ospf interface": NXOS_OSPF_DETAIL}, "cisco_nxos")
+    intfs = {i["interface"]: i for i in result["ospf_interfaces"]}
+    assert intfs["Vlan20"]["passive"] is True
+
+
+def test_ospf_topology_sheet_shows_passive():
+    from app.reports.routing_summary import RoutingSummaryReport
+    device = _ospf_device(XE_OSPF_BRIEF)
+    device["collector_data"]["routing_detail"]["raw"]["show ip ospf interface"] = \
+        XE_OSPF_DETAIL
+    inv = {"devices": {"RTR-A": device}}
+    headers, rows = RoutingSummaryReport().generate_tabular_data(inv)["OSPF Topology"]
+    by_intf = {r[5]: dict(zip(headers, r)) for r in rows}
+    assert by_intf["Vl100"]["Passive"] == "Yes"
+    assert by_intf["Te1/1/1"]["Passive"] == "No"
+    assert by_intf["Vl100"]["Network Type"] == "BROADCAST"
