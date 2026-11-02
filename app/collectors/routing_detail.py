@@ -8,7 +8,18 @@ import re
 from .base import BaseCollector
 from .errors import is_error_output
 
+try:
+    from app.ifname import canonical_ifname
+except ImportError:
+    from ifname import canonical_ifname
+
 logger = logging.getLogger(__name__)
+
+# The brief form cannot tell a passive interface from an active one: on
+# IOS-XE a passive broadcast interface shows DR with 0/0 neighbours, exactly
+# like an active one with nobody on the segment. The full form prints
+# "No Hellos (Passive interface)".
+_OSPF_INTERFACE = "show ip ospf interface"
 
 # BGP outside the global table (issue #9). "show ip bgp summary" only sees
 # the default VRF, so a PE/edge router whose peers live under
@@ -32,6 +43,7 @@ _COMMANDS = {
         "show ip route summary",
         "show ip ospf",
         "show ip ospf interface brief",
+        _OSPF_INTERFACE,
         "show ip bgp summary",
         "show ip eigrp topology",
         "show ip eigrp neighbors detail",
@@ -49,6 +61,7 @@ _COMMANDS = {
         "show ip route summary",
         "show ip ospf",
         "show ip ospf interface brief",
+        _OSPF_INTERFACE,
         "show ip bgp summary",
         "show ip eigrp topology",
         "show ip eigrp neighbors detail",
@@ -62,6 +75,7 @@ _COMMANDS = {
         "show ip route summary",
         "show ip ospf",
         "show ip ospf interface brief",
+        _OSPF_INTERFACE,
         "show ip bgp summary",
         "show ip eigrp topology",
         "show ip eigrp neighbors detail",
@@ -245,6 +259,79 @@ def parse_ospf_interfaces_brief(raw: str) -> list[dict]:
                 "status": m.group(7),
             })
     return results
+
+
+_OSPF_INTF_HEADER_RE = re.compile(
+    r"^\s?(\S+) is (administratively down|up|down)\b", re.I)
+_OSPF_INTF_FIELDS = {
+    "process": re.compile(r"Process ID (\S+?)(?:,|\s)"),
+    "vrf": re.compile(r"Process ID \S+ VRF (\S+?),"),
+    "area": re.compile(r"\b[Aa]rea\s+(\d+(?:\.\d+\.\d+\.\d+)?)"),
+    "network_type": re.compile(r"Network [Tt]ype\s+([A-Za-z0-9_-]+)"),
+    "cost": re.compile(r"\b[Cc]ost:?\s+(\d+)"),
+    "state": re.compile(r"\bState\s+([A-Za-z0-9_-]+)"),
+}
+_OSPF_TIMERS_RE = re.compile(r"Hello (\d+), Dead (\d+)")
+_OSPF_IOS_NBRS_RE = re.compile(
+    r"Neighbor Count is (\d+), Adjacent neighbor count is (\d+)")
+_OSPF_NXOS_NBRS_RE = re.compile(r"(\d+) Neighbors?, flooding to \d+, adjacent with (\d+)")
+_OSPF_PASSIVE_RE = re.compile(r"passive interface", re.I)
+
+
+def parse_ospf_interface_detail(raw: str) -> list[dict]:
+    """Parse the full 'show ip ospf interface' (IOS, IOS-XE, NX-OS).
+
+    passive is True when the interface sends no hellos, False otherwise.
+    """
+    results = []
+    current, lines = None, []
+
+    def flush():
+        if current is None:
+            return
+        block = "\n".join(lines)
+        row = {"interface": current, "passive": bool(_OSPF_PASSIVE_RE.search(block))}
+        for key, rx in _OSPF_INTF_FIELDS.items():
+            m = rx.search(block)
+            row[key] = m.group(1) if m else ""
+        m = _OSPF_TIMERS_RE.search(block)
+        row["hello"], row["dead"] = (m.group(1), m.group(2)) if m else ("", "")
+        m = _OSPF_IOS_NBRS_RE.search(block) or _OSPF_NXOS_NBRS_RE.search(block)
+        row["neighbors"], row["adjacent"] = (m.group(1), m.group(2)) if m else ("", "")
+        results.append(row)
+
+    for line in (raw or "").splitlines():
+        m = _OSPF_INTF_HEADER_RE.match(line)
+        if m:
+            flush()
+            current, lines = m.group(1), []
+            continue
+        if current is not None:
+            lines.append(line)
+    flush()
+    return results
+
+
+def attach_ospf_detail(brief_rows, detail_rows):
+    """Add passive, network type and timers from the full output to the
+    brief rows. With no brief rows the detail rows stand in for them."""
+    if not detail_rows:
+        return brief_rows
+    if not brief_rows:
+        return [dict(r) for r in detail_rows]
+    by_name = {}
+    for d in detail_rows:
+        by_name.setdefault(canonical_ifname(d["interface"]), d)
+    merged = []
+    for row in brief_rows:
+        row = dict(row)
+        d = by_name.get(canonical_ifname(row.get("interface")))
+        if d:
+            row["passive"] = d["passive"]
+            for key in ("network_type", "hello", "dead", "adjacent"):
+                row[key] = d.get(key, "")
+        merged.append(row)
+    return merged
 
 
 def _normalize_ospf_interfaces_ntc(entries):
@@ -696,6 +783,9 @@ class RoutingDetailCollector(BaseCollector):
         if not ospf_interfaces:
             ospf_interfaces = _normalize_ospf_interfaces_ntc(
                 _parse_ntc(ospf_int_raw, device_type, ospf_int_cmd))
+        ospf_interfaces = attach_ospf_detail(
+            ospf_interfaces,
+            parse_ospf_interface_detail(_usable(raw_outputs, _OSPF_INTERFACE)))
 
         # --- bgp summary ---
         bgp_cmd = "show ip bgp summary"

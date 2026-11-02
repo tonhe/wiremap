@@ -169,7 +169,8 @@ class DiscoveryEngine:
                  allow_telnet: bool = False,
                  source_ip=None,
                  credentials=None,
-                 connect_timeout: int = DEFAULT_CONNECT_TIMEOUT):
+                 connect_timeout: int = DEFAULT_CONNECT_TIMEOUT,
+                 skip_collectors=None):
         self.seed_ip = seed_ip
         self.connect_timeout = int(connect_timeout or DEFAULT_CONNECT_TIMEOUT)
         self.seed_device_type = seed_device_type
@@ -286,9 +287,13 @@ class DiscoveryEngine:
         self._progress_cb = progress_callback or (lambda event: None)
         self._cancelled = cancelled
 
-        # Always use all collectors
+        # Every collector runs, except optional ones the operator left out.
         registry = get_registry()
-        self._collectors = dict(registry)
+        skip = set(skip_collectors or ())
+        self.skipped_collectors = sorted(
+            n for n, c in registry.items() if n in skip and c.optional)
+        self._collectors = {n: c for n, c in registry.items()
+                            if n not in self.skipped_collectors}
 
         # Device detector for neighbor type classification
         if device_detector is None:
@@ -346,6 +351,7 @@ class DiscoveryEngine:
             "max_depth": self.max_depth,
             "connection_protocol": self.protocol,
             "collectors_enabled": list(self._collectors.keys()),
+            "collectors_skipped": list(self.skipped_collectors),
             "filters": self.filters,
             # Lets the inventory report tell a host-list target from a seed.
             "target_ips": [ip for ip, _ in (self.target_hosts or [])],
@@ -860,7 +866,18 @@ class DiscoveryEngine:
             for cname, collector in custom_collectors.items():
                 collector_started = time.monotonic()
                 try:
-                    result = collector.collect(conn, device_type)
+                    if collector.needs_device_context:
+                        rec = inventory.devices.get(hostname, {})
+                        context = {
+                            "model": (model_from_show_version(
+                                raw_outputs.get("show version", ""))
+                                or rec.get("model") or rec.get("platform") or ""),
+                            "router": router_model,
+                            "collector_data": rec.get("collector_data", {}),
+                        }
+                        result = collector.collect(conn, device_type, context=context)
+                    else:
+                        result = collector.collect(conn, device_type)
                     inventory.set_collector_data(
                         hostname, cname,
                         raw=result["raw"], parsed=result["parsed"],

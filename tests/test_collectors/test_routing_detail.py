@@ -27,7 +27,8 @@ def test_get_commands_ios(collector):
     assert "show ip bgp vpnv4 all summary" in cmds
     assert "show ip ospf database database-summary" in cmds
     assert "show ip eigrp topology summary" in cmds
-    assert len(cmds) == 13
+    assert "show ip ospf interface" in cmds
+    assert len(cmds) == 14
 
 
 def test_get_commands_xe_has_vpnv4_without_old_fallback(collector):

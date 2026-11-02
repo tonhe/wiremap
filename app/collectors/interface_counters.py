@@ -75,6 +75,13 @@ def parse_interfaces(text):
         row["counters_cleared"] = m.group(1) if m else ""
         m = re.search(r"Last link flapped\s+(\S+)", block)
         row["last_flap"] = m.group(1) if m else ""
+        # The first rate line is the load-interval one (5 minute by default).
+        m = re.search(r"input rate (\d+) bits/sec", block)
+        row["input_rate_bps"] = int(m.group(1)) if m else None
+        m = re.search(r"output rate (\d+) bits/sec", block)
+        row["output_rate_bps"] = int(m.group(1)) if m else None
+        m = re.search(r"Queueing strategy:\s*(.+)", block)
+        row["queueing_strategy"] = m.group(1).strip() if m else ""
         rows.append(row)
 
     for line in text.splitlines():

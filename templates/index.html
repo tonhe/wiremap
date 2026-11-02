@@ -686,6 +686,28 @@
                         </p>
                     </div>
 
+                    {% macro optional_collector_choice() %}
+                    {% if optional_collectors %}
+                    <div class="form-group">
+                        <label>Optional Collectors</label>
+                        <input type="hidden" name="collector_choice" value="1">
+                        <div class="checkbox-grid">
+                            {% for col in optional_collectors %}
+                            <label title="{{ col.description }}">
+                                <input type="checkbox" name="collectors" value="{{ col.name }}"
+                                       {% if col.enabled_by_default %}checked{% endif %}> {{ col.label }}
+                            </label>
+                            {% endfor %}
+                        </div>
+                        <p style="font-size: 12px; color: var(--text-muted); margin: 6px 0 0 0;">
+                            QoS adds roughly a minute per 100 classic IOS switches. Untick it for a
+                            faster run when the QoS report is not needed.
+                        </p>
+                    </div>
+                    {% endif %}
+                    {% endmacro %}
+                    {{ optional_collector_choice() }}
+
                     <details style="margin-bottom: 16px;">
                         <summary style="cursor: pointer; font-size: 13px; color: var(--text-muted);">
                             Crawl boundaries
@@ -1005,6 +1027,8 @@ fw1.example.com paloalto_panos"></textarea>
                             Blank uses the Settings value, else asks the seed which address our session came from.
                         </p>
                     </div>
+
+                    {{ optional_collector_choice() }}
 
                     <div class="form-group">
                         <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">

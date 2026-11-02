@@ -35,8 +35,8 @@ Each platform has its own command set per collector. A collector that cannot ser
 
 **Legacy SSH:** paramiko is pinned to 3.5.x deliberately. Version 4.0 removed the SHA-1 key exchanges and the `ssh-rsa` host key algorithm outright, which strands older Catalyst and Nexus hardware that offers nothing else. Modern algorithms are still preferred wherever the device supports them.
 
-### Data Collection (20 Collectors)
-All collectors run automatically on every device -- no pre-selection needed.
+### Data Collection (21 Collectors)
+All collectors run automatically on every device -- no pre-selection needed. The one exception is QoS, which is on by default and can be unticked under **Optional Collectors** on either scan form for a faster run.
 
 | Collector | Data Gathered |
 |-----------|--------------|
@@ -49,7 +49,7 @@ All collectors run automatically on every device -- no pre-selection needed.
 | STP/VLAN | Root bridges, blocked ports, VLAN list, VTP status |
 | STP Detail | Port roles, costs, topology change counts, inconsistent ports |
 | L3 Routing | OSPF/EIGRP/BGP/ISIS neighbors and route tables, BGP peers inside VRFs |
-| Routing Detail | Protocol summaries, per-VRF route counts, OSPF LSDB and EIGRP topology size, routing processes, redistribution |
+| Routing Detail | Protocol summaries, per-VRF route counts, OSPF interfaces with passive state and network type, OSPF LSDB and EIGRP topology size, routing processes, redistribution |
 | VRF | VRF definitions and interface assignments |
 | Switchport | Port-security, BPDU guard, storm-control, trunk config |
 | HSRP | HSRP, GLBP and VRRP state, virtual IPs, active/standby roles; groups configured but not collected are still listed from the config |
@@ -58,7 +58,8 @@ All collectors run automatically on every device -- no pre-selection needed.
 | Environment | PSU, fan and temperature state, PoE budget and faulted ports |
 | Redundancy | Supervisor redundancy mode and peer state, switchovers, stack ports and ring |
 | Management Security | SSH version and host key size, Smart Install state |
-| Interface Counters | Per-interface errors, CRC, drops, resets, last input/output and link flap |
+| Interface Counters | Per-interface errors, CRC, drops, resets, last input/output, link flap, input/output rate and queueing strategy |
+| QoS | Attached policy-map counters (per-class packets, drops, priority queue), class-map and policy-map definitions, auto-QoS; on 2960/3560/3750 `mls qos` state, port trust, expedite queue, queue-sets, DSCP/CoS-to-queue maps and per-port DSCP and queue counters; on Catalyst 9000 per-port hardware queue counters for uplinks and voice ports (capped at 24 per device) |
 | CPU/Memory | CPU 5s/1m/5m, CPU history, memory pools and top processes |
 
 Parsing uses [NTC Templates](https://github.com/networktocode/ntc-templates) (TextFSM) with regex fallbacks for vendor-aware structured output.
@@ -80,15 +81,18 @@ A dedicated **Reports** tab serves as the single destination for all report gene
 | ARP Summary | XLSX, JSON, CSV, XML | ARP entries by device and VRF with summary and detail tabs, incomplete entries flagged |
 | MAC Table | XLSX, JSON, CSV, XML | MAC-to-port mappings per device |
 | L2 Discovery | XLSX, JSON, CSV, XML | VLANs, STP topology and root bridges, trunk and interface status with neighbors, routed interfaces, anomaly findings |
-| L3 Routing & IP | XLSX, JSON, CSV, XML | Protocol neighbors, route tables, per-VRF route summary, OSPF topology, Routing Scale (OSPF LSDB, EIGRP topology), Routing Processes, Redistribution, FHRP status, IP audit, ARP/MAC map, VRF summary, and a Collection Errors sheet listing any command a device rejected |
+| L3 Routing & IP | XLSX, JSON, CSV, XML | Protocol neighbors, route tables, per-VRF route summary, OSPF topology (with a Passive column from the full `show ip ospf interface`, since the brief form shows a passive interface and an active one with no neighbours the same way), Routing Scale (OSPF LSDB, EIGRP topology), Routing Processes, Redistribution, FHRP status, IP audit, ARP/MAC map, VRF summary, and a Collection Errors sheet listing any command a device rejected |
 | Internet Edge | XLSX, JSON, CSV, XML | Edge Devices (and why each qualifies), BGP peering across VRFs, Public Addresses, NAT overview, ACL audit by usage, FHRP status, edge interface security |
 | Platform Health | XLSX, JSON, CSV, XML | Environment (PSU, fan, temperature), PoE budget, redundancy and stack ring, SSH and Smart Install exposure, CPU and memory, interface errors and drops, with findings |
+| Voice & QoS | XLSX, JSON, CSV, XML | Switch QoS posture, voice ports (phone, voice gateway, AP or voice VLAN) with trust and EF counters, uplinks and WAN circuits with egress policy, priority class and priority-queue drops, a Policy Catalog and Class Catalog showing template drift, findings, and Collection Errors |
 | EOX Lifecycle | XLSX | Hardware/software end-of-life dates, module EOX status (requires Cisco API credentials) |
 | Config Archive | ZIP | Running configs as individual text files |
 
-**Findings.** The L2, L3, Internet Edge and Platform Health reports rate findings on one scale. Critical is a reachability, redundancy or security exposure backed by collected data (a BGP session down, overlapping subnets). Warning is something usually wrong that may be intentional (`permit ip any any` on an interface filter). Info is documentation grade (an unreferenced ACL, an EIGRP stub peer). When one check fires on more than half the devices, an Info note says so, since that is more often a miscalibrated check than a network-wide defect.
+**Findings.** The L2, L3, Internet Edge, Platform Health and Voice & QoS reports rate findings on one scale. Critical is a reachability, redundancy or security exposure backed by collected data (a BGP session down, overlapping subnets). Warning is something usually wrong that may be intentional (`permit ip any any` on an interface filter). Info is documentation grade (an unreferenced ACL, an EIGRP stub peer). When one check fires on more than half the devices, an Info note says so, since that is more often a miscalibrated check than a network-wide defect.
 
 **Internet edge.** A device counts as edge when it has BGP to a public AS, a public address on an interface, NAT configured, or a static default pointing outside the IGP, and the Edge Devices sheet says which. The ACL audit classifies each ACL by what references it in the running config (interface filter, management, QoS, route-map, NAT, crypto, or unreferenced), so a QoS class-map ACL with zero hits is not reported as dead. A device with no NAT config reads "not configured" rather than 0 translations.
+
+**Voice and QoS.** The config shows what a QoS policy was meant to do; the counters show whether it is working. Classic Catalyst switches (2960/3560/3750) are judged on `mls qos`, port trust and the egress expedite queue. Catalyst 9000, 3850 and 4500-X trust DSCP by default, so a voice port there is only flagged if a policy says otherwise. Routers are judged on their egress LLQ: an interface with no CDP neighbour is treated as a WAN or DCI circuit and flagged without a priority class, while router interfaces facing a switch are listed but not flagged. Every drop count carries its counter window ("cleared 1d02h ago" or "since boot (36 weeks, ...)"), because counters that have run since boot are totals, not rates. Critical: QoS off on a switch with voice endpoints, untrusted voice ports with no marking policy, uplinks or WAN circuits with no priority queue, EF mapped outside the priority queue. Warning: priority-queue drops, EF arriving on access ports but leaving the uplink re-marked, a policy-map name with more than one version across the fleet. Info: auto-QoS on some phone ports but not others, counters never cleared on a device up more than 12 weeks.
 
 ### Targeted Scan
 Connect to a specific list of devices without BFS crawling. Designed for edge assessments where you know exactly which devices to audit (firewalls, border routers). Enter one device per line in the format `host [device_type]`, where host is an IPv4 address, hostname or FQDN. Device type is optional (auto-detect if omitted).

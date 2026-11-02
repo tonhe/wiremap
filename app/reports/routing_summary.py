@@ -40,10 +40,12 @@ from .l2_discovery import (
 )
 try:
     from app.collectors.routing_detail import (
-        normalize_route_summary, parse_ospf_interfaces_brief as _parse_ospf_interfaces_brief)
+        normalize_route_summary, parse_ospf_interfaces_brief as _parse_ospf_interfaces_brief,
+        parse_ospf_interface_detail, attach_ospf_detail)
 except ImportError:
     from collectors.routing_detail import (
-        normalize_route_summary, parse_ospf_interfaces_brief as _parse_ospf_interfaces_brief)
+        normalize_route_summary, parse_ospf_interfaces_brief as _parse_ospf_interfaces_brief,
+        parse_ospf_interface_detail, attach_ospf_detail)
 
 # ---------------------------------------------------------------------------
 # Styling (mirrors L2 discovery report palette)
@@ -743,19 +745,29 @@ def _build_route_summary_sheet(wb, inventory_data):
 
 
 _OSPF_TOPOLOGY_HEADERS = ["Device", "Site/Location", "Process ID", "Router ID",
-                          "Area", "Interface", "Cost", "State", "Neighbors"]
+                          "Area", "Interface", "Cost", "State", "Neighbors",
+                          "Passive", "Network Type"]
 
 
 def _ospf_interfaces(rd):
     """OSPF interface rows, re-read from the raw brief output when it was
     saved. Scans parsed before the brief parser was fixed stored rows with
-    every column from Area onward shifted one place."""
-    raw = (rd.get("raw") or {}).get("show ip ospf interface brief", "")
-    if raw:
-        rows = _parse_ospf_interfaces_brief(raw)
+    every column from Area onward shifted one place. Passive state comes
+    from the full show ip ospf interface, when the scan has it."""
+    raw = rd.get("raw") or {}
+    brief = raw.get("show ip ospf interface brief", "")
+    if brief:
+        rows = _parse_ospf_interfaces_brief(brief)
         if rows:
-            return rows
+            detail = raw.get("show ip ospf interface", "")
+            return attach_ospf_detail(rows, parse_ospf_interface_detail(detail))
     return rd.get("parsed", {}).get("ospf_interfaces", []) or []
+
+
+def _passive_label(row):
+    if "passive" not in row:
+        return ""
+    return "Yes" if row["passive"] else "No"
 
 
 def _ospf_topology_rows(inventory_data):
@@ -783,13 +795,16 @@ def _ospf_topology_rows(inventory_data):
                     oi.get("cost", ""),
                     oi.get("state", ""),
                     oi.get("neighbors", oi.get("nbrs_full", "")),
+                    _passive_label(oi),
+                    oi.get("network_type", ""),
                 ])
         else:
             # No interface detail, just list process + areas
             for p in ospf_procs:
                 for area in p.get("areas", []):
                     rows.append([hostname, site, p.get("process_id", ""),
-                                 p.get("router_id", ""), area, "", "", "", ""])
+                                 p.get("router_id", ""), area, "", "", "", "",
+                                 "", ""])
     return rows
 
 
