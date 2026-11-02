@@ -107,54 +107,63 @@ def test_probe_other_errors_leave_the_verdict_to_netmiko(monkeypatch):
 
 # --- connect() with the probe ----------------------------------------------
 
-def test_filtered_ssh_port_skips_netmiko(handler, ports):
+def _timeout_error(**p):
+    raise socket.timeout("timed out")
+
+
+def test_ssh_is_never_gated_on_the_probe(handler, ports):
+    """A slow TCP handshake behind SD-WAN must not fail a device netmiko
+    can log into: SSH goes straight to netmiko, which has its own timeout."""
     table, probed = ports
     table[22] = _TIMEOUT
     calls = handler(lambda **p: "conn")
+    cm = ConnectionManager("192.0.2.10", "cisco_ios", "u", "p", protocol="ssh")
+    assert cm.connect().connection == "conn"
+    assert probed == []
+    assert len(calls) == 1
+
+
+def test_ssh_timeout_is_netmikos_verdict(handler, ports):
     limiter = _Recorder()
+    calls = handler(_timeout_error)
     cm = ConnectionManager("192.0.2.10", "cisco_ios", "u", "p",
                            protocol="ssh", login_limiter=limiter)
     with pytest.raises(WiremapConnectionError) as exc:
         cm.connect()
-    assert calls == []
-    assert probed == [22]
     assert exc.value.reason == "timeout"
-    [attempt] = exc.value.attempts
-    assert attempt["protocol"] == "ssh"
-    assert attempt["port"] == 22
-    assert attempt["note"] == "tcp probe"
-    # The probe is not a login, so it costs no rate-limiter token.
-    assert limiter.calls == 0
+    # A network-layer failure is not retried with other drivers.
+    assert len(calls) == 1
+    assert "note" not in exc.value.attempts[0]
 
 
-def test_refused_ssh_port_skips_netmiko(handler, ports):
-    table, _ = ports
-    table[22] = _REFUSED
-    calls = handler(lambda **p: "conn")
+def test_ssh_refusal_is_attempted_once(handler, ports):
+    def refuse(**p):
+        raise ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")
+    calls = handler(refuse)
     cm = ConnectionManager("192.0.2.10", "cisco_ios", "u", "p", protocol="ssh")
     with pytest.raises(WiremapConnectionError) as exc:
         cm.connect()
-    assert calls == []
     assert exc.value.reason == "refused"
-    assert exc.value.attempts[0]["note"] == "tcp probe"
-
-
-def test_open_ssh_port_runs_netmiko(handler, ports):
-    calls = handler(lambda **p: "conn")
-    cm = ConnectionManager("192.0.2.10", "cisco_ios", "u", "p", protocol="ssh")
-    assert cm.connect().connection == "conn"
     assert len(calls) == 1
 
 
-def test_auto_without_allow_telnet_never_tries_telnet(handler, ports):
-    table, probed = ports
-    table[22] = _TIMEOUT
+def test_connect_timeout_reaches_netmiko(handler, ports):
     calls = handler(lambda **p: "conn")
+    ConnectionManager("192.0.2.10", "cisco_ios", "u", "p",
+                      connect_timeout=25).connect()
+    assert calls[0]["timeout"] == 25
+    ConnectionManager("192.0.2.10", "cisco_ios", "u", "p").connect()
+    assert calls[1]["timeout"] == cmod.DEFAULT_CONNECT_TIMEOUT
+
+
+def test_auto_without_allow_telnet_never_tries_telnet(handler, ports):
+    _, probed = ports
+    calls = handler(_timeout_error)
     cm = ConnectionManager("192.0.2.10", "cisco_ios", "u", "p", protocol="auto")
     with pytest.raises(WiremapConnectionError) as exc:
         cm.connect()
-    assert probed == [22]
-    assert calls == []
+    assert probed == []
+    assert all(not c["device_type"].endswith("_telnet") for c in calls)
     assert [a["protocol"] for a in exc.value.attempts] == ["ssh"]
 
 
@@ -170,17 +179,19 @@ def test_auto_without_allow_telnet_after_netmiko_failure(handler, ports):
     assert all(a["protocol"] == "ssh" for a in exc.value.attempts)
 
 
-def test_auto_with_allow_telnet_probes_port_23(handler, ports):
+def test_telnet_fallback_is_still_probed(handler, ports):
+    """Telnet is a fallback after SSH failed; a closed port 23 is common and
+    the probe saves a full netmiko timeout there."""
     table, probed = ports
-    table[22] = _TIMEOUT
     table[23] = ("refused", "ConnectionRefusedError", "tcp probe: port 23 refused")
-    calls = handler(lambda **p: "conn")
+    calls = handler(_timeout_error)
     cm = ConnectionManager("192.0.2.10", "cisco_ios", "u", "p",
-                           protocol="auto", allow_telnet=True)
+                           protocol="auto", allow_telnet=True,
+                           allow_fallback=False)
     with pytest.raises(WiremapConnectionError) as exc:
         cm.connect()
-    assert probed == [22, 23]
-    assert calls == []
+    assert probed == [23]
+    assert all(not c["device_type"].endswith("_telnet") for c in calls)
     telnet = [a for a in exc.value.attempts if a["protocol"] == "telnet"]
     assert telnet[0]["port"] == 23
     assert telnet[0]["note"] == "tcp probe"
@@ -189,15 +200,21 @@ def test_auto_with_allow_telnet_probes_port_23(handler, ports):
 
 
 def test_auto_with_allow_telnet_falls_back_when_23_open(handler, ports):
-    table, _ = ports
-    table[22] = _TIMEOUT
-    calls = handler(lambda **p: "conn")
+    def fn(**p):
+        if p["device_type"].endswith("_telnet"):
+            return "conn"
+        raise socket.timeout("timed out")
+    calls = handler(fn)
     cm = ConnectionManager("192.0.2.10", "cisco_ios", "u", "p",
                            protocol="auto", allow_telnet=True)
     result = cm.connect()
     assert result.protocol_used == "telnet"
     assert result.fallback_occurred is True
-    assert calls[0]["device_type"] == "cisco_ios_telnet"
+    assert calls[-1]["device_type"] == "cisco_ios_telnet"
+
+
+def test_probe_timeout_is_long_enough_for_a_slow_handshake():
+    assert cmod.TCP_PROBE_TIMEOUT >= 5
 
 
 def test_explicit_telnet_works_without_allow_telnet(handler, ports):

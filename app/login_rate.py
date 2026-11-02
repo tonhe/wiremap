@@ -12,6 +12,7 @@ workers are served in arrival order and never all wake at once.
 """
 import threading
 import time
+from collections import deque
 
 
 class LoginRateLimiter:
@@ -22,19 +23,32 @@ class LoginRateLimiter:
         self._sleep = sleep or time.sleep
         self._lock = threading.Lock()
         self._next_slot = None
+        # Login start times in the last minute, and the most seen in any
+        # one minute -- counted with or without a limit, so a run shows
+        # what the AAA server actually saw.
+        self._recent = deque()
+        self.peak_per_minute = 0
 
     @property
     def enabled(self):
         return self._interval > 0
 
+    def _count(self, start):
+        self._recent.append(start)
+        while self._recent and self._recent[0] <= start - 60:
+            self._recent.popleft()
+        self.peak_per_minute = max(self.peak_per_minute, len(self._recent))
+
     def acquire(self):
         """Block until a login may start. Returns the seconds waited."""
-        if not self.enabled:
-            return 0.0
         with self._lock:
             now = self._clock()
+            if not self.enabled:
+                self._count(now)
+                return 0.0
             slot = now if self._next_slot is None else max(now, self._next_slot)
             self._next_slot = slot + self._interval
+            self._count(slot)
         wait = slot - now
         if wait > 0:
             self._sleep(wait)

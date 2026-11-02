@@ -28,8 +28,9 @@ the aggregated row) when its description carries per-device specifics
 such as rule counts or peer addresses.
 
 Summary counts: the ``<Severity> Findings`` metrics count per-device
-instances (rows on the detail sheet); the ``(distinct)`` metrics count
-aggregated rows (rows on the Findings sheet).
+instances (rows on the detail sheet); the ``<Severity> Finding Types``
+metrics count aggregated rows (rows on the Findings sheet), so one check
+firing on 101 devices reads as 101 findings of 1 type.
 """
 import re
 from collections import defaultdict
@@ -199,5 +200,5 @@ def summary_count_rows(findings):
     raw = count_by_severity(findings)
     distinct = count_by_severity(aggregate_findings(findings))
     rows = [[f"{sev} Findings", raw[sev]] for sev in SEVERITIES]
-    rows += [[f"{sev} Findings (distinct)", distinct[sev]] for sev in SEVERITIES]
+    rows += [[f"{sev} Finding Types", distinct[sev]] for sev in SEVERITIES]
     return rows

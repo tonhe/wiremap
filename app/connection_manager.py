@@ -23,11 +23,17 @@ _TELNET_SUFFIX = "_telnet"
 
 _PORTS = {"ssh": 22, "telnet": 23}
 
-# A bare TCP connect before netmiko. A filtered address otherwise costs a
-# full netmiko timeout per protocol; the probe answers in this long at most
-# and never counts against the login rate limit.
-TCP_PROBE_TIMEOUT = 1.5
+# A bare TCP connect before a telnet fallback, so a closed port 23 does not
+# cost a full netmiko timeout. SSH is never gated on it: behind an SD-WAN
+# edge a TCP handshake can take seconds, and a short probe there failed
+# devices that netmiko logs into fine. The probe never counts against the
+# login rate limit.
+TCP_PROBE_TIMEOUT = 5.0
 PROBE_NOTE = "tcp probe"
+
+# netmiko's TCP connect timeout, in seconds. Branches behind SD-WAN have
+# taken over 10 s for a full SSH login, so this is a setting.
+DEFAULT_CONNECT_TIMEOUT = 10
 
 
 def _tcp_probe(host, port, timeout=TCP_PROBE_TIMEOUT):
@@ -205,8 +211,9 @@ class ConnectionManager:
                  password: str, protocol: str = "ssh",
                  allow_fallback: bool = True, platform: str = None,
                  login_limiter=None, allow_telnet: bool = False,
-                 credentials=None):
+                 credentials=None, connect_timeout=None):
         self.host = host
+        self.connect_timeout = connect_timeout or DEFAULT_CONNECT_TIMEOUT
         # protocol="auto" stays on SSH unless telnet is allowed: most sites
         # run "transport input ssh", so a telnet try only adds a timeout and
         # an AAA failure. An explicit protocol="telnet" is always honoured.
@@ -250,7 +257,7 @@ class ConnectionManager:
             "host": self.host,
             "username": cred.username,
             "password": cred.password,
-            "timeout": 10,
+            "timeout": self.connect_timeout,
             "session_timeout": 20,
             "auth_timeout": 10,
             "banner_timeout": 10,
@@ -486,10 +493,11 @@ class ConnectionManager:
         return conn, None
 
     def _port_open(self, proto, attempts):
-        """TCP-probe the protocol's port. A timeout or refusal is recorded
-        as that protocol's attempt, so netmiko is not run against it."""
+        """TCP-probe the telnet port. A timeout or refusal is recorded as
+        that protocol's attempt, so netmiko is not run against it. SSH is
+        always left to netmiko, which reports refusals and timeouts itself."""
         port = _PORTS.get(proto)
-        if port is None:
+        if port is None or proto == "ssh":
             return True
         started = time.monotonic()
         result = _tcp_probe(self.host, port)

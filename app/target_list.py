@@ -139,6 +139,64 @@ def parse_targets(text, valid_types, filename=None):
     return parse_lines(text, valid_types)
 
 
+def _system_nameservers(path="/etc/resolv.conf"):
+    try:
+        with open(path) as f:
+            return [line.split()[1] for line in f
+                    if line.startswith("nameserver") and len(line.split()) > 1]
+    except OSError:
+        return []
+
+
+def _candidates(name, suffixes):
+    """Names to try for one host-list entry. A bare name tries each suffix
+    first; a dotted name is tried as given first."""
+    with_suffix = [f"{name}.{s.strip('.')}" for s in suffixes if s.strip(".")]
+    return with_suffix + [name] if "." not in name else [name] + with_suffix
+
+
+def make_resolver(server=None, suffixes=None):
+    """A getaddrinfo-shaped resolver for host-list names, and a description
+    of it for the scan log.
+
+    server is a DNS server address to query instead of the host's resolver,
+    for customer zones the wiremap host cannot see; suffixes are search
+    domains appended to bare names. Neither changes /etc/resolv.conf.
+    """
+    suffixes = [s for s in (suffixes or []) if s and s.strip(".")]
+    if server:
+        import dns.resolver
+
+        dns_resolver = dns.resolver.Resolver(configure=False)
+        dns_resolver.nameservers = [server]
+        dns_resolver.lifetime = 5.0
+
+        def lookup(name):
+            answer = dns_resolver.resolve(name, "A")
+            return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (r.address, 0))
+                    for r in answer]
+        description = f"DNS server {server}"
+    else:
+        def lookup(name):
+            return socket.getaddrinfo(name, None, socket.AF_INET,
+                                      socket.SOCK_STREAM)
+        servers = _system_nameservers()
+        description = ("the host's resolver"
+                       + (f" ({', '.join(servers)})" if servers else ""))
+    if suffixes:
+        description += f", search {', '.join(suffixes)}"
+
+    def resolver(name, *_args):
+        last = None
+        for candidate in _candidates(name, suffixes):
+            try:
+                return lookup(candidate)
+            except Exception as e:
+                last = e
+        raise last
+    return resolver, description
+
+
 def _resolve_one(name, resolver):
     infos = resolver(name, None, socket.AF_INET, socket.SOCK_STREAM)
     for info in infos:

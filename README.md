@@ -93,7 +93,7 @@ A dedicated **Reports** tab serves as the single destination for all report gene
 ### Targeted Scan
 Connect to a specific list of devices without BFS crawling. Designed for edge assessments where you know exactly which devices to audit (firewalls, border routers). Enter one device per line in the format `host [device_type]`, where host is an IPv4 address, hostname or FQDN. Device type is optional (auto-detect if omitted).
 
-- **Hostnames** are resolved before the scan starts. Names that don't resolve are listed in the console and skipped
+- **Hostnames** are resolved before the scan starts. Names that don't resolve are listed in the console and skipped, with the resolver that was used. If the names live in a customer zone this host can't see, set **DNS Server** and **DNS Search Suffix** in Settings rather than changing the host's `/etc/resolv.conf`
 - **Upload** a `.txt` (same format as the text box) or a `.csv` with a header row. CSV needs a `hostname` and/or `ip` column (`host`, `fqdn`, `address`, `mgmt_ip` and similar also work) and may carry a `device_type` column. Pasted and uploaded hosts are combined
 - **Duplicates** are collected once, even when two entries reach the same device
 - **Crawl from targets** optionally discovers onward from each target, with its own crawl depth and device-type filters
@@ -269,7 +269,8 @@ the run continues it rather than starting empty:
 - devices already collected are skipped
 - devices that failed last time are retried automatically
 - hosts you list explicitly are always scanned, which is how a single device is
-  refreshed
+  refreshed. If a refresh fails, the device keeps its earlier data and the
+  console warns that its neighbours weren't crawled from it this run
 - results are written to a **new** scan that records what it continued from, so
   the original is never modified
 
@@ -331,9 +332,14 @@ Set from the **Settings** tab under **Discovery Settings**. Values are persisted
 | `redact_secrets` | on | Replace secrets in collected configs with `<REDACTED>` before they are stored |
 | `collect_controller_managed` | off | Log into ACI fabric nodes and UCS Fabric Interconnects anyway instead of skipping them |
 | `max_logins_per_minute` | 0 | Cap on login attempts per minute across all workers (SSH, Telnet and the legacy SSH retry), so a large run doesn't trip TACACS+/ISE throttling. 0 means no limit, max 600 |
+| `connect_timeout_s` | 10 | Seconds each login waits for the device to answer (3-60). Raise it for branches behind SD-WAN or satellite links, where a full SSH login can take 10 seconds |
 | `allow_telnet` | off | Fall back to Telnet when SSH fails on an auto-protocol login. Off because most networks only accept SSH and each try costs a timeout and a failed login. A scan with the Telnet protocol selected always uses Telnet |
 | `expand_non_cdp_neighbors` | off | Crawl routing peers, next-hops and HSRP/VRRP addresses even when CDP/LLDP never saw them. Off, they're crawled only when CDP/LLDP sees them or an ARP entry shows a network-vendor MAC, and the rest are listed as not attempted |
 | `source_ip` | blank | The address devices see this host as, used for the management ACL check. Blank learns it from the seed's own session list. Can also be set per scan |
+| `dns_server` | blank | DNS server for host-list names. Blank uses this host's resolver |
+| `dns_search` | none | Search suffixes tried on bare host-list names, in order |
+
+Each scan records the connect timeout, the Telnet setting and the login cap in its `params`, and `scan_summary.peak_logins_per_minute` records the most logins actually started in any one minute.
 
 **Site mapping.** Every report has a Site/Location column. By default the site is the first hyphen-delimited token of the short hostname (`AB001-IDF-SWA-01` maps to `AB001`). When a naming convention doesn't fit that, enter one `regex => SITE` rule per line. Rules are matched in order, case-insensitive, against the hostname as collected (FQDN included), and the site can use group references:
 
