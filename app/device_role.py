@@ -139,6 +139,7 @@ def skips_routing(show_version="", model="", platform="", category=""):
 
 # Ordered: IOS-XE show version also carries a "Cisco IOS Software" line.
 _OS_FAMILIES = (
+    (re.compile(r"Adaptive Security Appliance Software", re.I), "cisco_asa"),
     (re.compile(r"Cisco IOS[ -]XE Software|\bIOS-XE\b", re.I), "cisco_xe"),
     (re.compile(r"Cisco IOS XR Software", re.I), None),
     (re.compile(r"Cisco Nexus Operating System|\bNX-OS\b", re.I), "cisco_nxos"),

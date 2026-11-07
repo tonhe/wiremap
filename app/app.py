@@ -70,6 +70,7 @@ DEVICE_TYPES = [
     ('cisco_xe', 'Cisco IOS-XE'),
     ('cisco_nxos', 'Cisco NX-OS'),
     ('cisco_xr', 'Cisco IOS-XR'),
+    ('cisco_asa', 'Cisco ASA / ASAv'),
     ('arista_eos', 'Arista EOS'),
     ('juniper_junos', 'Juniper JunOS'),
     ('paloalto_panos', 'Palo Alto PAN-OS'),

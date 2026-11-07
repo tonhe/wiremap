@@ -637,14 +637,14 @@ def test_unticked_optional_collector_is_skipped(client, monkeypatch):
     scan = _CapturedScan(monkeypatch)
     client.post("/scan/start", data=dict(TARGETED, host_list="192.0.2.1",
                                          collector_choice="1"))
-    assert scan.engine_kwargs["skip_collectors"] == {"qos"}
+    assert scan.engine_kwargs["skip_collectors"] == {"qos", "asa"}
 
 
 def test_ticked_optional_collector_runs(client, monkeypatch):
     scan = _CapturedScan(monkeypatch)
     client.post("/scan/start", data=dict(TARGETED, host_list="192.0.2.1",
                                          collector_choice="1", collectors="qos"))
-    assert scan.engine_kwargs["skip_collectors"] == set()
+    assert scan.engine_kwargs["skip_collectors"] == {"asa"}
 
 
 def test_scan_request_without_the_choice_runs_everything(client, monkeypatch):

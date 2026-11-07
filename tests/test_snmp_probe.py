@@ -41,6 +41,14 @@ def test_unconfigured_credentials():
     assert SnmpCredentials().is_configured() is False
 
 
+@pytest.mark.parametrize("descr", [
+    "Cisco Adaptive Security Appliance Version 9.16(4)",
+    "Cisco Adaptive Security Appliance Version 9.18(3) ASAv",
+])
+def test_parse_sysdescr_cisco_asa(descr):
+    assert parse_sysdescr(descr)["device_type"] == "cisco_asa"
+
+
 def test_parse_sysdescr_cisco_ios():
     descr = ("Cisco IOS Software, C3750E Software (C3750E-UNIVERSALK9-M), "
              "Version 15.0(2)SE11, RELEASE SOFTWARE (fc3)")

@@ -1008,7 +1008,7 @@ class QosCollector(BaseCollector):
         }
 
     def collect(self, connection, device_type: str, context=None) -> dict:
-        if device_type in self.unsupported_platforms:
+        if not self.applies_to(device_type):
             return {"raw": {}, "parsed": {"not_applicable": True,
                                           "reason": f"qos does not apply to {device_type}"}}
         context = context or {}

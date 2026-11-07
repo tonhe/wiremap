@@ -162,7 +162,7 @@ R = REDACTED
     ("failover key Plain123", f"failover key {R}"),
     ("failover key hex 0a1b2c3d", f"failover key hex {R}"),
     (" ldap-login-password Plain123", f" ldap-login-password {R}"),
-    ("enable password 8Ry2YjIyt7RRXU24 encrypted",
+    ("enable password 9jNfZuG3TC5tCVH0 encrypted",
      f"enable password {R} encrypted"),
     ("username admin password $sha512$5000$abc$def pbkdf2 privilege 15",
      f"username admin password {R} pbkdf2 privilege 15"),
@@ -398,3 +398,38 @@ def test_dynamic_author_block_redacted():
     out = redact_config(text)
     assert "0822455D0A16" not in out and "Plain123" not in out
     assert " auth-type any\n" in out
+
+
+@pytest.mark.parametrize("line,expected", [
+    (" ikev1 pre-shared-key Plain123", f" ikev1 pre-shared-key {R}"),
+    (" ikev2 remote-authentication pre-shared-key Plain123",
+     f" ikev2 remote-authentication pre-shared-key {R}"),
+    (" ikev2 local-authentication pre-shared-key Plain123",
+     f" ikev2 local-authentication pre-shared-key {R}"),
+    ("enable password 2KFQnbNIdI.2KYOU encrypted", f"enable password {R} encrypted"),
+    ("passwd 2KFQnbNIdI.2KYOU encrypted", f"passwd {R} encrypted"),
+    ("username lab-admin password Plain123 encrypted privilege 15",
+     f"username lab-admin password {R} encrypted privilege 15"),
+    ("snmp-server host inside 192.0.2.5 community Plain123 version 2c",
+     f"snmp-server host inside 192.0.2.5 community {R} version 2c"),
+    (" ikev2 remote-authentication certificate", " ikev2 remote-authentication certificate"),
+])
+def test_asa_secret_forms(line, expected):
+    assert redact_line(line) == expected
+
+
+@pytest.mark.parametrize("line", [
+    " ikev1 pre-shared-key *****",
+    " ikev2 local-authentication pre-shared-key *****",
+    " key *****",
+    "failover key *****",
+    "enable password ***** pbkdf2",
+    "username lab-admin password ***** pbkdf2 privilege 15",
+    "snmp-server host inside 192.0.2.5 community ***** version 2c",
+    " server-key *****",
+    # The encrypted form of an empty enable password, so an unset one shows.
+    "enable password 8Ry2YjIyt7RRXU24 encrypted",
+])
+def test_already_masked_values_are_left_alone(line):
+    assert redact_line(line) == line
+    assert redact_config_counted(line + "\n")[1] == 0

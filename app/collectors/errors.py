@@ -38,6 +38,9 @@ _ERROR_PATTERNS = [
      UNAUTHORIZED),
     (re.compile(r"^" + re.escape(SEND_FAILED_PREFIX), re.M), FAILED),
     (re.compile(r"^[ \t]*%[ \t]*invalid input", re.I | re.M), NOT_APPLICABLE),
+    # ASA prefixes the IOS syntax errors with "ERROR: ".
+    (re.compile(r"^[ \t]*ERROR:[ \t]*%[ \t]*(?:invalid input|incomplete command|"
+                r"ambiguous command)", re.I | re.M), NOT_APPLICABLE),
     (re.compile(r"^[ \t]*%[ \t]*incomplete command", re.I | re.M), NOT_APPLICABLE),
     (re.compile(r"^[ \t]*%[ \t]*ambiguous command", re.I | re.M), NOT_APPLICABLE),
     (re.compile(r"^[ \t]*%[ \t]*unknown command", re.I | re.M), NOT_APPLICABLE),

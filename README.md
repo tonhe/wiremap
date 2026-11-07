@@ -29,14 +29,14 @@
 - **Scan Timing** -- Per-device and per-collector timings are recorded, and the slowest devices and collectors are listed in the console when a scan finishes
 
 ### Multi-Vendor Support
-Cisco IOS / IOS-XE / NX-OS / IOS-XR, Cisco AireOS WLC, Arista EOS, Juniper JunOS, Palo Alto PAN-OS, WatchGuard Firebox (Fireware), VyOS, MikroTik RouterOS, Fortinet FortiGate, HPE Comware / ProCurve, Aruba OS-CX, Dell OS10, Extreme ExtremeXOS / VOSS, Ubiquiti EdgeOS
+Cisco IOS / IOS-XE / NX-OS / IOS-XR, Cisco ASA / ASAv, Cisco AireOS WLC, Arista EOS, Juniper JunOS, Palo Alto PAN-OS, WatchGuard Firebox (Fireware), VyOS, MikroTik RouterOS, Fortinet FortiGate, HPE Comware / ProCurve, Aruba OS-CX, Dell OS10, Extreme ExtremeXOS / VOSS, Ubiquiti EdgeOS
 
 Each platform has its own command set per collector. A collector that cannot serve a platform -- spanning tree on a firewall, switchports on a router -- declares it and is skipped, rather than sending commands the device will reject.
 
 **Legacy SSH:** paramiko is pinned to 3.5.x deliberately. Version 4.0 removed the SHA-1 key exchanges and the `ssh-rsa` host key algorithm outright, which strands older Catalyst and Nexus hardware that offers nothing else. Modern algorithms are still preferred wherever the device supports them.
 
-### Data Collection (21 Collectors)
-All collectors run automatically on every device -- no pre-selection needed. The one exception is QoS, which is on by default and can be unticked under **Optional Collectors** on either scan form for a faster run.
+### Data Collection (22 Collectors)
+All collectors run automatically on every device -- no pre-selection needed. The exceptions are QoS and Cisco ASA, which are on by default and can be unticked under **Optional Collectors** on either scan form for a faster run.
 
 | Collector | Data Gathered |
 |-----------|--------------|
@@ -59,6 +59,7 @@ All collectors run automatically on every device -- no pre-selection needed. The
 | Redundancy | Supervisor redundancy mode and peer state, switchovers, stack ports and ring |
 | Management Security | SSH version and host key size, Smart Install state |
 | Interface Counters | Per-interface errors, CRC, drops, resets, last input/output, link flap, input/output rate and queueing strategy |
+| Cisco ASA | ASA and ASAv only: platform, licence and health (show version, CPU, memory, conns, ASP drops, crashinfo), failover state and history, running-config, interfaces, routing, ACLs, objects, NAT, site-to-site and AnyConnect VPN, certificates and the management plane. The standby unit of a pair gets the platform, failover and config blocks; on a multiple-context unit every context is visited with `changeto` |
 | QoS | Attached policy-map counters (per-class packets, drops, priority queue), class-map and policy-map definitions, auto-QoS; on 2960/3560/3750 `mls qos` state, port trust, expedite queue, queue-sets, DSCP/CoS-to-queue maps and per-port DSCP and queue counters; on Catalyst 9000 per-port hardware queue counters for uplinks and voice ports (capped at 24 per device) |
 | CPU/Memory | CPU 5s/1m/5m, CPU history, memory pools and top processes |
 
@@ -85,10 +86,13 @@ A dedicated **Reports** tab serves as the single destination for all report gene
 | Internet Edge | XLSX, JSON, CSV, XML | Edge Devices (and why each qualifies), BGP peering across VRFs, Public Addresses, NAT overview, ACL audit by usage, FHRP status, edge interface security |
 | Platform Health | XLSX, JSON, CSV, XML | Environment (PSU, fan, temperature), PoE budget, redundancy and stack ring, SSH and Smart Install exposure, CPU and memory, interface errors and drops, with findings |
 | Voice & QoS | XLSX, JSON, CSV, XML | Switch QoS posture, voice ports (phone, voice gateway, AP or voice VLAN) with trust and EF counters, uplinks and WAN circuits with egress policy, priority class and priority-queue drops, a Policy Catalog and Class Catalog showing template drift, findings, and Collection Errors |
+| Cisco ASA | XLSX, JSON, CSV, XML | Summary of the assessment checks, Devices (one row per unit, and per context), Failover (one row per pair), Interfaces, Certificates, Management Plane, Health and Capacity, Changes and Hygiene, and Collection Errors |
 | EOX Lifecycle | XLSX | Hardware/software end-of-life dates, module EOX status (requires Cisco API credentials) |
-| Config Archive | ZIP | Running configs as individual text files |
+| Config Archive | ZIP | Running configs as individual text files; an ASA standby unit is `<hostname>_stby.txt` and each security context `<hostname>_<context>.txt` |
 
-**Findings.** The L2, L3, Internet Edge, Platform Health and Voice & QoS reports rate findings on one scale. Critical is a reachability, redundancy or security exposure backed by collected data (a BGP session down, overlapping subnets). Warning is something usually wrong that may be intentional (`permit ip any any` on an interface filter). Info is documentation grade (an unreferenced ACL, an EIGRP stub peer). When one check fires on more than half the devices, an Info note says so, since that is more often a miscalibrated check than a network-wide defect.
+**Findings.** The L2, L3, Internet Edge, Platform Health, Voice & QoS and Cisco ASA reports rate findings on one scale. Critical is a reachability, redundancy or security exposure backed by collected data (a BGP session down, overlapping subnets). Warning is something usually wrong that may be intentional (`permit ip any any` on an interface filter). Info is documentation grade (an unreferenced ACL, an EIGRP stub peer). When one check fires on more than half the devices, an Info note says so, since that is more often a miscalibrated check than a network-wide defect.
+
+**Cisco ASA.** ASAs and ASAv are logged into as `cisco_asa`: on the ASA driver, entering enable with the login password. Typing them `cisco_asa` in a host list saves a login, but an untyped one is recognised from show version and reopened on the right driver. Both units of a failover pair are kept: the standby unit appears as `<hostname>/stby`, and the Failover sheet shows the pair side by side. Every sheet starts with Hostname, Context and Site (from the Settings site rules). A value whose command was not collected reads `n/a`; a blank cell was collected and empty. The Summary lists each check with the assessment's own rating (High, Medium, Low, Info); in the shared findings scale High is Critical, Medium is Warning, and Low and Info are Info. Checks include telnet enabled, SSH or ASDM open from any or an outside interface, SSH on local accounts only, no command authorization or accounting, SNMP v1/v2c, no syslog host, no NTP sync, debug-level syslog, certificates expired or expiring within 90 days, CPU, memory and connection-table pressure, interface errors, unsaved configuration, a recent crash, an unset enable password, and failover problems (secondary active, version or licence mismatch, failover or stateful link down, a monitored interface failed). ACL, NAT, VPN and routing sheets follow; the scan already collects their commands.
 
 **Internet edge.** A device counts as edge when it has BGP to a public AS, a public address on an interface, NAT configured, or a static default pointing outside the IGP, and the Edge Devices sheet says which. The ACL audit classifies each ACL by what references it in the running config (interface filter, management, QoS, route-map, NAT, crypto, or unreferenced), so a QoS class-map ACL with zero hits is not reported as dead. A device with no NAT config reads "not configured" rather than 0 translations.
 
@@ -416,7 +420,7 @@ wiremap/
 │   ├── site_mapping.py       # Hostname-to-site rules
 │   ├── redact.py             # Config secret redaction
 │   ├── mock_devices.py       # Demo mode simulator (opt-in)
-│   ├── collectors/           # 20 modular data collectors
+│   ├── collectors/           # 22 modular data collectors
 │   ├── neighbors/            # Neighbour sources and crawl scope
 │   └── reports/              # On-demand report generators
 ├── config/

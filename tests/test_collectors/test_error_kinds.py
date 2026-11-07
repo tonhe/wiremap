@@ -38,6 +38,9 @@ AUTHZ = "Command authorization failed.\n"
     "Invalid command at '^' marker.",
     "Syntax error while parsing 'show ip vrf'",
     C2960X_VRF,
+    # ASA rejecting a command its platform lacks.
+    "show cluster info\n             ^\nERROR: % Invalid input detected at '^' marker.\n",
+    "ERROR: % Incomplete command",
     ROUTER_SWITCHPORT,
 ])
 def test_syntax_rejections_are_not_applicable(text):

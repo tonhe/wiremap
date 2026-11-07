@@ -35,6 +35,8 @@ try:
         local_source_ip, refused_hint, assess_source_access, access_warnings,
         learn_source_ip, summary_line, SOURCE_CONFIGURED, SOURCE_LOCAL_SOCKET)
     from app.scan_timing import collector_ms, summarize as summarize_timing
+    from app.asa_identity import (ASA_TYPE, ASA_PROBE, FAILOVER_PROBE, ROLE_STANDALONE,
+                              asa_hostname, is_asa, parse_unit, unit_key)
     from app import target_outcomes
 except ImportError:
     from connection_manager import (ConnectionManager, ConnectionError,
@@ -63,6 +65,8 @@ except ImportError:
         local_source_ip, refused_hint, assess_source_access, access_warnings,
         learn_source_ip, summary_line, SOURCE_CONFIGURED, SOURCE_LOCAL_SOCKET)
     from scan_timing import collector_ms, summarize as summarize_timing
+    from asa_identity import (ASA_TYPE, ASA_PROBE, FAILOVER_PROBE, ROLE_STANDALONE,
+                              asa_hostname, is_asa, parse_unit, unit_key)
     import target_outcomes
 try:
     from app.credentials import Credential, CredentialChain
@@ -95,6 +99,11 @@ def _neighbour_remote_port(neighbor):
     # Parsers name the far-end port remote_intf; remote_port is the older
     # spelling still accepted from hand-built records.
     return neighbor.get("remote_intf") or neighbor.get("remote_port")
+
+
+def _not_applicable(collector_name, device_type):
+    return {"not_applicable": True,
+            "reason": f"{collector_name} does not apply to {device_type}"}
 
 
 def _dedupe(commands):
@@ -678,9 +687,37 @@ class DiscoveryEngine:
                 "login_user": login_cred.username if login_cred else None,
                 "credential_set": login_cred.number if login_cred else None,
             })
+            # An untyped firewall logs in on the IOS driver without
+            # complaint; it is reopened on the ASA driver before anything
+            # else, including the hostname de-duplication below.
+            if (not device_type or device_type in CISCO_FAMILY_TYPES) and is_asa(
+                    ConnectionManager.run_commands(conn, [ASA_PROBE]).get(ASA_PROBE)):
+                logger.info("show version identifies cisco_asa; reconnecting")
+                conn.disconnect()
+                conn_mgr = ConnectionManager(
+                    host=ip, device_type=ASA_TYPE,
+                    username=self.username, password=None,
+                    credentials=[login_cred] if login_cred else self._credentials.ordered(),
+                    protocol=result.protocol_used, allow_fallback=False,
+                    platform=known.get("platform"),
+                    login_limiter=self._login_limiter,
+                    allow_telnet=self.allow_telnet,
+                    connect_timeout=self.connect_timeout,
+                )
+                result = conn_mgr.connect()
+                conn = result.connection
+                device_type = ASA_TYPE
             prompt_facts = ConnectionManager.get_prompt_facts(conn)
             hostname = prompt_facts["hostname"]
             ha_state = prompt_facts["ha_state"]
+            asa_unit = None
+            if device_type == ASA_TYPE:
+                # Both units of a pair answer to one hostname; the standby
+                # is kept as <hostname>/stby rather than skipped as a copy.
+                asa_unit = parse_unit(ConnectionManager.run_commands(
+                    conn, [FAILOVER_PROBE]).get(FAILOVER_PROBE))
+                hostname = unit_key(asa_hostname(hostname), asa_unit["role"])
+                ha_state = asa_unit["role"] if asa_unit["role"] != ROLE_STANDALONE else None
             if ha_state:
                 logger.info(f"Connected as {hostname} (HA {ha_state})")
             else:
@@ -739,6 +776,8 @@ class DiscoveryEngine:
                                              "serial": None}
             if ha_state:
                 inventory.set_ha_state(hostname, ha_state)
+            if asa_unit:
+                inventory.set_asa_unit(hostname, asa_hostname(hostname), asa_unit)
 
             self._maybe_learn_source_ip(
                 conn, conn_mgr.effective_device_type or device_type, ip,
@@ -799,6 +838,8 @@ class DiscoveryEngine:
             for cname, collector in batch_collectors.items():
                 if no_routing and collector.routing_only:
                     continue
+                if not collector.applies_to(device_type):
+                    continue
                 cmds = collector.get_commands(device_type)
                 collector_commands[cname] = cmds
                 for cmd in cmds:
@@ -832,6 +873,11 @@ class DiscoveryEngine:
 
             # Parse batch collectors
             for cname, collector in batch_collectors.items():
+                if not collector.applies_to(device_type):
+                    inventory.set_collector_data(
+                        hostname, cname, raw={},
+                        parsed=_not_applicable(cname, device_type))
+                    continue
                 if no_routing and collector.routing_only:
                     inventory.set_collector_data(
                         hostname, cname, raw={},
@@ -864,6 +910,11 @@ class DiscoveryEngine:
 
             # Run custom collectors (dynamic commands, post-processing)
             for cname, collector in custom_collectors.items():
+                if not collector.applies_to(device_type):
+                    inventory.set_collector_data(
+                        hostname, cname, raw={},
+                        parsed=_not_applicable(cname, device_type))
+                    continue
                 collector_started = time.monotonic()
                 try:
                     if collector.needs_device_context:
@@ -874,6 +925,7 @@ class DiscoveryEngine:
                                 or rec.get("model") or rec.get("platform") or ""),
                             "router": router_model,
                             "collector_data": rec.get("collector_data", {}),
+                            "asa_unit": rec.get("asa_unit"),
                         }
                         result = collector.collect(conn, device_type, context=context)
                     else:

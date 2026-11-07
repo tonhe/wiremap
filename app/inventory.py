@@ -473,6 +473,15 @@ class DiscoveryInventory:
             if dev is not None:
                 dev["ha_state"] = ha_state
 
+    def set_asa_unit(self, hostname, base_hostname, unit):
+        """Record an ASA unit's place in its failover pair. The standby unit
+        is stored under <hostname>/stby; base_hostname is the name both
+        units share."""
+        with self._lock:
+            dev = self._data["devices"].get(hostname)
+            if dev is not None:
+                dev["asa_unit"] = {"hostname": base_hostname, **unit}
+
     def set_chassis_id(self, hostname, chassis_id):
         with self._lock:
             dev = self._data["devices"].get(hostname)

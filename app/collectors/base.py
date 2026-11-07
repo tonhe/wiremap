@@ -13,6 +13,10 @@ except ImportError:
         error_reason, error_kind, send_failure_output, NOT_APPLICABLE, FAILED)
 
 
+ASA_TYPE = "cisco_asa"
+DEDICATED_PLATFORMS = frozenset({ASA_TYPE})
+
+
 def command_error_kinds(parsed):
     """Map each rejected command to not_applicable, unauthorized or failed.
 
@@ -103,6 +107,18 @@ class BaseCollector(ABC):
     # Cisco commands at them produces nothing but rejected-command noise.
     unsupported_platforms = frozenset()
 
+    # ASA and ASAv speak a command set of their own, so only collectors
+    # written for them run there; every other collector would send IOS
+    # commands and fill Collection Errors with rejections.
+    serves_asa = False
+
+    def applies_to(self, device_type):
+        if device_type in self.unsupported_platforms:
+            return False
+        if device_type in DEDICATED_PLATFORMS and not self.serves_asa:
+            return False
+        return True
+
     # Layer-2 switching collectors. An ASR or ISR is cisco_xe exactly like a
     # Catalyst, so platform gating cannot keep switchport/VLAN/STP commands
     # off routers; the engine skips these once it knows the box is a router.
@@ -165,7 +181,7 @@ class BaseCollector(ABC):
         manipulation. The discovery engine calls this instead of the
         batch path when needs_custom_collect is True.
         """
-        if device_type in self.unsupported_platforms:
+        if not self.applies_to(device_type):
             return {"raw": {}, "parsed": {"not_applicable": True,
                                           "reason": f"{self.name} does not apply to {device_type}"}}
 

@@ -223,8 +223,22 @@ def _secret_spans(line):
     return spans
 
 
+_MASKED = re.compile(r"\*+")
+# Older ASA code prints an unset enable password as this fixed encrypted form
+# of the empty string. It is public knowledge, and keeping it lets the ASA
+# report flag an enable password that was never set.
+_ASA_BLANK_ENABLE = "8Ry2YjIyt7RRXU24"
+
+
+def _not_secret(token):
+    return bool(_MASKED.fullmatch(token)) or token == _ASA_BLANK_ENABLE
+
+
 def _merged_spans(line):
-    spans = sorted(s for s in _secret_spans(line) if s[1] > s[0])
+    # ASA show running-config already prints most secrets as *****; that is
+    # not a secret and stays as the device printed it.
+    spans = sorted(s for s in _secret_spans(line)
+                   if s[1] > s[0] and not _not_secret(line[s[0]:s[1]]))
     merged = []
     for start, end in spans:
         if merged and start < merged[-1][1]:

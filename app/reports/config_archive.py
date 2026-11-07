@@ -11,6 +11,7 @@ added since) are caught. Leftovers are redacted and counted in SUMMARY.txt
 rather than failing the export.
 """
 import io
+import re
 import zipfile
 
 from .base import BaseReport
@@ -21,6 +22,8 @@ except ImportError:
     from redact import redact_config_counted
 
 SUMMARY_NAME = "SUMMARY.txt"
+ASA_RUNNING_CONFIG = "show running-config"
+_ASA_CONTEXT_CONFIG = re.compile(r"^context (\S+): show running-config$")
 
 
 class ConfigArchiveReport(BaseReport):
@@ -31,6 +34,10 @@ class ConfigArchiveReport(BaseReport):
     required_collectors = ["config"]
     supported_formats = ["zip"]
 
+    def can_generate(self, inventory_data):
+        return any(_device_configs(device)
+                   for device in (inventory_data.get("devices") or {}).values())
+
     def generate(self, inventory_data: dict, fmt: str = "zip") -> bytes:
         redacted_hosts = []
         clear_hosts = []
@@ -38,23 +45,47 @@ class ConfigArchiveReport(BaseReport):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for hostname, device in sorted(inventory_data.get("devices", {}).items()):
-                config_data = device.get("collector_data", {}).get("config", {})
-                parsed = config_data.get("parsed", {})
-                config_text = parsed.get("config", "")
-                if not config_text:
-                    continue
-                if parsed.get("redacted") is False:
-                    clear_hosts.append(hostname)
-                else:
-                    config_text, count = redact_config_counted(config_text)
-                    redacted_hosts.append(hostname)
-                    if count and parsed.get("redacted") is True:
-                        leftovers[hostname] = count
-                zf.writestr(f"{hostname}.txt", config_text)
+                for name, config_text, redacted in _device_configs(device, hostname):
+                    if redacted is False:
+                        clear_hosts.append(name)
+                    else:
+                        config_text, count = redact_config_counted(config_text)
+                        redacted_hosts.append(name)
+                        if count and redacted is True:
+                            leftovers[name] = count
+                    zf.writestr(f"{name}.txt", config_text)
             if redacted_hosts or clear_hosts:
                 zf.writestr(SUMMARY_NAME, _summary_text(redacted_hosts, clear_hosts,
                                                         leftovers))
         return buf.getvalue()
+
+
+def _file_name(text):
+    # An ASA standby unit is keyed <hostname>/stby; a slash would make a
+    # folder in the zip.
+    return re.sub(r"[/\\:]+", "_", text)
+
+
+def _device_configs(device, hostname=""):
+    """[(file name, config text, redacted flag)] for one device: its
+    running-config, and on a multiple-context ASA one file per context.
+
+    An ASA's running-config is also kept by the asa collector, so a scan
+    without the opt-in config collector still archives firewall configs.
+    """
+    cd = device.get("collector_data", {})
+    parsed = (cd.get("config") or {}).get("parsed") or {}
+    out = []
+    if parsed.get("config"):
+        out.append((_file_name(hostname), parsed["config"], parsed.get("redacted")))
+    asa_raw = (cd.get("asa") or {}).get("raw") or {}
+    if not out and asa_raw.get(ASA_RUNNING_CONFIG):
+        out.append((_file_name(hostname), asa_raw[ASA_RUNNING_CONFIG], None))
+    for key, text in sorted(asa_raw.items()):
+        m = _ASA_CONTEXT_CONFIG.match(key)
+        if m and text:
+            out.append((_file_name(f"{hostname}_{m.group(1)}"), text, None))
+    return out
 
 
 def _summary_text(redacted_hosts, clear_hosts, leftovers=None):

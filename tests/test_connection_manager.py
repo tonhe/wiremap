@@ -11,6 +11,15 @@ def test_build_device_params_ssh():
     assert params["password"] == "pass123"
 
 
+def test_build_device_params_asa_enables_with_login_password():
+    cm = ConnectionManager("192.0.2.1", "cisco_asa", "admin", "pass123")
+    params = cm._build_device_params()
+    assert params["device_type"] == "cisco_asa"
+    assert params["secret"] == "pass123"
+    ios = ConnectionManager("192.0.2.1", "cisco_ios", "admin", "pass123")
+    assert "secret" not in ios._build_device_params()
+
+
 def test_build_device_params_telnet():
     cm = ConnectionManager("192.168.1.1", "cisco_ios", "admin", "pass123",
                            protocol="telnet")

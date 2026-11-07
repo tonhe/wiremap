@@ -93,7 +93,7 @@ def classify_snmp_error(error_indication=None, error_status=None):
 # detection keys off it. Ordered -- NX-OS also says "Cisco".
 _PLATFORM_PATTERNS = [
     (re.compile(r"NX-OS", re.I), "cisco_nxos"),
-    (re.compile(r"Adaptive Security Appliance|ASA", re.I), "cisco_ios"),
+    (re.compile(r"Adaptive Security Appliance|\bASAv?\b", re.I), "cisco_asa"),
     (re.compile(r"IOS[- ]XE", re.I), "cisco_xe"),
     (re.compile(r"IOS[- ]XR", re.I), "cisco_xr"),
     (re.compile(r"Cisco Controller|AireOS", re.I), "cisco_wlc"),

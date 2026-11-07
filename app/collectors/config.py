@@ -20,6 +20,7 @@ _COMMANDS = {
     "cisco_ios": "show running-config",
     "cisco_xe": "show running-config",
     "cisco_nxos": "show running-config",
+    "cisco_asa": "show running-config",
     "arista_eos": "show running-config",
     "juniper_junos": "show configuration",
     "extreme": "show configuration",
@@ -40,6 +41,7 @@ class ConfigCollector(BaseCollector):
     # Custom collect so the raw output is redacted too; the batch path
     # stores raw output exactly as the device returned it.
     needs_custom_collect = True
+    serves_asa = True
 
     def get_commands(self, device_type: str) -> list[str]:
         return [_COMMANDS.get(device_type, _DEFAULT_COMMAND)]

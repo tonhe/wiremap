@@ -14,15 +14,18 @@ from app.collectors import get_registry
 with patch("logging.FileHandler"):
     from app.app import DEVICE_TYPES
 
+# Commands that are genuinely the same as the Cisco IOS ones on that platform.
+SAME_AS_IOS = {("cisco_asa", "config"), ("cisco_asa", "device_inventory")}
+
 NEW_PLATFORMS = ["vyos", "cisco_wlc", "watchguard_fireware",
-                 "paloalto_panos"]
+                 "paloalto_panos", "cisco_asa"]
 
 
 @pytest.mark.parametrize("platform", NEW_PLATFORMS)
 def test_platform_is_handled_by_every_collector(platform):
     unhandled = []
     for name, collector in get_registry().items():
-        if platform in collector.unsupported_platforms:
+        if not collector.applies_to(platform):
             continue
         cmds = collector.get_commands(platform)
         if not cmds:
@@ -30,7 +33,8 @@ def test_platform_is_handled_by_every_collector(platform):
         # A collector that returns the Cisco defaults for this platform has
         # not actually been taught it.
         cisco = collector.get_commands("cisco_ios")
-        if cmds == cisco and platform not in ("cisco_wlc",):
+        if (cmds == cisco and platform not in ("cisco_wlc",)
+                and (platform, name) not in SAME_AS_IOS):
             unhandled.append(f"{name}: falls through to cisco_ios commands")
     assert not unhandled, "\n".join(unhandled)
 
@@ -40,7 +44,7 @@ def test_platform_has_at_least_one_working_collector(platform):
     """A platform nothing can collect from is not supported, just listed."""
     usable = [
         name for name, c in get_registry().items()
-        if platform not in c.unsupported_platforms and c.get_commands(platform)
+        if c.applies_to(platform) and c.get_commands(platform)
     ]
     assert len(usable) >= 3, f"{platform} only usable by {usable}"
 
@@ -83,11 +87,11 @@ def test_no_collector_sends_ios_commands_to_a_non_ios_platform(platform):
     # with no entry at all, which silently inherits _DEFAULT_COMMANDS.
     offenders = []
     for name, collector in get_registry().items():
-        if platform in collector.unsupported_platforms:
+        if not collector.applies_to(platform):
             continue
         cmds = collector.get_commands(platform)
         fallthrough = collector.get_commands("nonexistent_platform_xyz")
-        if cmds and cmds == fallthrough:
+        if cmds and cmds == fallthrough and (platform, name) not in SAME_AS_IOS:
             offenders.append(f"{name}: no entry, inherits {sorted(set(cmds))}")
     assert not offenders, (
         f"{platform} is offered in the UI but these collectors have no command "

@@ -233,7 +233,7 @@ class VrfCollector(BaseCollector):
 
     def collect(self, connection, device_type: str) -> dict:
         """Two-phase collection: get VRF list, then per-VRF routes/ARP."""
-        if device_type in self.unsupported_platforms:
+        if not self.applies_to(device_type):
             return {"raw": {}, "parsed": {"not_applicable": True,
                                           "reason": f"{self.name} does not apply to {device_type}"}}
 

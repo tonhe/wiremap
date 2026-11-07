@@ -252,7 +252,7 @@ class ConnectionManager:
         if self.protocol == "telnet" and not dt.endswith(_TELNET_SUFFIX):
             dt = dt + _TELNET_SUFFIX
         cred = credential or self.credentials[0]
-        return {
+        params = {
             "device_type": dt,
             "host": self.host,
             "username": cred.username,
@@ -264,6 +264,11 @@ class ConnectionManager:
             "fast_cli": True,
             "global_delay_factor": 1,
         }
+        # An ASA lands in user exec. Credential sets carry no enable secret,
+        # and ASAs that take enable from AAA accept the login password.
+        if dt.startswith("cisco_asa"):
+            params["secret"] = cred.password
+        return params
 
     def _get_fallback_types(self, device_type: str) -> list[str]:
         """Return fallback device types to try if primary fails."""
