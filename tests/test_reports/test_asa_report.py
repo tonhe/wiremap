@@ -10,6 +10,7 @@ from app.collectors.asa import AsaCollector
 from app.reports import get_registry
 from app.reports.asa import AsaReport, analyze, build_tabular
 from tests.test_collectors import asa_fixtures as fx
+from tests.test_collectors import asa_policy_fixtures as pfx
 
 
 @pytest.fixture(autouse=True)
@@ -37,6 +38,10 @@ def _inventory():
                  "show startup-config | include Cryptochecksum": fx.STARTUP_SAME,
                  "show running-config": "hostname LAB-VFW-01\nenable password 8Ry2YjIyt7RRXU24 encrypted\n",
                  "show crashinfo | include Saved|Traceback|Thread Name|ERROR": ""})
+    policy = fx.single_mode_outputs()
+    policy.update({"show running-config": pfx.POLICY_CONFIG,
+                   "show access-list": pfx.SHOW_ACCESS_LIST,
+                   "show nat detail": pfx.NAT_DETAIL})
     multi = fx.single_mode_outputs()
     multi.update({"show mode": fx.MODE_MULTIPLE, "show context": fx.CONTEXTS})
     contexts = {"admin": {"show running-config": "hostname admin\n"},
@@ -49,6 +54,7 @@ def _inventory():
                               timeout=["show route"]),
         "LAB-CTX-01": _device(multi, "standalone", "LAB-CTX-01", contexts=contexts,
                               ip="192.0.2.13"),
+        "LAB-PFW-01": _device(policy, "standalone", "LAB-PFW-01", ip="192.0.2.14"),
         "LAB-SW-01": {"hostname": "LAB-SW-01", "collector_data": {}},
     }, "params": {}}
 
@@ -81,7 +87,8 @@ def test_registered_and_generates_only_with_asa_data(inv):
 
 
 def test_sheet_order_and_lead_columns(sheets):
-    assert list(sheets) == ["Summary", "Devices", "Failover", "Interfaces", "Certificates",
+    assert list(sheets) == ["Summary", "Devices", "Failover", "Interfaces", "Access Lists",
+                            "ACL Lines", "Objects", "NAT", "Certificates",
                             "Management Plane", "Health and Capacity",
                             "Changes and Hygiene", "Collection Errors"]
     for name, (headers, _) in sheets.items():
@@ -208,8 +215,8 @@ def test_summary_and_hygiene(sheets):
     order = {"High": 0, "Medium": 1, "Low": 2, "Info": 3}
     assert ratings == sorted(ratings, key=order.get)
     totals = {r["Check"]: r["Devices Affected"] for r in summary if not r["Severity"]}
-    assert totals["Total units"] == 4 and totals["Total devices"] == 3
-    assert totals["Total contexts"] == 2 and totals["NAT rules"] == 4
+    assert totals["Total units"] == 5 and totals["Total devices"] == 4
+    assert totals["Total contexts"] == 2 and totals["NAT rules"] == 8
     hygiene = _rows(sheets, "Changes and Hygiene")
     tel = next(r for r in hygiene if r["Check"] == "Telnet enabled"
                and r["Context"] == "lab-ctx-a")
@@ -233,3 +240,68 @@ def test_xlsx_opens_with_every_sheet(inv):
     wb = load_workbook(io.BytesIO(AsaReport().generate(inv, "xlsx")))
     assert wb.sheetnames[0] == "Summary" and "Health and Capacity" in wb.sheetnames
     assert wb["Devices"].freeze_panes == "A2"
+
+
+def _pfw(sheets, name):
+    return [r for r in _rows(sheets, name) if r["Hostname"] == "LAB-PFW-01"]
+
+
+def test_access_list_summary(sheets):
+    acls = {r["ACL Name"]: r for r in _pfw(sheets, "Access Lists")}
+    out = acls["LAB-OUTSIDE-IN"]
+    assert out["Bound To"] == "outside in" and out["Lines (Config)"] == 7
+    assert out["Elements (Expanded)"] == 9
+    assert (out["Permit Lines"], out["Deny Lines"]) == (5, 1)
+    assert out["Zero-hit Lines"] == 3 and out["Any-any Permit Lines"] == 1
+    assert out["Remarks"] == 1 and out["Log Lines"] == 1 and out["Inactive Lines"] == 1
+    assert out["Shadow Check"] == "done"
+    assert acls["LAB-ORPHAN"]["Bound To"] == "unbound"
+    assert acls["LAB-ORPHAN"]["Elements (Expanded)"] == "n/a"
+
+
+def test_acl_lines(sheets):
+    lines = {(r["ACL Name"], r["Line"]): r for r in _pfw(sheets, "ACL Lines")}
+    first = lines[("LAB-OUTSIDE-IN", 2)]
+    assert first["Destination Expanded"] == "10.1.0.10/32; 10.1.0.11/32; 10.3.0.0/16"
+    assert first["Ports Expanded"] == "tcp 80; tcp 443"
+    assert first["Hit Count"] == 12 and first["Hash"] == "0x11111111"
+    assert first["Remark Above"] == "allow the web servers"
+    assert lines[("LAB-OUTSIDE-IN", 3)]["Flags"] == "redundant by line 2, zero hits"
+    assert lines[("LAB-OUTSIDE-IN", 4)]["Flags"] == "shadowed by line 2, zero hits"
+    assert lines[("LAB-OUTSIDE-IN", 5)]["Flags"] == "any-port, zero hits"
+    assert lines[("LAB-OUTSIDE-IN", 6)]["Flags"] == "any-any"
+    assert lines[("LAB-OUTSIDE-IN", 7)]["Time-range / Inactive"] == "LAB-HOURS inactive"
+    assert lines[("LAB-ORPHAN", 1)]["Hit Count"] == "n/a"
+
+
+def test_objects_and_nat(sheets):
+    objs = {r["Name"]: r for r in _pfw(sheets, "Objects")}
+    assert objs["LAB-UNUSED"]["Unused"] == "Yes"
+    assert objs["LAB-WEB-COPY"]["Duplicate Of"] == "LAB-WEB"
+    assert objs["LAB-SERVERS"]["Referenced By"] == "ACL LAB-OUTSIDE-IN"
+    assert objs["LAB-WEB-PORTS"]["Expanded Prefixes or Ports"] == "tcp 80; tcp 443"
+    nat = {(r["Section"], r["Rule"]): r for r in _pfw(sheets, "NAT")}
+    static = nat[(2, 1)]
+    assert static["Type"] == "static" and static["Public IP Exposed"] == "Yes"
+    assert static["Zero Hits"] == "Yes"
+    assert static["Real Source"] == "LAB-DMZ-WEB (10.1.0.20/32)"
+    assert nat[(1, 1)]["Flags"] == "no-proxy-arp, route-lookup"
+
+
+def test_policy_checks(inv):
+    found = {(f["check"], f["rating"]): f for f in analyze(inv)["findings"]
+             if f["hostname"] == "LAB-PFW-01"}
+    anyany = found[("Any-any permit inbound on a lower-security interface", "High")]
+    assert anyany["object"] == "LAB-OUTSIDE-IN line 6"
+    assert anyany["config_lines"] == ["access-list LAB-OUTSIDE-IN extended permit ip any any"]
+    assert ("Any-port permit to internal subnets", "Medium") in found
+    zero = found[("Rules with zero hits", "Low")]
+    assert "3 of 5 lines" in zero["description"] and "120 days" in zero["description"]
+    shadow = found[("Shadowed or redundant ACL lines", "Low")]
+    assert "1 shadowed (lines 4); 1 redundant (lines 3)" in shadow["description"]
+    assert ("Unused objects / object-groups", "Info") in found
+    nat = found[("Static NAT exposing internal hosts publicly with zero hits", "Medium")]
+    assert "203.0.113.20/32" in nat["description"]
+    # The inside ACL faces the highest-security interface: not inbound from lower.
+    assert not any("LAB-INSIDE-IN" in f["object"] for f in found.values()
+                   if f["check"].startswith("Any"))

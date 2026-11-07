@@ -14,19 +14,20 @@ from datetime import datetime, timezone
 from .base import BaseReport
 from .findings import format_device_list
 from . import asa_checks as checks
+from . import asa_policy as policy
 
 try:
     from app.asa_identity import base_hostname
     from app.collectors.asa import RUNNING_CONFIG, split_raw
     from app.collectors.base import command_error_kinds
-    from app.collectors.errors import NOT_APPLICABLE
+    from app.collectors.errors import NOT_APPLICABLE, error_reason
     from app.collectors.asa_parsers import mask_to_prefix
     from app.site_mapping import derive_site
 except ImportError:
     from asa_identity import base_hostname
     from collectors.asa import RUNNING_CONFIG, split_raw
     from collectors.base import command_error_kinds
-    from collectors.errors import NOT_APPLICABLE
+    from collectors.errors import NOT_APPLICABLE, error_reason
     from collectors.asa_parsers import mask_to_prefix
     from site_mapping import derive_site
 
@@ -79,9 +80,15 @@ class Unit:
     def is_standby(self):
         return self.role == "standby"
 
-    def config_for(self, context):
+    def outputs_for(self, context):
+        """{command: output} for a context (the unit in single mode), with
+        rejected commands blanked so their error text is never parsed."""
         outputs = self._ctx_raw.get(context, {}) if context else self._unit_raw
-        return outputs.get(RUNNING_CONFIG) or ""
+        return {cmd: "" if error_reason(text or "") else (text or "")
+                for cmd, text in outputs.items()}
+
+    def config_for(self, context):
+        return self.outputs_for(context).get(RUNNING_CONFIG) or ""
 
     def lead(self, context=""):
         return [self.hostname, context, self.site]
@@ -490,6 +497,8 @@ def _summary_rows(findings, unit_list):
             ("Total contexts", sum(1 for u in unit_list if u.multiple for _ in u.contexts)),
             ("Total interfaces", sum(len(c.get("interfaces") or []) for u in unit_list
                                      if not u.is_standby for _, c in u.contexts)),
+            ("ACL lines (configured)", policy.totals([u for u in unit_list
+                                                      if not u.is_standby])),
             ("ACL elements", total("acl_elements")), ("NAT rules", total("nat_rules")),
             ("S2S tunnels configured", total("s2s_configured")),
             ("S2S tunnels up", total("s2s_up")),
@@ -530,6 +539,7 @@ def analyze(inventory_data):
     findings = []
     for u in unit_list:
         findings += checks.unit_findings(u)
+        findings += policy.findings(u)
     for pair in pairs(unit_list).values():
         findings += checks.pair_findings(pair)
     return {"units": unit_list, "findings": findings}
@@ -546,6 +556,10 @@ def build_tabular(inventory_data, analysis=None):
     sheets["Failover"] = (FAILOVER_HEADERS,
                           [_failover_row(h, p) for h, p in pairs(unit_list).items()])
     sheets["Interfaces"] = (INTERFACE_HEADERS, [r for u in active for r in _interface_rows(u)])
+    sheets["Access Lists"] = (policy.ACL_HEADERS, [r for u in active for r in policy.acl_rows(u)])
+    sheets["ACL Lines"] = (policy.LINE_HEADERS, [r for u in active for r in policy.line_rows(u)])
+    sheets["Objects"] = (policy.OBJECT_HEADERS, [r for u in active for r in policy.object_rows(u)])
+    sheets["NAT"] = (policy.NAT_HEADERS, [r for u in active for r in policy.nat_rows(u)])
     sheets["Certificates"] = (CERT_HEADERS, [r for u in active for r in _cert_rows(u)])
     sheets["Management Plane"] = (MGMT_HEADERS, [r for u in active for r in _mgmt_rows(u)])
     sheets["Health and Capacity"] = (HEALTH_HEADERS, [_health_row(u) for u in unit_list])
