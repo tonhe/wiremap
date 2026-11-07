@@ -15,6 +15,7 @@ from .base import BaseReport
 from .findings import format_device_list
 from . import asa_checks as checks
 from . import asa_policy as policy
+from . import asa_network as network
 
 try:
     from app.asa_identity import base_hostname
@@ -536,13 +537,16 @@ def _error_rows(unit_list):
 
 def analyze(inventory_data):
     unit_list = units(inventory_data)
+    hw, sw = network.eox_records(inventory_data) if unit_list else ({}, {})
+    life = network.lifecycle(unit_list, hw, sw)
     findings = []
     for u in unit_list:
         findings += checks.unit_findings(u)
         findings += policy.findings(u)
+        findings += network.findings(u, life)
     for pair in pairs(unit_list).values():
         findings += checks.pair_findings(pair)
-    return {"units": unit_list, "findings": findings}
+    return {"units": unit_list, "findings": findings, "lifecycle": life}
 
 
 def build_tabular(inventory_data, analysis=None):
@@ -553,18 +557,39 @@ def build_tabular(inventory_data, analysis=None):
     sheets = OrderedDict()
     sheets["Summary"] = (SUMMARY_HEADERS, _summary_rows(findings, unit_list))
     sheets["Devices"] = (DEVICE_HEADERS, [r for u in unit_list for r in _device_rows(u)])
+    today = max((u.collected_at for u in unit_list), default=None)
+    sheets["Lifecycle"] = (network.LIFECYCLE_HEADERS, network.lifecycle_rows(
+        unit_list, analysis.get("lifecycle") or network.lifecycle(unit_list, {}, {}),
+        today.date() if today else None))
     sheets["Failover"] = (FAILOVER_HEADERS,
                           [_failover_row(h, p) for h, p in pairs(unit_list).items()])
     sheets["Interfaces"] = (INTERFACE_HEADERS, [r for u in active for r in _interface_rows(u)])
+    sheets["Zones and Reachability"] = (network.ZONE_HEADERS,
+                                        [r for u in active for r in network.zone_rows(u)])
+    sheets["Routes Summary"] = (network.ROUTE_SUMMARY_HEADERS,
+                                [r for u in active for r in network.route_summary_rows(u)])
+    sheets["Static Routes"] = (network.STATIC_HEADERS,
+                               [r for u in active for r in network.static_rows(u)])
+    sheets["Routing Neighbours"] = (network.NEIGHBOR_HEADERS,
+                                    [r for u in active for r in network.neighbour_rows(u)])
     sheets["Access Lists"] = (policy.ACL_HEADERS, [r for u in active for r in policy.acl_rows(u)])
     sheets["ACL Lines"] = (policy.LINE_HEADERS, [r for u in active for r in policy.line_rows(u)])
     sheets["Objects"] = (policy.OBJECT_HEADERS, [r for u in active for r in policy.object_rows(u)])
     sheets["NAT"] = (policy.NAT_HEADERS, [r for u in active for r in policy.nat_rows(u)])
+    sheets["Site-to-site VPN"] = (network.S2S_HEADERS,
+                                  [r for u in active for r in network.s2s_rows(u)])
+    certs = network.certificate_expiry(active)
+    sheets["Remote Access VPN"] = (network.RA_HEADERS,
+                                   [r for u in active for r in network.ra_rows(u, certs)])
+    sheets["VPN Sessions"] = (network.SESSION_HEADERS,
+                              [r for u in active for r in network.session_rows(u)])
     sheets["Certificates"] = (CERT_HEADERS, [r for u in active for r in _cert_rows(u)])
     sheets["Management Plane"] = (MGMT_HEADERS, [r for u in active for r in _mgmt_rows(u)])
     sheets["Health and Capacity"] = (HEALTH_HEADERS, [_health_row(u) for u in unit_list])
     sheets["Changes and Hygiene"] = (HYGIENE_HEADERS, _hygiene_rows(
         findings, {u.key: u for u in unit_list}))
+    sheets["Relationships"] = (network.RELATION_HEADERS, network.relationship_rows(
+        unit_list, inventory_data, pairs(unit_list)))
     errors = _error_rows(unit_list)
     if errors:
         sheets["Collection Errors"] = (ERROR_HEADERS, errors)

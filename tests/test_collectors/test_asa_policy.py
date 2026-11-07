@@ -132,3 +132,11 @@ def test_formatting_and_privacy():
     assert pol.format_services([("tcp", (0, 65535), (443, 443)), ("ip", (0, 65535),
                                                                   (0, 65535))]) == "tcp 443; ip"
     assert pol.is_private("10.1.0.0/16") and not pol.is_private("203.0.113.0/24")
+
+
+def test_nat_from_config_when_detail_is_missing():
+    rules = pol.parse_nat_config(
+        POLICY_CONFIG + "nat (any,outside) after-auto source dynamic any interface\n")
+    assert [(r["section"], r["rule"], r["type"]) for r in rules] == [
+        (1, 1, "twice NAT"), (3, 1, "PAT")]
+    assert rules[0]["real_dst"] == "LAB-RANGE" and rules[0]["translate_hits"] is None

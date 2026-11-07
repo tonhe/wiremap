@@ -641,3 +641,38 @@ def _any_public(text):
 
 def rule_names(rule):
     return {rule[k] for k in ("real_src", "mapped_src", "real_dst", "mapped_dst") if rule[k]}
+
+
+_NAT_CONFIG = re.compile(r"^nat \((\S+),(\S+)\) (?:(after-auto) )?source (static|dynamic) (\S+) "
+                         r"(\S+)(.*)$")
+
+
+def parse_nat_config(config):
+    """Manual NAT rules from running-config, in the same shape as
+    parse_nat_detail but without hits or resolved values. Used when show nat
+    detail was not collected."""
+    rules = []
+    counters = {1: 0, 3: 0}
+    for line in (config or "").splitlines():
+        m = _NAT_CONFIG.match(line)
+        if not m:
+            continue
+        section = 3 if m.group(3) else 1
+        counters[section] += 1
+        rest = m.group(7)
+        dest = re.search(r"destination (static|dynamic) (\S+) (\S+)", rest)
+        svc = re.search(r"service (\S+) (\S+) (\S+)", rest)
+        rule = {"section": section, "rule": counters[section], "real_if": m.group(1),
+                "mapped_if": m.group(2), "kind": m.group(4), "real_src": m.group(5),
+                "mapped_src": m.group(6), "real_dst": dest.group(2) if dest else "",
+                "mapped_dst": dest.group(3) if dest else "",
+                "service": " ".join(svc.groups()) if svc else "",
+                "flags": [f for f in ("no-proxy-arp", "route-lookup", "unidirectional",
+                                      "inactive") if re.search(rf"\b{f}\b", rest)],
+                "pat_pool": "pat-pool" in line, "translate_hits": None,
+                "untranslate_hits": None, "src_origin": "", "src_translated": "",
+                "dst_origin": "", "dst_translated": "", "text": line.strip()}
+        rule["type"] = nat_type(rule)
+        rule["public"] = None
+        rules.append(rule)
+    return rules

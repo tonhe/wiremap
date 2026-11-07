@@ -11,12 +11,20 @@ from app.reports import get_registry
 from app.reports.asa import AsaReport, analyze, build_tabular
 from tests.test_collectors import asa_fixtures as fx
 from tests.test_collectors import asa_policy_fixtures as pfx
+from tests.test_collectors import asa_net_fixtures as nfx
+
+HW_EOX = {"FPR-2130": {"end_of_sale": "2025-01-01", "end_of_sw_maintenance": "2026-01-01",
+                      "last_date_of_support": "2030-01-31", "bulletin_number": "EOL-LAB",
+                      "bulletin_url": "https://example.invalid/eol"}}
+SW_EOX = {"9.16(4)|ASA": {"end_of_sale": "2024-01-01", "last_date_of_support": "2026-06-30"}}
 
 
 @pytest.fixture(autouse=True)
 def _settings(monkeypatch):
     import app.collectors.asa as mod
+    import app.reports.asa_network as net
     monkeypatch.setattr(mod, "redact_secrets_enabled", lambda: True)
+    monkeypatch.setattr(net, "eox_records", lambda inv: (HW_EOX, SW_EOX))
 
 
 def _device(outputs, role, hostname, contexts=None, ip="192.0.2.10", timeout=()):
@@ -34,7 +42,7 @@ def _inventory():
         "Other host: Secondary - Standby Ready", "Other host: Primary - Active").replace(
         "Failover unit Primary", "Failover unit Secondary"))
     asav = fx.single_mode_outputs()
-    asav.update({"show version": fx.VERSION_ASAV, "show ntp status": fx.NTP_UNSYNCED,
+    asav.update({"show version": fx.VERSION_ASAV, "show inventory": "", "show ntp status": fx.NTP_UNSYNCED,
                  "show startup-config | include Cryptochecksum": fx.STARTUP_SAME,
                  "show running-config": "hostname LAB-VFW-01\nenable password 8Ry2YjIyt7RRXU24 encrypted\n",
                  "show crashinfo | include Saved|Traceback|Thread Name|ERROR": ""})
@@ -42,6 +50,15 @@ def _inventory():
     policy.update({"show running-config": pfx.POLICY_CONFIG,
                    "show access-list": pfx.SHOW_ACCESS_LIST,
                    "show nat detail": pfx.NAT_DETAIL})
+    net = fx.single_mode_outputs()
+    net.update({"show running-config": nfx.VPN_CONFIG, "show route": nfx.SHOW_ROUTE,
+                "show route summary": nfx.ROUTE_SUMMARY, "show ospf neighbor": nfx.OSPF_NEIGHBOR,
+                "show ospf interface brief": nfx.OSPF_INTERFACE_BRIEF,
+                "show bgp summary": nfx.BGP_SUMMARY, "show bgp neighbors": nfx.BGP_NEIGHBORS,
+                "show track": nfx.SHOW_TRACK, "show vpn-sessiondb detail l2l": nfx.L2L_DETAIL,
+                "show vpn-sessiondb anyconnect": nfx.ANYCONNECT,
+                "show ip local pool": nfx.IP_LOCAL_POOL,
+                "show nat detail": "", "show interface": ""})
     multi = fx.single_mode_outputs()
     multi.update({"show mode": fx.MODE_MULTIPLE, "show context": fx.CONTEXTS})
     contexts = {"admin": {"show running-config": "hostname admin\n"},
@@ -55,6 +72,10 @@ def _inventory():
         "LAB-CTX-01": _device(multi, "standalone", "LAB-CTX-01", contexts=contexts,
                               ip="192.0.2.13"),
         "LAB-PFW-01": _device(policy, "standalone", "LAB-PFW-01", ip="192.0.2.14"),
+        "LAB-NFW-01": _device(net, "standalone", "LAB-NFW-01", ip="192.0.2.15"),
+        "LAB-RTR-01": {"hostname": "LAB-RTR-01", "collector_data": {"interfaces": {
+            "parsed": {"ip_interfaces": [{"interface": "Gi0/0",
+                                            "ip_address": "10.0.0.2"}]}}}},
         "LAB-SW-01": {"hostname": "LAB-SW-01", "collector_data": {}},
     }, "params": {}}
 
@@ -77,7 +98,13 @@ def inv():
 
 @pytest.fixture(scope="module")
 def sheets(inv):
-    return build_tabular(inv)
+    import app.reports.asa_network as net
+    original = net.eox_records
+    net.eox_records = lambda data: (HW_EOX, SW_EOX)
+    try:
+        return build_tabular(inv)
+    finally:
+        net.eox_records = original
 
 
 def test_registered_and_generates_only_with_asa_data(inv):
@@ -87,10 +114,12 @@ def test_registered_and_generates_only_with_asa_data(inv):
 
 
 def test_sheet_order_and_lead_columns(sheets):
-    assert list(sheets) == ["Summary", "Devices", "Failover", "Interfaces", "Access Lists",
-                            "ACL Lines", "Objects", "NAT", "Certificates",
-                            "Management Plane", "Health and Capacity",
-                            "Changes and Hygiene", "Collection Errors"]
+    assert list(sheets) == [
+        "Summary", "Devices", "Lifecycle", "Failover", "Interfaces",
+        "Zones and Reachability", "Routes Summary", "Static Routes", "Routing Neighbours",
+        "Access Lists", "ACL Lines", "Objects", "NAT", "Site-to-site VPN",
+        "Remote Access VPN", "VPN Sessions", "Certificates", "Management Plane",
+        "Health and Capacity", "Changes and Hygiene", "Relationships", "Collection Errors"]
     for name, (headers, _) in sheets.items():
         if name != "Summary":
             assert headers[:3] == ["Hostname", "Context", "Site"], name
@@ -215,7 +244,7 @@ def test_summary_and_hygiene(sheets):
     order = {"High": 0, "Medium": 1, "Low": 2, "Info": 3}
     assert ratings == sorted(ratings, key=order.get)
     totals = {r["Check"]: r["Devices Affected"] for r in summary if not r["Severity"]}
-    assert totals["Total units"] == 5 and totals["Total devices"] == 4
+    assert totals["Total units"] == 6 and totals["Total devices"] == 5
     assert totals["Total contexts"] == 2 and totals["NAT rules"] == 8
     hygiene = _rows(sheets, "Changes and Hygiene")
     tel = next(r for r in hygiene if r["Check"] == "Telnet enabled"
@@ -305,3 +334,108 @@ def test_policy_checks(inv):
     # The inside ACL faces the highest-security interface: not inbound from lower.
     assert not any("LAB-INSIDE-IN" in f["object"] for f in found.values()
                    if f["check"].startswith("Any"))
+
+
+def _nfw(sheets, name):
+    return [r for r in _rows(sheets, name) if r["Hostname"] == "LAB-NFW-01"]
+
+
+def test_lifecycle(sheets):
+    rows = {(r["Hostname"]): r for r in _rows(sheets, "Lifecycle") if r["Context"] == ""}
+    fw = rows["LAB-NFW-01"]
+    assert fw["Model"] == "FPR-2130" and fw["Units of This Model"] == 5
+    assert fw["Hardware Last Date of Support"] == "2030-01-31"
+    assert fw["EoX Bulletin"] == "EOL-LAB https://example.invalid/eol"
+    assert fw["Software Status"] == "Past end of support"
+    assert fw["Months to LDoS"] == 38 and fw["Recommended Release"] == "n/a"
+    assert rows["LAB-VFW-01"]["Hardware End of Sale"] == "n/a"
+
+
+def test_site_to_site(sheets):
+    rows = {r["Peer IP"]: r for r in _nfw(sheets, "Site-to-site VPN")}
+    one = rows["203.0.113.9"]
+    assert (one["Crypto Map"], one["Sequence"], one["Interface"]) == ("LAB-MAP", 10, "outside")
+    assert one["Peer Description"] == "lab branch one"
+    assert one["IKE Version"] == "ikev1" and one["Auth Method"] == "PSK"
+    assert one["Local Protected Networks"] == "10.0.0.0/24"
+    assert one["Remote Protected Networks"] == "172.16.50.0/24"
+    assert one["Status"] == "Up" and one["Bytes Rx"] == 2000
+    assert one["NAT Exemption Present"] == "Yes" and one["Weak Crypto"] == "Yes"
+    two = rows["203.0.113.10"]
+    assert two["Status"] == "Down" and two["NAT Exemption Present"] == "No"
+    assert two["Auth Method"] == "certificate" and two["Weak Crypto"] == "No"
+
+
+def test_remote_access_and_sessions(sheets):
+    ra = {r["Tunnel-group"]: r for r in _nfw(sheets, "Remote Access VPN")}
+    ldap = ra["LAB-RA"]
+    assert ldap["Authentication"] == "AAA (LAB-LDAP, ldap)"
+    assert ldap["Pool Size"] == 254 and ldap["Pool In Use"] == 2
+    assert ldap["Split Tunnel Policy"] == "tunnelspecified"
+    assert ldap["Split Tunnel Networks"] == "10.0.0.0/24"
+    assert ldap["HostScan"] == "Yes" and ldap["DAP Records"] == "LAB-DAP"
+    assert ldap["Active Sessions"] == 1
+    assert ra["LAB-RA-CERT"]["Authentication"] == "certificate"
+    sessions = _nfw(sheets, "VPN Sessions")
+    assert [r["Assigned IP"] for r in sessions] == ["10.10.0.5", "10.10.0.6"]
+    assert "lab-person" not in repr(sheets) and "198.51.100.50" not in repr(sheets)
+
+
+def test_routing_sheets(sheets):
+    [summary] = _nfw(sheets, "Routes Summary")
+    assert (summary["Static"], summary["OSPF"], summary["OSPF E2"], summary["BGP"]) == (2, 2, 1, 1)
+    assert summary["Default Route Next Hop"] == "198.51.100.1"
+    assert summary["Floating Statics"] == 1 and summary["Tracked Statics"] == 1
+    statics = _nfw(sheets, "Static Routes")
+    tracked = statics[0]
+    assert tracked["SLA Target"] == "198.51.100.1 (outside)" and tracked["Track State"] == "Up"
+    assert tracked["In RIB"] == "Yes" and statics[1]["In RIB"] == "No"
+    nbrs = {(r["Protocol"], r["Neighbour IP"]): r for r in _nfw(sheets, "Routing Neighbours")}
+    ospf = nbrs[("OSPF", "10.0.0.2")]
+    assert ospf["Area"] == "0" and ospf["Authentication Configured"] == "Yes"
+    assert ospf["Redistribution into Protocol"] == (
+        "static (no route-map), connected (route-map LAB-RM)")
+    bgp = nbrs[("BGP", "203.0.113.1")]
+    assert (bgp["Prefixes Received"], bgp["Prefixes Sent"]) == (5, 3)
+    assert bgp["Authentication Configured"] == "No"
+
+
+def test_zones_and_relationships(sheets):
+    zones = {r["Nameif"]: r for r in _nfw(sheets, "Zones and Reachability")}
+    inside = zones["inside"]
+    assert inside["Connected Subnets"] == "10.0.0.0/24"
+    # Summarised: 10.6.0.0/16 and 10.7.0.0/16 collapse into one /15.
+    assert inside["Routed Subnets Behind It"] == "10.5.0.0/16; 10.6.0.0/15"
+    assert inside["Route Count"] == 4 and inside["Default Route via This Interface"] == "No"
+    assert zones["outside"]["Default Route via This Interface"] == "Yes"
+    rel = _rows(sheets, "Relationships")
+    kinds = {(r["Hostname"], r["Relationship"], r["Device B"]) for r in rel}
+    assert ("LAB-FW-01", "failover pair", "LAB-FW-01/stby") in kinds
+    assert ("LAB-NFW-01", "same subnet", "LAB-RTR-01") in kinds
+    assert ("LAB-NFW-01", "OSPF neighbour", "LAB-RTR-01") in kinds
+    assert any(r["Relationship"] == "S2S tunnel" and r["IP B"] == "203.0.113.9" for r in rel)
+
+
+def test_network_checks(inv):
+    import app.reports.asa_network as net
+    net_eox = net.eox_records
+    net.eox_records = lambda data: (HW_EOX, SW_EOX)
+    try:
+        found = {(f["check"], f["rating"], f["object"]) for f in analyze(inv)["findings"]
+                 if f["hostname"] == "LAB-NFW-01"}
+    finally:
+        net.eox_records = net_eox
+    checks = {(c, r) for c, r, _ in found}
+    assert ("Weak S2S crypto (DES/3DES/MD5/DH 1-2-5/IKEv1 aggressive)", "High",
+            "203.0.113.9 (LAB-MAP 10)") in found
+    assert ("SHA1 or DH 14 only", "Low", "203.0.113.10 (LAB-MAP 20)") in found
+    assert ("S2S tunnels configured but down", "Low", "203.0.113.10 (LAB-MAP 20)") in found
+    assert ("RA VPN without certificate or MFA", "High", "LAB-RA") in found
+    assert ("RA VPN without certificate or MFA", "High", "LAB-RA-CERT") not in found
+    assert ("RA split tunnel = tunnel all vs excluded", "Info") in checks
+    assert ("Routing protocol without authentication", "Medium", "BGP 203.0.113.1") in found
+    assert ("Routing protocol without authentication", "Medium", "OSPF 10.0.0.2") not in found
+    assert ("Redistribution without route-map", "Medium", "router ospf 1") in found
+    assert ("Software past end of support", "High") in checks
+    assert ("Hardware past end of SW maintenance", "Medium") in checks
+    assert ("Hardware past LDoS", "High") not in checks
