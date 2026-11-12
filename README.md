@@ -314,6 +314,13 @@ a permitted management host or add its address to the ACL.
 The check is IPv4 only and conservative: object-groups or anything it can't
 parse count as unknown and never raise a warning.
 
+### When a Scan Misbehaves
+
+- **Live progress.** Above the scan console, each device being collected shows the command it is on, how many it has run and how long the current one has taken, from the first command after login. A timer that keeps climbing is a command waiting on the device.
+- **Console.** Every problem with a command gets a line as it happens, red for errors, amber for warnings: `pager_stuck`, `timeout`, `send_failed` and `unauthorized` are errors; `pager_in_output`, `unexpected_question`, `paging_not_disabled` and `device_error` are warnings; `slow` (30 seconds or more) is informational. A command a platform does not have is normal and not listed one by one.
+- **Log.** The same lines go to `logs/app.log` as `collection issue [kind] host (ip) 'command': detail`, so `grep "collection issue" logs/app.log` lists them. A read timeout names the last line the device printed, which is how an unanswered pager prompt or question is identified.
+- **Report.** The Collection Issues report (Reports tab) gathers the recorded issues, every command a device refused (read back from the saved outputs, so it works on older scans too) and the devices that could not be logged into. It contains hostnames and addresses; review it before sending it outside the site.
+
 ## Configuration
 
 ### Cisco EOX API (for EOX Lifecycle Report)
@@ -326,6 +333,8 @@ The EOX Lifecycle report queries Cisco's Support APIs to look up end-of-life and
 4. The EOX Lifecycle report will appear as available in the Reports tab once credentials are configured
 
 ### Device Type Detection
+
+A device type in a host list is optional. Neighbours are typed from what CDP, LLDP or SNMP report, and an untyped host is logged into on the IOS driver and corrected at login when it turns out to be something else: an ASA is recognised from `show version`, and an AireOS controller from the second `User:` prompt it asks after SSH login or its `(name) >` prompt, then reopened on the right driver. A typed device is never second-guessed.
 
 Edit `config/device_type_patterns.yaml` to add or modify device type patterns:
 
@@ -424,12 +433,19 @@ wiremap/
 │   ├── target_list.py        # Targeted-scan host lists, DNS, CSV import
 │   ├── site_mapping.py       # Hostname-to-site rules
 │   ├── redact.py             # Config secret redaction
+│   ├── asa_identity.py       # ASA detection, failover unit naming
+│   ├── wlc_session.py        # AireOS paging, prompts and login detection
+│   ├── wlc_models.py         # AireOS controller and AP model facts
+│   ├── wlc_topology.py       # AP-to-switch links from controller CDP
+│   ├── command_progress.py   # Per-command progress events
+│   ├── command_issues.py     # Command problem detection and the issues log
 │   ├── mock_devices.py       # Demo mode simulator (opt-in)
 │   ├── collectors/           # 23 modular data collectors
 │   ├── neighbors/            # Neighbour sources and crawl scope
 │   └── reports/              # On-demand report generators
 ├── config/
-│   └── device_type_patterns.yaml
+│   ├── device_type_patterns.yaml
+│   └── wlc_models.yaml       # Editable AireOS and AP lifecycle facts
 ├── templates/                # Jinja2 web UI templates
 ├── inventories/              # Saved scan data
 ├── Dockerfile
