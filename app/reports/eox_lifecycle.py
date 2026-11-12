@@ -5,7 +5,6 @@ produces a 4-tab XLSX: Summary, Hardware Lifecycle, Software Lifecycle, Modules 
 """
 
 import io
-import json
 import logging
 import os
 import re
@@ -16,6 +15,11 @@ from openpyxl.styles import PatternFill, Font
 
 from .base import BaseReport
 from .xlsx_utils import create_sheet, style_header_row, write_data_rows, auto_width, freeze_header, add_table
+
+try:
+    from app.jsonio import find_scan, load_json, write_json
+except ImportError:
+    from jsonio import find_scan, load_json, write_json
 
 logger = logging.getLogger(__name__)
 
@@ -372,15 +376,13 @@ class EoxLifecycleReport(BaseReport):
         if not discovery_id:
             return
         inventory_dir = "/app/inventories"
-        filepath = os.path.join(inventory_dir, f"{discovery_id}.json")
-        if not os.path.exists(filepath):
+        filepath = find_scan(inventory_dir, discovery_id)
+        if not filepath:
             return
         try:
-            with open(filepath, "r") as f:
-                saved = json.load(f)
+            saved = load_json(filepath)
             saved["eox_cache"] = eox_cache
-            with open(filepath, "w") as f:
-                json.dump(saved, f)
+            write_json(saved, filepath)
         except Exception as e:
             logger.warning("Failed to save EOX cache: %s", e)
 

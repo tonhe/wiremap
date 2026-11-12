@@ -12,7 +12,7 @@
 - **SSH, Telnet, or Auto-detect** -- Tries SSH first, falls back to Telnet automatically
 - **Recursive BFS Crawling** -- Discovers neighbors hop-by-hop from a seed device with configurable depth (0-10, including crawl from targets)
 - **Multi-threaded** -- Parallel device collection with configurable concurrent workers (1-20, default 10), persisted in Settings
-- **Async with Live Progress** -- Scans run in the background with real-time Server-Sent Events (SSE) streaming authentication, fallback, data collection, neighbor discovery, and completion status to a live console panel
+- **Async with Live Progress** -- Scans run in the background with real-time Server-Sent Events (SSE) streaming authentication, fallback, data collection, neighbor discovery, and completion status to a live console panel. Above the console, each device being collected shows the command it is on, how many it has run and how long the current one has taken; every problem with a command is written to the console and to `logs/app.log` as `collection issue [kind] host (ip) 'command': detail`, and kept for the Collection Issues report
 - **Cancellable Scans** -- Cancel a running scan gracefully; in-progress devices finish and partial results are saved
 - **L3 Neighbor Discovery** -- Optionally discover OSPF, EIGRP, BGP, and ISIS neighbors alongside CDP/LLDP
 - **Device Type Auto-detection** -- YAML-based pattern matching against CDP platform strings and LLDP system descriptions
@@ -29,14 +29,14 @@
 - **Scan Timing** -- Per-device and per-collector timings are recorded, and the slowest devices and collectors are listed in the console when a scan finishes
 
 ### Multi-Vendor Support
-Cisco IOS / IOS-XE / NX-OS / IOS-XR, Cisco AireOS WLC, Arista EOS, Juniper JunOS, Palo Alto PAN-OS, WatchGuard Firebox (Fireware), VyOS, MikroTik RouterOS, Fortinet FortiGate, HPE Comware / ProCurve, Aruba OS-CX, Dell OS10, Extreme ExtremeXOS / VOSS, Ubiquiti EdgeOS
+Cisco IOS / IOS-XE / NX-OS / IOS-XR, Cisco ASA / ASAv, Cisco AireOS WLC, Arista EOS, Juniper JunOS, Palo Alto PAN-OS, WatchGuard Firebox (Fireware), VyOS, MikroTik RouterOS, Fortinet FortiGate, HPE Comware / ProCurve, Aruba OS-CX, Dell OS10, Extreme ExtremeXOS / VOSS, Ubiquiti EdgeOS
 
 Each platform has its own command set per collector. A collector that cannot serve a platform -- spanning tree on a firewall, switchports on a router -- declares it and is skipped, rather than sending commands the device will reject.
 
 **Legacy SSH:** paramiko is pinned to 3.5.x deliberately. Version 4.0 removed the SHA-1 key exchanges and the `ssh-rsa` host key algorithm outright, which strands older Catalyst and Nexus hardware that offers nothing else. Modern algorithms are still preferred wherever the device supports them.
 
-### Data Collection (21 Collectors)
-All collectors run automatically on every device -- no pre-selection needed. The one exception is QoS, which is on by default and can be unticked under **Optional Collectors** on either scan form for a faster run.
+### Data Collection (23 Collectors)
+All collectors run automatically on every device -- no pre-selection needed. Each decides from the device type whether it applies, so the Cisco ASA and Cisco WLC collectors only run on those devices. QoS checks whether QoS is in use before its per-port commands: a classic Catalyst with `mls qos` off, or a Catalyst 9000 with no policy attached (the control-plane policy does not count) and no auto-QoS, skips them, and the Voice and QoS report shows "QoS off" and lists the commands not run.
 
 | Collector | Data Gathered |
 |-----------|--------------|
@@ -59,6 +59,8 @@ All collectors run automatically on every device -- no pre-selection needed. The
 | Redundancy | Supervisor redundancy mode and peer state, switchovers, stack ports and ring |
 | Management Security | SSH version and host key size, Smart Install state |
 | Interface Counters | Per-interface errors, CRC, drops, resets, last input/output, link flap, input/output rate and queueing strategy |
+| Cisco ASA | ASA and ASAv only: platform, licence and health (show version, CPU, memory, conns, ASP drops, crashinfo), failover state and history, running-config, interfaces, routing, ACLs, objects, NAT, site-to-site and AnyConnect VPN, certificates and the management plane. The standby unit of a pair gets the platform, failover and config blocks; on a multiple-context unit every context is visited with `changeto` |
+| Cisco WLC | AireOS controllers only: platform, licence, health, redundancy, running-config, interfaces, ports, WLANs and AP groups, RF, access points, client counts (never client MACs, addresses or names), AAA, ACLs, rogue and WIPS settings, mobility, FlexConnect, QoS and the management plane, then the per-item commands (each interface, WLAN, RF profile, ACL, FlexConnect group and port, then three per AP, last) |
 | QoS | Attached policy-map counters (per-class packets, drops, priority queue), class-map and policy-map definitions, auto-QoS; on 2960/3560/3750 `mls qos` state, port trust, expedite queue, queue-sets, DSCP/CoS-to-queue maps and per-port DSCP and queue counters; on Catalyst 9000 per-port hardware queue counters for uplinks and voice ports (capped at 24 per device) |
 | CPU/Memory | CPU 5s/1m/5m, CPU history, memory pools and top processes |
 
@@ -76,6 +78,7 @@ A dedicated **Reports** tab serves as the single destination for all report gene
 | Topology Map | HTML | Interactive D3.js network diagram with color-coded device types |
 | Device Inventory | XLSX, JSON, CSV, XML | Device summary with provenance (discovered via, collection status, failure reason), redundancy (stack, StackWise Virtual, VSS, vPC), uptime, last reload reason, image, license, stack members, modules and line cards. Licenses, Failed Devices (by category, with likely cause) and Not Collected (controller-managed, not attempted) sheets |
 | Link Inventory | XLSX, JSON, CSV, XML | All discovered neighbor links (CDP/LLDP + L3) |
+| Collection Issues | XLSX, JSON, CSV | Everything that went wrong while collecting, to hand over when a scan misbehaves: command issues recorded as they happened (timeouts, a pager prompt nobody answered, pager text left in output, unexpected questions, paging that could not be turned off, refused and slow commands), every refused command read back from the saved outputs, and devices that could not be logged into |
 | L2/L3 Diagram Data | XLSX, JSON, CSV, XML | Node and edge lists for drawing diagrams: device details, deduplicated L2 links, L3 adjacencies, subnets |
 | Interface Summary | XLSX, JSON, CSV, XML | Port status, descriptions, IP assignments |
 | ARP Summary | XLSX, JSON, CSV, XML | ARP entries by device and VRF with summary and detail tabs, incomplete entries flagged |
@@ -85,14 +88,20 @@ A dedicated **Reports** tab serves as the single destination for all report gene
 | Internet Edge | XLSX, JSON, CSV, XML | Edge Devices (and why each qualifies), BGP peering across VRFs, Public Addresses, NAT overview, ACL audit by usage, FHRP status, edge interface security |
 | Platform Health | XLSX, JSON, CSV, XML | Environment (PSU, fan, temperature), PoE budget, redundancy and stack ring, SSH and Smart Install exposure, CPU and memory, interface errors and drops, with findings |
 | Voice & QoS | XLSX, JSON, CSV, XML | Switch QoS posture, voice ports (phone, voice gateway, AP or voice VLAN) with trust and EF counters, uplinks and WAN circuits with egress policy, priority class and priority-queue drops, a Policy Catalog and Class Catalog showing template drift, findings, and Collection Errors |
+| Cisco ASA | XLSX, JSON, CSV, XML | Summary of the assessment checks, Devices (one row per unit, and per context), Lifecycle (Cisco EoX dates per model and ASA version), Failover (one row per pair), Interfaces, Zones and Reachability, Routes Summary, Static Routes (with SLA tracking), Routing Neighbours, Access Lists, ACL Lines (expanded objects, hit counts, shadowed and redundant lines), Objects (references, unused, duplicates), NAT (type, hits, public exposure), Site-to-site VPN (crypto, protected networks, status, NAT exemption), Remote Access VPN (authentication, pool use, split tunnel, posture), VPN Sessions (no usernames), Certificates, Management Plane, Health and Capacity, Changes and Hygiene, Relationships (failover pairs, shared subnets, routing neighbours and VPN peers matched to other devices), and Collection Errors |
+| Cisco WLC | XLSX, JSON, CSV, XML | Summary of the assessment checks with controllers and items affected, Controllers, Lifecycle (Cisco EoX dates per controller and AP model, last AireOS release, Catalyst 9800 support and Wi-Fi generation), Redundancy, Interfaces (with the WLANs using each), Ports and Uplinks (CDP neighbour, whether it is in the scan, error counters), WLANs (security, AKM, PMF, 802.11r/k/v, AAA servers, QoS, anchors, FlexConnect, client count), AP Groups, RF Global (per band: rates, DCA, TPC, coverage, RF group, CleanAir), RF Profiles, Radios (per AP radio), Access Points (keyed by base radio MAC: model, mode, groups, controllers, software, power, uplink switch port, lifecycle), AP Join Issues, Clients (counts per WLAN, band and protocol only), AAA Servers (with request, reject and timeout counts), ACLs, ACL Rules, Security and WIPS, Mobility (peers and anchors with path state), FlexConnect, QoS and Services (QoS profiles and map, AVC, NetFlow, multicast, mDNS), Management Plane, Certificates, Health and Capacity, Configuration Hygiene, Relationships (uplinks, AP access ports, mobility peers, anchors, AAA servers and management targets, matched to devices in the scan), and Collection Errors |
 | EOX Lifecycle | XLSX | Hardware/software end-of-life dates, module EOX status (requires Cisco API credentials) |
-| Config Archive | ZIP | Running configs as individual text files |
+| Config Archive | ZIP | Running configs as individual text files; an ASA standby unit is `<hostname>_stby.txt` and each security context `<hostname>_<context>.txt`; an AireOS controller's comes from `show run-config commands` |
 
-**Findings.** The L2, L3, Internet Edge, Platform Health and Voice & QoS reports rate findings on one scale. Critical is a reachability, redundancy or security exposure backed by collected data (a BGP session down, overlapping subnets). Warning is something usually wrong that may be intentional (`permit ip any any` on an interface filter). Info is documentation grade (an unreferenced ACL, an EIGRP stub peer). When one check fires on more than half the devices, an Info note says so, since that is more often a miscalibrated check than a network-wide defect.
+**Findings.** The L2, L3, Internet Edge, Platform Health, Voice & QoS and Cisco ASA reports rate findings on one scale. Critical is a reachability, redundancy or security exposure backed by collected data (a BGP session down, overlapping subnets). Warning is something usually wrong that may be intentional (`permit ip any any` on an interface filter). Info is documentation grade (an unreferenced ACL, an EIGRP stub peer). When one check fires on more than half the devices, an Info note says so, since that is more often a miscalibrated check than a network-wide defect.
+
+**Cisco ASA.** ASAs and ASAv are logged into as `cisco_asa`: on the ASA driver, entering enable with the login password. Typing them `cisco_asa` in a host list saves a login, but an untyped one is recognised from show version and reopened on the right driver. Both units of a failover pair are kept: the standby unit appears as `<hostname>/stby`, and the Failover sheet shows the pair side by side. Every sheet starts with Hostname, Context and Site (from the Settings site rules). A value whose command was not collected reads `n/a`; a blank cell was collected and empty. The Summary lists each check with the assessment's own rating (High, Medium, Low, Info); in the shared findings scale High is Critical, Medium is Warning, and Low and Info are Info. Checks include telnet enabled, SSH or ASDM open from any or an outside interface, SSH on local accounts only, no command authorization or accounting, SNMP v1/v2c, no syslog host, no NTP sync, debug-level syslog, certificates expired or expiring within 90 days, CPU, memory and connection-table pressure, interface errors, unsaved configuration, a recent crash, an unset enable password, and failover problems (secondary active, version or licence mismatch, failover or stateful link down, a monitored interface failed). The rule base is read from the running-config with every object and object-group expanded, so each ACL line can be compared with the lines above it: a line covered by an earlier one with the opposite action is shadowed, one covered by an earlier one with the same action is redundant (ACLs over 3,000 lines skip that comparison and say so). Rule-base checks: permit ip any any inbound on a lower-security interface, any-port permits to internal subnets, rules with no hits on a unit up 30 days or more, shadowed or redundant lines, unused objects, and static NAT that publishes an internal host and has never been used. VPN and routing checks: weak site-to-site crypto (DES, 3DES, MD5, DH 1/2/5, aggressive mode) and SHA-1 or DH 14 as the only choice, configured tunnels with no session, remote-access profiles authenticating with a password alone (RADIUS is treated as possible MFA and not flagged), the split-tunnel policy of each profile, routing neighbours without authentication, redistribution without a route-map, and hardware or software past its Cisco support dates (the Lifecycle sheet uses the same EOX API credentials and cache as the EOX Lifecycle report).
+
+**Cisco WLC.** AireOS controllers are logged into as `cisco_wlc`. Typing them so in a host list saves a login; an untyped one is recognised at login (the second `User:` prompt AireOS asks after SSH, or its `(name) >` prompt) and reopened on the right driver, and SNMP and CDP also recognise them. A read-only account cannot turn paging off, so every pause (`--More--` in any wording, "display the next entries", "Press Enter", "Press any key") is answered as it comes, any other yes/no question is answered no, and nothing but show commands is ever sent. If a command still times out, the session backs out of the pager or question before the next command, so one missed prompt costs one command. Each command waits up to 120 seconds from the last output (300 for the configuration). The controller is named by the System Name in `show sysinfo`, since the prompt reads `(Cisco Controller)` until someone changes it. Per-AP commands run last, about three seconds per AP on a large controller, so a timeout late in the run leaves everything before it intact. RADIUS and TACACS+ secrets, PSKs, SNMP communities (on every line that names them), SNMPv3 keys and user passwords are redacted before anything is stored; client MACs, addresses and user names are never stored, only counts, and local guest account names are replaced by a stable pseudonym. Every sheet starts with Controller, Site and Model. Lifecycle facts that the EoX API does not give (the last AireOS release per model, Catalyst 9800 support, Wi-Fi generation) come from `config/wlc_models.yaml`, which can be edited to match Cisco's current compatibility matrix. Platform checks: controller past end of support or software maintenance, a release past support or hardware that cannot reach 8.10, AP licence or platform maximum over 80% used, no controller redundancy (no SSO, no HA-SKU secondary, no backup controller on any AP), an SSO peer not Standby Hot, uplinks without LAG or with one port up, core dumps or AP crash files, CPU over 70% or memory free under 20%, no syslog server, and NTP not configured or not in sync. Wireless checks: open WLANs without web auth, WEP or WPA-TKIP, PSK on a WLAN not named as guest or IoT (flagged for review), WPA3/SAE without PMF required, guest WLANs not anchored or on the management interface, 802.11b rates enabled, wide channels, CleanAir off on capable radios, an 802.1X WLAN with a single RADIUS server, voice WLANs not on Platinum or with WMM off, APs past end of support, APs that cannot join a Catalyst 9800 (or only up to 17.3), APs with no primary controller or in default-group, mixed AP images, APs on PoE low power, AP uplinks below 1 Gb or half duplex, and AP join failures in the last 30 days. Service checks: RADIUS timeouts over 2%, management logins with no TACACS+ (or RADIUS) server, telnet or HTTP management, management over wireless, SNMP v1/v2c or a default community, rogue auto-containment, infrastructure MFP disabled, a mobility peer or anchor with a path down, the QoS map disabled, certificates expired or expiring within 90 days, web auth on the self-signed certificate, and local net users that never expire. APs also join the Topology Map and Diagram Data reports on the switch port their controller reports for them.
 
 **Internet edge.** A device counts as edge when it has BGP to a public AS, a public address on an interface, NAT configured, or a static default pointing outside the IGP, and the Edge Devices sheet says which. The ACL audit classifies each ACL by what references it in the running config (interface filter, management, QoS, route-map, NAT, crypto, or unreferenced), so a QoS class-map ACL with zero hits is not reported as dead. A device with no NAT config reads "not configured" rather than 0 translations.
 
-**Voice and QoS.** The config shows what a QoS policy was meant to do; the counters show whether it is working. Classic Catalyst switches (2960/3560/3750) are judged on `mls qos`, port trust and the egress expedite queue. Catalyst 9000, 3850 and 4500-X trust DSCP by default, so a voice port there is only flagged if a policy says otherwise. Routers are judged on their egress LLQ: an interface with no CDP neighbour is treated as a WAN or DCI circuit and flagged without a priority class, while router interfaces facing a switch are listed but not flagged. Every drop count carries its counter window ("cleared 1d02h ago" or "since boot (36 weeks, ...)"), because counters that have run since boot are totals, not rates. Critical: QoS off on a switch with voice endpoints, untrusted voice ports with no marking policy, uplinks or WAN circuits with no priority queue, EF mapped outside the priority queue. Warning: priority-queue drops, EF arriving on access ports but leaving the uplink re-marked, a policy-map name with more than one version across the fleet. Info: auto-QoS on some phone ports but not others, counters never cleared on a device up more than 12 weeks.
+**Voice and QoS.** The config shows what a QoS policy was meant to do; the counters show whether it is working. Classic Catalyst switches (2960/3560/3750) are judged on `mls qos`, port trust and the egress expedite queue. Catalyst 9000, 3850 and 4500-X trust DSCP by default, so a voice port there is only flagged if a policy says otherwise. Routers are judged on their egress LLQ. A router interface counts as a WAN or DCI circuit only with evidence, shown in the WAN Evidence column: a public address, a BGP peer on its subnet, `ip nat outside`, or a description naming WAN, MPLS, INET, ISP, DCI or Megaport. Subinterfaces take their parent's evidence. WAN circuits without a priority class are flagged; interfaces facing a switch, and port-channels or other interfaces with no CDP neighbour and no WAN evidence, are listed but not flagged. Every drop count carries its counter window ("cleared 1d02h ago" or "since boot (36 weeks, ...)"), because counters that have run since boot are totals, not rates. Critical: QoS off on a switch with voice endpoints, untrusted voice ports with no marking policy, uplinks or WAN circuits with no priority queue, EF mapped outside the priority queue. Warning: priority-queue drops, EF arriving on access ports but leaving the uplink re-marked, a policy-map name with more than one version across the fleet. Info: auto-QoS on some phone ports but not others, counters never cleared on a device up more than 12 weeks.
 
 ### Targeted Scan
 Connect to a specific list of devices without BFS crawling. Designed for edge assessments where you know exactly which devices to audit (firewalls, border routers). Enter one device per line in the format `host [device_type]`, where host is an IPv4 address, hostname or FQDN. Device type is optional (auto-detect if omitted).
@@ -218,13 +227,20 @@ Scans that never went through this instance (copied off another host, or run
 from different boxes at one site) can be merged from the command line:
 
 ```bash
-python app/merge_scans.py scan-a.json scan-b.json -o merged.json
-python app/merge_scans.py ./inventories/ -o ./inventories/   # every .json in it
+python app/merge_scans.py scan-a.json.gz scan-b.json -o merged.json.gz
+python app/merge_scans.py ./inventories/ -o ./inventories/   # every scan in it
 
 # or inside the container
 docker compose exec wiremap python merge_scans.py \
-    /app/inventories/a.json /app/inventories/b.json -o /app/inventories
+    /app/inventories/a.json.gz /app/inventories/b.json.gz -o /app/inventories
 ```
+
+Scans are saved as gzip-compressed JSON (`<scan id>.json.gz`), which is about
+a twentieth of the plain size on a large network. Everything that reads a scan
+(the web app, the upload button, the merge and the CLI) takes either form, so
+older `.json` scans still load.
+`zcat scan.json.gz` or `gunzip -k` gets the plain JSON back. A named merge
+output is compressed when it ends in `.gz`.
 
 Configs in the output are redacted unless you pass `--no-redact`. Older scans
 predate collection-time redaction, and the merged file is usually the one that
@@ -240,7 +256,7 @@ and later that includes the `standard-telnetlib` backport netmiko needs).
 
 ```bash
 python app/wiremap_cli.py                         # menu: pick scans, reports, format
-python app/wiremap_cli.py list scan.json          # which reports apply to this scan
+python app/wiremap_cli.py list scan.json.gz       # which reports apply to this scan
 python app/wiremap_cli.py report scan.json        # every report that applies, into ./<scan id>/
 python app/wiremap_cli.py report scan.json -r device_inventory -r link_inventory -f csv -o out/
 python app/wiremap_cli.py report a.json b.json    # several scans are merged first
@@ -250,7 +266,7 @@ python app/wiremap_cli.py merge a.json b.json -o merged.json
 # or inside the container
 docker compose exec wiremap python wiremap_cli.py
 docker compose exec wiremap python wiremap_cli.py report \
-    /app/inventories/<scan>.json -o /app/inventories/reports
+    /app/inventories/<scan>.json.gz -o /app/inventories/reports
 ```
 
 `-f` picks csv, json, xml or xlsx where a report offers it; the config archive
@@ -298,6 +314,13 @@ a permitted management host or add its address to the ACL.
 The check is IPv4 only and conservative: object-groups or anything it can't
 parse count as unknown and never raise a warning.
 
+### When a Scan Misbehaves
+
+- **Live progress.** Above the scan console, each device being collected shows the command it is on, how many it has run and how long the current one has taken, from the first command after login. A timer that keeps climbing is a command waiting on the device.
+- **Console.** Every problem with a command gets a line as it happens, red for errors, amber for warnings: `pager_stuck`, `timeout`, `send_failed` and `unauthorized` are errors; `pager_in_output`, `unexpected_question`, `paging_not_disabled` and `device_error` are warnings; `slow` (30 seconds or more) is informational. A command a platform does not have is normal and not listed one by one.
+- **Log.** The same lines go to `logs/app.log` as `collection issue [kind] host (ip) 'command': detail`, so `grep "collection issue" logs/app.log` lists them. A read timeout names the last line the device printed, which is how an unanswered pager prompt or question is identified.
+- **Report.** The Collection Issues report (Reports tab) gathers the recorded issues, every command a device refused (read back from the saved outputs, so it works on older scans too) and the devices that could not be logged into. It contains hostnames and addresses; review it before sending it outside the site.
+
 ## Configuration
 
 ### Cisco EOX API (for EOX Lifecycle Report)
@@ -310,6 +333,8 @@ The EOX Lifecycle report queries Cisco's Support APIs to look up end-of-life and
 4. The EOX Lifecycle report will appear as available in the Reports tab once credentials are configured
 
 ### Device Type Detection
+
+A device type in a host list is optional. Neighbours are typed from what CDP, LLDP or SNMP report, and an untyped host is logged into on the IOS driver and corrected at login when it turns out to be something else: an ASA is recognised from `show version`, and an AireOS controller from the second `User:` prompt it asks after SSH login or its `(name) >` prompt, then reopened on the right driver. A typed device is never second-guessed.
 
 Edit `config/device_type_patterns.yaml` to add or modify device type patterns:
 
@@ -408,12 +433,19 @@ wiremap/
 │   ├── target_list.py        # Targeted-scan host lists, DNS, CSV import
 │   ├── site_mapping.py       # Hostname-to-site rules
 │   ├── redact.py             # Config secret redaction
+│   ├── asa_identity.py       # ASA detection, failover unit naming
+│   ├── wlc_session.py        # AireOS paging, prompts and login detection
+│   ├── wlc_models.py         # AireOS controller and AP model facts
+│   ├── wlc_topology.py       # AP-to-switch links from controller CDP
+│   ├── command_progress.py   # Per-command progress events
+│   ├── command_issues.py     # Command problem detection and the issues log
 │   ├── mock_devices.py       # Demo mode simulator (opt-in)
-│   ├── collectors/           # 20 modular data collectors
+│   ├── collectors/           # 23 modular data collectors
 │   ├── neighbors/            # Neighbour sources and crawl scope
 │   └── reports/              # On-demand report generators
 ├── config/
-│   └── device_type_patterns.yaml
+│   ├── device_type_patterns.yaml
+│   └── wlc_models.yaml       # Editable AireOS and AP lifecycle facts
 ├── templates/                # Jinja2 web UI templates
 ├── inventories/              # Saved scan data
 ├── Dockerfile

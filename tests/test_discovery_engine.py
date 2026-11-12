@@ -139,7 +139,7 @@ def test_discovery_saves_inventory(tmp_path):
     )
     inventory = engine.discover()
     # Should have saved a file
-    json_files = list(tmp_path.glob("*.json"))
+    json_files = list(tmp_path.glob("*.json.gz"))
     assert len(json_files) == 1
 
     # Should be loadable

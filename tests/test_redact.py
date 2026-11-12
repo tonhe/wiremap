@@ -162,7 +162,7 @@ R = REDACTED
     ("failover key Plain123", f"failover key {R}"),
     ("failover key hex 0a1b2c3d", f"failover key hex {R}"),
     (" ldap-login-password Plain123", f" ldap-login-password {R}"),
-    ("enable password 8Ry2YjIyt7RRXU24 encrypted",
+    ("enable password 9jNfZuG3TC5tCVH0 encrypted",
      f"enable password {R} encrypted"),
     ("username admin password $sha512$5000$abc$def pbkdf2 privilege 15",
      f"username admin password {R} pbkdf2 privilege 15"),
@@ -373,3 +373,127 @@ def test_redact_config_counted_counts_only_clear_tokens():
     assert "Plain123" not in out
     assert redact_config_counted(out) == (out, 0)
     assert redact_config_counted("") == ("", 0)
+
+
+@pytest.mark.parametrize("line,expected", [
+    (" server-key 7 0822455D0A16", f" server-key 7 {R}"),
+    (" server-key Plain123", f" server-key {R}"),
+    (" client 192.0.2.20 server-key 7 0822455D0A16",
+     f" client 192.0.2.20 server-key 7 {R}"),
+    (" client 192.0.2.20 vrf MGMT server-key Plain123",
+     f" client 192.0.2.20 vrf MGMT server-key {R}"),
+    ("snmp mib community-map s3cr3tComm context CTX1",
+     f"snmp mib community-map {R} context CTX1"),
+    ("snmp mib community-map s3cr3tComm", f"snmp mib community-map {R}"),
+])
+def test_coa_server_key_and_community_map(line, expected):
+    assert redact_line(line) == expected
+
+
+def test_dynamic_author_block_redacted():
+    text = ("aaa server radius dynamic-author\n"
+            " client 192.0.2.20 server-key 7 0822455D0A16\n"
+            " server-key Plain123\n"
+            " auth-type any\n")
+    out = redact_config(text)
+    assert "0822455D0A16" not in out and "Plain123" not in out
+    assert " auth-type any\n" in out
+
+
+@pytest.mark.parametrize("line,expected", [
+    (" ikev1 pre-shared-key Plain123", f" ikev1 pre-shared-key {R}"),
+    (" ikev2 remote-authentication pre-shared-key Plain123",
+     f" ikev2 remote-authentication pre-shared-key {R}"),
+    (" ikev2 local-authentication pre-shared-key Plain123",
+     f" ikev2 local-authentication pre-shared-key {R}"),
+    ("enable password 2KFQnbNIdI.2KYOU encrypted", f"enable password {R} encrypted"),
+    ("passwd 2KFQnbNIdI.2KYOU encrypted", f"passwd {R} encrypted"),
+    ("username lab-admin password Plain123 encrypted privilege 15",
+     f"username lab-admin password {R} encrypted privilege 15"),
+    ("snmp-server host inside 192.0.2.5 community Plain123 version 2c",
+     f"snmp-server host inside 192.0.2.5 community {R} version 2c"),
+    (" ikev2 remote-authentication certificate", " ikev2 remote-authentication certificate"),
+])
+def test_asa_secret_forms(line, expected):
+    assert redact_line(line) == expected
+
+
+@pytest.mark.parametrize("line", [
+    " ikev1 pre-shared-key *****",
+    " ikev2 local-authentication pre-shared-key *****",
+    " key *****",
+    "failover key *****",
+    "enable password ***** pbkdf2",
+    "username lab-admin password ***** pbkdf2 privilege 15",
+    "snmp-server host inside 192.0.2.5 community ***** version 2c",
+    " server-key *****",
+    # The encrypted form of an empty enable password, so an unset one shows.
+    "enable password 8Ry2YjIyt7RRXU24 encrypted",
+])
+def test_already_masked_values_are_left_alone(line):
+    assert redact_line(line) == line
+    assert redact_config_counted(line + "\n")[1] == 0
+
+
+
+# --- AireOS (WLC) -------------------------------------------------------------
+
+@pytest.mark.parametrize("line,expected", [
+    ("config radius acct add 2 192.0.2.6 1813 hex 0a0b0c",
+     f"config radius acct add 2 192.0.2.6 1813 hex {R}"),
+    ("config radius auth keywrap add ascii KekValue1 MackValue2 1",
+     f"config radius auth keywrap add ascii {R} {R} 1"),
+    ("config tacacs auth add 1 192.0.2.7 49 ascii TacSecret",
+     f"config tacacs auth add 1 192.0.2.7 49 ascii {R}"),
+    ("config tacacs athr add 1 192.0.2.7 49 ascii TacSecret",
+     f"config tacacs athr add 1 192.0.2.7 49 ascii {R}"),
+    ("config wlan security wpa akm psk set-key ascii LabPsk123 3",
+     f"config wlan security wpa akm psk set-key ascii {R} 3"),
+    ("config snmp v3user create lab-v3 rw hmacsha aescfb128 AuthKey1 PrivKey2",
+     f"config snmp v3user create lab-v3 rw hmacsha aescfb128 {R} {R}"),
+    ("config mgmtuser add lab-admin AdminPw1 read-write",
+     f"config mgmtuser add lab-admin {R} read-write"),
+    ("config mgmtuser password lab-admin AdminPw2", f"config mgmtuser password lab-admin {R}"),
+    ("config netuser add guest1 GuestPw1 wlan 2 userType guest lifetime 86400",
+     f"config netuser add guest1 {R} wlan 2 userType guest lifetime 86400"),
+    ("config ap mgmtuser add username lab-ap password ApPw1 secret ApSecret2 all",
+     f"config ap mgmtuser add username lab-ap password {R} secret {R} all"),
+    ("config flexconnect group LAB-FLEX radius server auth add primary 192.0.2.8 1812 FlexSecret",
+     f"config flexconnect group LAB-FLEX radius server auth add primary 192.0.2.8 1812 {R}"),
+    ("config local-auth eap-profile method fast pac-key PacKey1 LAB-EAP",
+     f"config local-auth eap-profile method fast pac-key {R} LAB-EAP"),
+    ("config mobility group member hash 192.0.2.9 a1b2c3d4e5",
+     f"config mobility group member hash 192.0.2.9 {R}"),
+    ("config certificate generate csr-webauth LAB password CertPw1",
+     f"config certificate generate csr-webauth LAB password {R}"),
+    ("PSK Key.......................................... LabPsk123",
+     f"PSK Key.......................................... {R}"),
+    ("PSK Key.......................................... Disabled",
+     "PSK Key.......................................... Disabled"),
+])
+def test_aireos_lines(line, expected):
+    assert redact_line(line) == expected
+
+
+def test_aireos_community_masked_on_every_snmp_line():
+    from app.redact import aireos_communities, mask_names
+    config = ("config snmp community create LabComm\n"
+              "config snmp community accessmode rw LabComm\n"
+              "config snmp community ipaddr 192.0.2.0 255.255.255.0 LabComm\n"
+              "config wlan create 1 LabComm-ssid LabComm\n")
+    out = redact_config(config)
+    assert "LabComm" not in out.split("config wlan")[0]
+    assert out.count(R) == 3
+    # Only SNMP lines: a WLAN that happens to share the word keeps it.
+    assert out.endswith("config wlan create 1 LabComm-ssid LabComm\n")
+    _, count = redact_config_counted(config)
+    assert count == 3
+    assert aireos_communities(config) == ["LabComm"]
+    assert mask_names("a LabComm b", ["LabComm"]) == (f"a {R} b", 1)
+
+
+def test_pseudonym_is_stable_and_hides_the_name():
+    from app.redact import pseudonym
+    assert pseudonym("guest1") == pseudonym("guest1")
+    assert pseudonym("guest1") != pseudonym("guest2")
+    assert "guest1" not in pseudonym("guest1") and pseudonym("guest1").startswith("user-")

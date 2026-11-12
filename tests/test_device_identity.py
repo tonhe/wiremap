@@ -153,6 +153,9 @@ XE3_VERSION = "Cisco IOS Software, IOS-XE Software, Catalyst L3 Switch Software\
 IOS_VERSION = ("Cisco IOS Software, C2900 Software (C2900-UNIVERSALK9-M), "
                "Version 15.7(3)M8\n")
 NXOS_VERSION = "Cisco Nexus Operating System (NX-OS) Software\n"
+ASA_VERSION = ("Cisco Adaptive Security Appliance Software Version 9.16(4)\n"
+               "Device Manager Version 7.18(1)\n")
+FTD_VERSION = "Cisco Firepower Threat Defense for VMware v7.2.5\n"
 
 
 @pytest.mark.parametrize("text,current,expected", [
@@ -161,6 +164,10 @@ NXOS_VERSION = "Cisco Nexus Operating System (NX-OS) Software\n"
     (XE3_VERSION, "cisco_ios", "cisco_xe"),
     (IOS_VERSION, "cisco_xe", "cisco_ios"),
     (NXOS_VERSION, "cisco_ios", "cisco_nxos"),
+    (ASA_VERSION, "cisco_ios", "cisco_asa"),
+    (ASA_VERSION, None, "cisco_asa"),
+    (ASA_VERSION, "cisco_asa", "cisco_asa"),
+    (FTD_VERSION, None, None),
     ("Cisco IOS XR Software, Version 7.3.2\n", "cisco_ios", "cisco_ios"),
     ("", "cisco_ios", "cisco_ios"),
     (XE_VERSION, "juniper_junos", "juniper_junos"),

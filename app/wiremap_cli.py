@@ -22,7 +22,6 @@ it regardless, since it is the only report that makes network calls.
 """
 import argparse
 import csv
-import json
 import os
 import re
 import sys
@@ -38,12 +37,14 @@ try:
     from app.inventory_merge import merge_inventories
     from app.reports import get_registry
     from app.target_outcomes import summary_line
+    from app.jsonio import load_json
 except ImportError:
     import merge_scans
     from inventory import DiscoveryInventory, refresh_categories
     from inventory_merge import merge_inventories
     from reports import get_registry
     from target_outcomes import summary_line
+    from jsonio import load_json
 
 # Reports that call out to an external API.
 NETWORK_REPORTS = {"eox_lifecycle"}
@@ -73,9 +74,8 @@ def use_config_dir(config_dir):
 def load_scan(path):
     """Return the scan dict at path, or raise ValueError with the reason."""
     try:
-        with open(path) as f:
-            data = json.load(f)
-    except (OSError, ValueError) as e:
+        data = load_json(path)
+    except (OSError, EOFError, ValueError) as e:
         raise ValueError(f"could not read {path}: {e}")
     if not isinstance(data, dict) or "devices" not in data:
         raise ValueError(f"{path} is not a wiremap scan (no devices key)")

@@ -88,3 +88,56 @@ def test_clean_redacted_config_has_no_leftover_warning():
     inv = _inventory(R1={"config": "enable secret 5 <REDACTED>\n", "redacted": True})
     summary = _zip(inv).read("SUMMARY.txt").decode()
     assert "WARNING" not in summary
+
+
+def _asa(raw, config=None):
+    cd = {"asa": {"raw": raw, "parsed": {}}}
+    if config is not None:
+        cd["config"] = {"raw": {}, "parsed": {"config": config, "redacted": True}}
+    return {"collector_data": cd}
+
+
+def test_asa_units_and_contexts_get_their_own_files():
+    data = {"devices": {
+        "LAB-FW-01": _asa({"show running-config": "hostname LAB-FW-01\n"}),
+        "LAB-FW-01/stby": _asa({"show running-config": "hostname LAB-FW-01\n"}),
+        "LAB-CTX-01": _asa({
+            "show running-config": "hostname system\n",
+            "context lab-ctx-a: show running-config": "hostname lab-ctx-a\n"
+                                                     "snmp-server community Plain123\n",
+            "context lab-ctx-a: show nameif": "x"}),
+    }}
+    report = ConfigArchiveReport()
+    assert report.can_generate(data)
+    zf = _zip(data)
+    assert set(zf.namelist()) == {"LAB-FW-01.txt", "LAB-FW-01_stby.txt", "LAB-CTX-01.txt",
+                                  "LAB-CTX-01_lab-ctx-a.txt", "SUMMARY.txt"}
+    ctx = zf.read("LAB-CTX-01_lab-ctx-a.txt").decode()
+    assert "Plain123" not in ctx and "hostname lab-ctx-a" in ctx
+
+
+def test_config_collector_text_wins_over_the_asa_copy():
+    data = {"devices": {"LAB-FW-01": _asa({"show running-config": "asa copy\n"},
+                                            config="config collector copy\n")}}
+    assert _zip(data).read("LAB-FW-01.txt").decode() == "config collector copy\n"
+
+
+def test_nothing_to_archive():
+    data = {"devices": {"LAB-SW-01": {"collector_data": {"config": {"parsed": {}}}}}}
+    assert not ConfigArchiveReport().can_generate(data)
+
+
+
+def test_controller_config_comes_from_the_wlc_collector():
+    data = {"devices": {
+        "lab-wlc-01": {"collector_data": {"wlc": {"raw": {
+            "show run-config commands": "config sysname lab-wlc-01\n"
+                                          "config radius auth add 1 192.0.2.50 1812 ascii Plain123\n"}}}},
+        "lab-wlc-02": {"collector_data": {"wlc": {"raw": {
+            "show run-config commands": "Incorrect usage. Use the '?' or <TAB> key to list commands."}}}},
+    }}
+    assert ConfigArchiveReport().can_generate(data)
+    zf = _zip(data)
+    assert set(zf.namelist()) == {"lab-wlc-01.txt", "SUMMARY.txt"}
+    text = zf.read("lab-wlc-01.txt").decode()
+    assert "Plain123" not in text and "config sysname lab-wlc-01" in text

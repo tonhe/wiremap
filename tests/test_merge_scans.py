@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from app.jsonio import load_json
 from app.merge_scans import expand_paths, main
 
 
@@ -55,7 +56,7 @@ def test_directory_output_uses_merged_scan_id(tmp_path):
 
     main([a, b, "-o", str(outdir)])
 
-    written = list(outdir.glob("*_merged.json"))
+    written = list(outdir.glob("*_merged.json.gz"))
     assert len(written) == 1
 
 
@@ -140,9 +141,9 @@ def test_two_merges_in_one_second_do_not_overwrite(tmp_path, monkeypatch):
     main([a, b, "-o", str(outdir)])
     main([a, c, "-o", str(outdir)])
 
-    written = sorted(p.name for p in outdir.glob("*.json"))
-    assert written == ["2026-10-31_12-00-00_merged-2.json",
-                       "2026-10-31_12-00-00_merged.json"]
-    second = json.loads((outdir / written[0]).read_text())
+    written = sorted(p.name for p in outdir.glob("*.json.gz"))
+    assert written == ["2026-10-31_12-00-00_merged-2.json.gz",
+                       "2026-10-31_12-00-00_merged.json.gz"]
+    second = load_json(str(outdir / written[0]))
     assert second["discovery_id"] == "2026-10-31_12-00-00_merged-2"
     assert set(second["devices"]) == {"SW1", "SW3"}

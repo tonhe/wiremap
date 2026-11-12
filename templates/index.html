@@ -585,6 +585,8 @@
                         <div class="stat-label">ELAPSED</div>
                     </div>
                 </div>
+                <div id="active-devices" style="display: none; margin-bottom: 8px; background: var(--bg-body); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.6; color: var(--text-muted); overflow-x: auto; white-space: nowrap;">
+                </div>
                 <div id="event-log" style="height: 320px; overflow-y: auto; background: var(--bg-body); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.6;">
                 </div>
             </div>
@@ -686,27 +688,6 @@
                         </p>
                     </div>
 
-                    {% macro optional_collector_choice() %}
-                    {% if optional_collectors %}
-                    <div class="form-group">
-                        <label>Optional Collectors</label>
-                        <input type="hidden" name="collector_choice" value="1">
-                        <div class="checkbox-grid">
-                            {% for col in optional_collectors %}
-                            <label title="{{ col.description }}">
-                                <input type="checkbox" name="collectors" value="{{ col.name }}"
-                                       {% if col.enabled_by_default %}checked{% endif %}> {{ col.label }}
-                            </label>
-                            {% endfor %}
-                        </div>
-                        <p style="font-size: 12px; color: var(--text-muted); margin: 6px 0 0 0;">
-                            QoS adds roughly a minute per 100 classic IOS switches. Untick it for a
-                            faster run when the QoS report is not needed.
-                        </p>
-                    </div>
-                    {% endif %}
-                    {% endmacro %}
-                    {{ optional_collector_choice() }}
 
                     <details style="margin-bottom: 16px;">
                         <summary style="cursor: pointer; font-size: 13px; color: var(--text-muted);">
@@ -1028,7 +1009,6 @@ fw1.example.com paloalto_panos"></textarea>
                         </p>
                     </div>
 
-                    {{ optional_collector_choice() }}
 
                     <div class="form-group">
                         <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
@@ -1072,7 +1052,7 @@ fw1.example.com paloalto_panos"></textarea>
                 <div style="margin-top: 16px; text-align: center;">
                     <label class="upload-link" style="display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-muted); cursor: pointer; margin-bottom: 0;">
                         <span style="font-size: 15px;">&#8593;</span> Upload scan data JSON
-                        <input type="file" id="upload-inventory-file" accept=".json" style="display: none;">
+                        <input type="file" id="upload-inventory-file" accept=".json,.gz" style="display: none;">
                     </label>
                 </div>
             </div>
@@ -1431,6 +1411,7 @@ fw1.example.com paloalto_panos"></textarea>
         panel.style.display = 'block';
         document.getElementById('progress-title').textContent = title;
         document.getElementById('event-log').textContent = '';
+        clearActive();
         document.getElementById('prog-discovered').textContent = '0';
         document.getElementById('prog-failed').textContent = '0';
         document.getElementById('prog-depth').textContent = '--';
@@ -1499,8 +1480,21 @@ fw1.example.com paloalto_panos"></textarea>
             var d = JSON.parse(e.data);
             logEvent(d.hostname + ': ' + d.total + ' neighbors found, ' + d.new + ' new', 'muted');
         });
+        _eventSource.addEventListener('command_running', function(e) {
+            var d = JSON.parse(e.data);
+            _active[d.ip] = {hostname: d.hostname, command: d.command, count: d.count,
+                             since: Date.now()};
+            renderActive();
+        });
+        _eventSource.addEventListener('command_issue', function(e) {
+            var d = JSON.parse(e.data);
+            var took = (d.seconds !== null && d.seconds !== undefined) ? ' (' + d.seconds + 's)' : '';
+            var type = d.severity === 'error' ? 'fail' : d.severity === 'warning' ? 'warn' : 'muted';
+            logEvent(d.hostname + ': [' + d.kind + '] \'' + d.command + '\'' + took + ' — ' + d.detail, type);
+        });
         _eventSource.addEventListener('device_complete', function(e) {
             var d = JSON.parse(e.data);
+            dropActive(d.ip);
             if (d.skipped) {
                 logEvent(d.ip + ' skipped \u2014 already discovered as ' + d.hostname, 'muted');
             } else {
@@ -1511,6 +1505,7 @@ fw1.example.com paloalto_panos"></textarea>
         });
         _eventSource.addEventListener('device_failed', function(e) {
             var d = JSON.parse(e.data);
+            dropActive(d.ip);
             _failedCount++;
             document.getElementById('prog-failed').textContent = _failedCount;
             var who = d.hostname ? d.hostname + ' (' + d.ip + ')' : d.ip;
@@ -1616,7 +1611,40 @@ fw1.example.com paloalto_panos"></textarea>
         if (data.refused_hint) logEvent('HINT: ' + data.refused_hint, 'warn');
     }
 
+    // One line per device being collected: the command it is on and for how long.
+    var _active = {};
+    var _activeTimer = null;
+
+    function renderActive() {
+        var box = document.getElementById('active-devices');
+        var ips = Object.keys(_active);
+        box.style.display = ips.length ? 'block' : 'none';
+        box.textContent = '';
+        ips.forEach(function(ip) {
+            var a = _active[ip];
+            var secs = Math.floor((Date.now() - a.since) / 1000);
+            var line = document.createElement('div');
+            if (secs >= 30) line.style.color = 'var(--warning, #fbbf24)';
+            line.textContent = a.hostname + ' (' + ip + ')  #' + a.count + '  ' +
+                               a.command + '  ' + secs + 's';
+            box.appendChild(line);
+        });
+        if (ips.length && !_activeTimer) _activeTimer = setInterval(renderActive, 1000);
+        if (!ips.length && _activeTimer) { clearInterval(_activeTimer); _activeTimer = null; }
+    }
+
+    function dropActive(ip) {
+        delete _active[ip];
+        renderActive();
+    }
+
+    function clearActive() {
+        _active = {};
+        renderActive();
+    }
+
     function onScanFinished(title, data) {
+        clearActive();
         if (_eventSource) _eventSource.close();
         _eventSource = null;
         if (_elapsedInterval) clearInterval(_elapsedInterval);
@@ -1919,7 +1947,7 @@ fw1.example.com paloalto_panos"></textarea>
                     return;
                 }
                 items.forEach(function(inv) {
-                    var key = inv.filename.replace('.json', '');
+                    var key = inv.filename.replace(/\.json(\.gz)?$/, '');
                     var row = document.createElement('div');
                     row.className = 'inventory-row';
                     row.addEventListener('click', function() {

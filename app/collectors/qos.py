@@ -839,8 +839,9 @@ def stack_member_count(context):
 def select_queue_ports(context, cap=QUEUE_STATS_CAP):
     """Ports worth per-port queue counters: uplinks first, then voice ports.
 
-    Returns (selected, eligible_count). Port-channels are skipped; their
-    members show up individually through CDP.
+    Returns (selected, eligible_count); cap=None returns every eligible port
+    in rank order. Port-channels are skipped; their members show up
+    individually through CDP.
     """
     ports = port_context(context)
     ranked = {}
@@ -957,13 +958,46 @@ def join_device(parsed, context, family):
     return parsed
 
 
+# ---------------------------------------------------------------------------
+# Deciding whether QoS is in use before the per-port commands
+# ---------------------------------------------------------------------------
+
+# Run only where QoS is in use: on a classic switch with mls qos off nothing
+# is trusted, queued or remapped, and a Catalyst 9000 with no policy attached
+# has nothing to show per port that the interface counters do not.
+_CLASSIC_DEEP = CLASSIC[1:]
+
+
+def deep_commands(family, cmds):
+    """The commands in cmds that only matter when QoS is in use."""
+    if family in (FAMILY_CLASSIC, FAMILY_UNKNOWN):
+        return [c for c in cmds if c in _CLASSIC_DEEP]
+    if family == FAMILY_CAT9K:
+        return [c for c in cmds if c == FED_POLICY_SUMMARY or _FED_CMD_RE.match(c)]
+    return []
+
+
+def qos_in_use(family, raw):
+    """(in use, reason when not) from the first-pass outputs."""
+    if family in (FAMILY_CLASSIC, FAMILY_UNKNOWN):
+        if parse_mls_qos(raw.get(MLS_QOS, ""))["mls_qos_enabled"] is False:
+            return False, "QoS is disabled globally"
+        return True, ""
+    if family == FAMILY_CAT9K:
+        attached = [p for p in parse_policy_map_interface(raw.get(POLICY_MAP_INTERFACE, ""))
+                    if p["interface"] != "Control Plane"]
+        auto = parse_auto_qos(raw.get(AUTO_QOS, ""))
+        if not attached and not auto["global"] and not auto["interfaces"]:
+            return False, "no QoS policy attached to any interface"
+    return True, ""
+
+
 class QosCollector(BaseCollector):
     name = "qos"
     label = "QoS"
     description = ("Collect QoS policy counters, trust, queueing and DSCP "
                    "counters, and class/policy definitions")
     enabled_by_default = True
-    optional = True
     needs_custom_collect = True
     needs_device_context = True
     unsupported_platforms = frozenset({"cisco_wlc", "vyos", "watchguard_fireware",
@@ -1007,7 +1041,7 @@ class QosCollector(BaseCollector):
         }
 
     def collect(self, connection, device_type: str, context=None) -> dict:
-        if device_type in self.unsupported_platforms:
+        if not self.applies_to(device_type):
             return {"raw": {}, "parsed": {"not_applicable": True,
                                           "reason": f"qos does not apply to {device_type}"}}
         context = context or {}
@@ -1019,25 +1053,39 @@ class QosCollector(BaseCollector):
                                           "reason": f"no commands defined for {device_type}"}}
         selection = None
         if family == FAMILY_CAT9K:
-            selected, eligible = select_queue_ports(context)
+            ranked, eligible = select_queue_ports(context, cap=None)
+            selected, skipped = ranked[:QUEUE_STATS_CAP], ranked[QUEUE_STATS_CAP:]
             stacked = stack_member_count(context) > 1
             cmds = cmds + [FED_QUEUE_STATS.format(
                 switch=fed_switch_keyword(p, stacked), intf=p) for p in selected]
-            selection = {"selected": selected, "eligible": eligible,
-                         "cap": QUEUE_STATS_CAP, "capped": eligible > len(selected)}
+            selection = {"selected": selected, "skipped": skipped, "eligible": eligible,
+                         "cap": QUEUE_STATS_CAP, "capped": bool(skipped)}
 
         raw_outputs = {}
-        for cmd in cmds:
-            try:
-                raw_outputs[cmd] = connection.send_command(cmd, read_timeout=READ_TIMEOUT)
-            except Exception as e:
-                raw_outputs[cmd] = send_failure_output(e)
+
+        def run(batch):
+            for cmd in batch:
+                try:
+                    raw_outputs[cmd] = connection.send_command(cmd, read_timeout=READ_TIMEOUT)
+                except Exception as e:
+                    raw_outputs[cmd] = send_failure_output(e)
+
+        deep = deep_commands(family, cmds)
+        run([c for c in cmds if c not in deep])
+        in_use, reason = qos_in_use(family, raw_outputs)
+        if in_use:
+            run(deep)
 
         parsed = self.parse_collected(raw_outputs, device_type)
         if not parsed.get("not_applicable") and not parsed.get("collector_failed"):
             parsed = join_device(parsed, context, family)
             if selection is not None:
                 parsed["queue_stats_ports"] = selection
+            if not in_use and deep:
+                parsed["qos_global"]["deep_skipped"] = reason
+                parsed["skipped_commands"] = deep
+                if selection is not None:
+                    selection["not_run"] = reason
         else:
             for key in ("_mls_interface", "_mls_queueing", "_mls_statistics", "_fed_queues"):
                 parsed.pop(key, None)

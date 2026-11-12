@@ -1,8 +1,12 @@
+import gzip
+import io
 import json
 import os
 from unittest.mock import patch
 
 import pytest
+
+from app.jsonio import write_json
 
 # Patch the FileHandler before importing app.app so the module-level
 # logging.basicConfig() call doesn't try to open /app/logs/app.log.
@@ -122,7 +126,7 @@ def test_load_inventory_returns_json(inventory_dir, client):
     inv.add_device("TEST-SW", mgmt_ip="10.0.0.1", device_type="cisco_ios")
     inv.save(inventory_dir)
 
-    files = [f for f in os.listdir(inventory_dir) if f.endswith('.json')]
+    files = [f for f in os.listdir(inventory_dir) if f.endswith('.json.gz')]
     rv = client.post('/load-inventory', data={"filename": files[0]})
     assert rv.status_code == 200
     data = rv.get_json()
@@ -622,29 +626,47 @@ def test_index_offers_add_credentials_on_both_forms(client):
     assert 'data-prefix="disc"' in body and 'data-prefix="ts"' in body
 
 
-def test_index_offers_optional_collectors_on_both_forms(client):
+def test_scan_forms_offer_no_collector_choice(client, monkeypatch):
+    """Collectors pick themselves by device type; nothing to choose."""
     _point_at_repo_templates()
     body = client.get("/").get_data(as_text=True)
-    assert body.count("name=\"collector_choice\"") == 2
-    assert body.count("name=\"collectors\" value=\"qos\"") == 2
-
-
-def test_unticked_optional_collector_is_skipped(client, monkeypatch):
+    assert "collector_choice" not in body and 'name="collectors"' not in body
     scan = _CapturedScan(monkeypatch)
     client.post("/scan/start", data=dict(TARGETED, host_list="192.0.2.1",
                                          collector_choice="1"))
-    assert scan.engine_kwargs["skip_collectors"] == {"qos"}
+    assert "skip_collectors" not in scan.engine_kwargs
 
 
-def test_ticked_optional_collector_runs(client, monkeypatch):
-    scan = _CapturedScan(monkeypatch)
-    client.post("/scan/start", data=dict(TARGETED, host_list="192.0.2.1",
-                                         collector_choice="1", collectors="qos"))
-    assert scan.engine_kwargs["skip_collectors"] == set()
+def _gz_scan(discovery_id):
+    return {"discovery_id": discovery_id, "seed_ip": "192.0.2.1",
+            "timestamp": "2026-11-01T10:00:00+00:00", "params": {},
+            "devices": {"LAB-SW-01": {"hostname": "LAB-SW-01", "mgmt_ip": "192.0.2.1",
+                                       "login_succeeded": True, "collector_data": {}}}}
 
 
-def test_scan_request_without_the_choice_runs_everything(client, monkeypatch):
-    """An API caller that never saw the form skips nothing."""
-    scan = _CapturedScan(monkeypatch)
-    client.post("/scan/start", data=dict(TARGETED, host_list="192.0.2.1"))
-    assert scan.engine_kwargs["skip_collectors"] == set()
+def test_app_serves_gzip_and_legacy_scans(inventory_dir, client):
+    write_json(_gz_scan("new"), os.path.join(inventory_dir, "new.json.gz"))
+    write_json(_gz_scan("old"), os.path.join(inventory_dir, "old.json"))
+    for key in ("new", "old"):
+        rv = client.get(f"/api/reports/available/{key}")
+        assert rv.status_code == 200, key
+    rv = client.get("/export/inventory/new")
+    assert rv.status_code == 200
+    assert rv.headers["Content-Type"] == "application/gzip"
+    assert "new.json.gz" in rv.headers["Content-Disposition"]
+    assert gzip.decompress(rv.data)
+    rv = client.get("/export/inventory/old")
+    assert "old.json" in rv.headers["Content-Disposition"]
+    assert client.get("/export/inventory/missing").status_code == 404
+
+
+def test_app_upload_accepts_gzip(inventory_dir, client):
+    payload = gzip.compress(json.dumps(_gz_scan("uploaded")).encode())
+    rv = client.post("/load-inventory",
+                     data={"file": (io.BytesIO(payload), "uploaded.json.gz")},
+                     content_type="multipart/form-data")
+    assert rv.status_code == 200
+    assert rv.get_json()["inventory_key"] == "uploaded"
+    assert os.path.exists(os.path.join(inventory_dir, "uploaded.json.gz"))
+    rv = client.post("/load-inventory", data={"filename": "uploaded.json.gz"})
+    assert rv.status_code == 200

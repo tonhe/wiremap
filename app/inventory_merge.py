@@ -19,6 +19,10 @@ import os
 from datetime import datetime, timezone
 
 try:
+    from app.jsonio import find_scan
+except ImportError:
+    from jsonio import find_scan
+try:
     from app.failures import reason_counts, plain_failures
 except ImportError:
     from failures import reason_counts, plain_failures
@@ -405,7 +409,7 @@ def claim_unused_id(merged, directory):
     """
     base = merged["discovery_id"]
     candidate, n = base, 2
-    while os.path.exists(os.path.join(directory, f"{candidate}.json")):
+    while find_scan(directory, candidate):
         candidate = f"{base}-{n}"
         n += 1
     merged["discovery_id"] = candidate

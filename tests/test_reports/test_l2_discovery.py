@@ -520,9 +520,9 @@ def test_generate_summary_tab(l2_inventory):
             metrics.append(val)
     assert "Device Count" in metrics
     assert "VLAN Count" in metrics
-    assert "Critical Findings" in metrics
-    assert "Warning Findings" in metrics
-    assert "Info Findings" in metrics
+    assert "Critical Finding Rows" in metrics
+    assert "Warning Finding Rows" in metrics
+    assert "Info Finding Rows" in metrics
     device_row = [r for r in range(2, ws.max_row + 1)
                   if ws.cell(row=r, column=1).value == "Device Count"][0]
     assert ws.cell(row=device_row, column=2).value == 3

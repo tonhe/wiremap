@@ -41,6 +41,7 @@ _COMMANDS = {
     "cisco_nxos": ["show version", "show inventory", "show module", "show vpc",
                    "show license usage", "show callhome"],
     "arista_eos": ["show version", "show inventory", "show module"],
+    "cisco_asa": ["show version", "show inventory"],
     "juniper_junos": ["show version", "show chassis hardware", "show virtual-chassis"],
     "extreme": ["show version", "show switch"],
     "vyos": ["show version", "show hardware cpu"],
@@ -714,6 +715,7 @@ class DeviceInventoryCollector(BaseCollector):
     label = "Device Inventory"
     description = "Collect hardware version, serial numbers, and module information"
     enabled_by_default = True
+    serves_asa = True
 
     def get_commands(self, device_type: str) -> list[str]:
         return _COMMANDS.get(device_type, _DEFAULT_COMMANDS)

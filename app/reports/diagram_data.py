@@ -23,10 +23,12 @@ try:
     from app.device_facts import extract_device_facts
     from app.identity import normalize_hostname
     from app.ifname import canonical_ifname
+    from app.wlc_topology import ap_links
 except ImportError:
     from device_facts import extract_device_facts
     from identity import normalize_hostname
     from ifname import canonical_ifname
+    from wlc_topology import ap_links
 
 
 def _role(device):
@@ -59,6 +61,13 @@ def _network_for(ip, prefix):
         return str(ipaddress.ip_network(f"{ip}/32", strict=False))
     except ValueError:
         return ""
+
+
+def _seen_from_switch(seen, link):
+    """True when the switch reported a link from this port to this AP."""
+    switch_end = f"{normalize_hostname(link['switch'])}:{canonical_ifname(link['switch_port'])}"
+    ap = normalize_hostname(link["ap"])
+    return any(switch_end in k and any(e.startswith(ap + ":") for e in k) for k in seen)
 
 
 def _parsed(device, collector):
@@ -104,6 +113,17 @@ class DiagramDataReport(BaseReport):
                 "Yes" if device.get("login_succeeded") else "No",
                 device.get("login_error") or "",
             ])
+        # APs are known only from their controller, which reports each one.
+        known = {normalize_hostname(h) for h in inventory_data.get("devices", {})}
+        for link in ap_links(inventory_data):
+            if normalize_hostname(link["ap"]) in known:
+                continue
+            known.add(normalize_hostname(link["ap"]))
+            rows.append([
+                link["ap"], link["ap_ip"], link["ap_model"], "access_point",
+                "Access Point", "wireless_ap", "", "", _derive_site(link["ap"]),
+                f"wlc {link['controller']}", "No", "",
+            ])
         return headers, rows
 
     def _l2_links_sheet(self, inventory_data):
@@ -131,6 +151,19 @@ class DiagramDataReport(BaseReport):
                     n.get("remote_platform") or "",
                     n.get("source") or "cdp_lldp",
                 ])
+        for link in ap_links(inventory_data):
+            key = tuple(sorted([
+                f"{normalize_hostname(link['ap'])}:",
+                f"{normalize_hostname(link['switch'])}:{canonical_ifname(link['switch_port'])}",
+            ]))
+            # The switch's own CDP table already has this link when it was scanned.
+            if key in seen or _seen_from_switch(seen, link):
+                continue
+            seen.add(key)
+            rows.append([
+                link["ap"], "", link["switch"], link["switch_port"], link["switch_ip"],
+                "", "wlc ap cdp",
+            ])
         return headers, rows
 
     def _l3_links_sheet(self, inventory_data):

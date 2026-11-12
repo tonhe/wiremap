@@ -83,25 +83,8 @@ def test_classic_switch_gets_neighbours_from_cdp():
     assert ports["GigabitEthernet1/0/5"]["neighbor_class"] == "phone"
 
 
-def test_qos_can_be_skipped():
-    inventory, sent = _discover("SW-A", C2960_SHOW_VERSION,
-                                skip_collectors={"qos"})
-    assert POLICY_MAP_INTERFACE not in sent and MLS_QOS not in sent
-    device = inventory.devices["SW-A"]
-    assert "qos" not in device["collector_data"]
-    params = inventory.to_dict()["params"]
-    assert params["collectors_skipped"] == ["qos"]
-    assert "qos" not in params["collectors_enabled"]
-
-
-def test_required_collectors_cannot_be_skipped():
-    _, sent = _discover("SW-A", C2960_SHOW_VERSION,
-                        skip_collectors={"cdp_lldp", "qos"})
-    assert "show cdp neighbors detail" in sent
-
-
-def test_nothing_skipped_by_default():
+def test_every_collector_runs():
     inventory, _ = _discover("SW-A", C2960_SHOW_VERSION)
     params = inventory.to_dict()["params"]
-    assert params["collectors_skipped"] == []
-    assert "qos" in params["collectors_enabled"]
+    assert "collectors_skipped" not in params
+    assert {"qos", "asa", "wlc"} <= set(params["collectors_enabled"])

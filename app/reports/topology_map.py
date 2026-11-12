@@ -41,6 +41,20 @@ class TopologyMapReport(BaseReport):
                 "arp_count": 0,
             }
 
+        # APs are known only from their controller; each joins on the switch
+        # port the controller reports for it.
+        try:
+            from app.wlc_topology import ap_links
+        except ImportError:
+            from wlc_topology import ap_links
+        for link in ap_links(inventory_data):
+            node = topology_dict.setdefault(link["ap"], {
+                "device_type": "access_point", "has_routing": False, "neighbors": [],
+                "arp_entries": [], "arp_count": 0})
+            node["neighbors"].append({
+                "neighbor_device": link["switch"], "local_interface": "uplink",
+                "remote_interface": link["switch_port"], "protocols": ["CDP (via controller)"]})
+
         seed_ip = inventory_data.get("seed_ip", "")
         seed_hostname = None
         for hostname, device in inventory_data.get("devices", {}).items():

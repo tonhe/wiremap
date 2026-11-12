@@ -1,0 +1,52 @@
+# AireOS controller and access point lifecycle facts for the Cisco WLC report.
+#
+# max_aireos: last AireOS release the hardware runs.
+# c9800:      whether the AP can join a Catalyst 9800 controller
+#             ("Yes", "Up to 17.3", "No"); controllers are replaced, not migrated.
+# wifi:       Wi-Fi generation.
+#
+# Values follow Cisco's published compatibility matrices as of 2026. Check them
+# against the current matrix before an assessment and edit here; nothing in the
+# code needs to change. Lookups match the longest key that prefixes the model:
+# controllers by PID, APs by the four-digit series (2602 -> 2600, 1142 -> 1140).
+
+controllers:
+  AIR-CT2504: {max_aireos: "8.5", c9800: "n/a", wifi: ""}
+  AIR-CT3504: {max_aireos: "8.10", c9800: "n/a", wifi: ""}
+  AIR-CT5508: {max_aireos: "8.5", c9800: "n/a", wifi: ""}
+  AIR-CT5520: {max_aireos: "8.10", c9800: "n/a", wifi: ""}
+  AIR-CT7510: {max_aireos: "8.5", c9800: "n/a", wifi: ""}
+  AIR-CT8510: {max_aireos: "8.5", c9800: "n/a", wifi: ""}
+  AIR-CT8540: {max_aireos: "8.10", c9800: "n/a", wifi: ""}
+  AIR-CTVM: {max_aireos: "8.10", c9800: "n/a", wifi: ""}
+  WS-SVC-WISM2: {max_aireos: "8.5", c9800: "n/a", wifi: ""}
+
+aps:
+  "1040": {max_aireos: "8.0", c9800: "No", wifi: "4 (n)"}
+  "1140": {max_aireos: "8.0", c9800: "No", wifi: "4 (n)"}
+  "1260": {max_aireos: "8.0", c9800: "No", wifi: "4 (n)"}
+  "3500": {max_aireos: "8.0", c9800: "No", wifi: "4 (n)"}
+  "1600": {max_aireos: "8.5", c9800: "No", wifi: "4 (n)"}
+  "2600": {max_aireos: "8.5", c9800: "No", wifi: "4 (n)"}
+  "3600": {max_aireos: "8.5", c9800: "No", wifi: "4 (n)"}
+  "1530": {max_aireos: "8.5", c9800: "No", wifi: "4 (n)"}
+  "1550": {max_aireos: "8.5", c9800: "No", wifi: "4 (n)"}
+  "1570": {max_aireos: "8.10", c9800: "Up to 17.3", wifi: "5 Wave 1"}
+  "1700": {max_aireos: "8.10", c9800: "Up to 17.3", wifi: "5 Wave 1"}
+  "2700": {max_aireos: "8.10", c9800: "Up to 17.3", wifi: "5 Wave 1"}
+  "3700": {max_aireos: "8.10", c9800: "Up to 17.3", wifi: "5 Wave 1"}
+  "1540": {max_aireos: "8.10", c9800: "Yes", wifi: "5 Wave 2"}
+  "1560": {max_aireos: "8.10", c9800: "Yes", wifi: "5 Wave 2"}
+  "1800": {max_aireos: "8.10", c9800: "Yes", wifi: "5 Wave 2"}
+  "1810": {max_aireos: "8.10", c9800: "Yes", wifi: "5 Wave 2"}
+  "1815": {max_aireos: "8.10", c9800: "Yes", wifi: "5 Wave 2"}
+  "1830": {max_aireos: "8.10", c9800: "Yes", wifi: "5 Wave 2"}
+  "1850": {max_aireos: "8.10", c9800: "Yes", wifi: "5 Wave 2"}
+  "2800": {max_aireos: "8.10", c9800: "Yes", wifi: "5 Wave 2"}
+  "3800": {max_aireos: "8.10", c9800: "Yes", wifi: "5 Wave 2"}
+  "4800": {max_aireos: "8.10", c9800: "Yes", wifi: "5 Wave 2"}
+  "9105": {max_aireos: "8.10", c9800: "Yes", wifi: "6"}
+  "9115": {max_aireos: "8.10", c9800: "Yes", wifi: "6"}
+  "9117": {max_aireos: "8.10", c9800: "Yes", wifi: "6"}
+  "9120": {max_aireos: "8.10", c9800: "Yes", wifi: "6"}
+  "9130": {max_aireos: "8.10", c9800: "Yes", wifi: "6"}

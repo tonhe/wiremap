@@ -360,7 +360,8 @@ def test_engine_learns_source_from_seed_and_checks_acls_with_it(
                for w in summary["source_access_warnings"])
     # Asked once, on the live session, before the collectors ran.
     assert conn.commands.count("show users") == 1
-    assert conn.commands[0] == "show users"
+    identity = [c for c in conn.commands if "Adaptive Security" not in c]
+    assert identity[0] == "show users"
     learned = [e for e in events if e["event"] == "source_ip_learned"][0]
     assert learned["previous"] == "172.18.0.2"
     assert [e["message"] for e in events

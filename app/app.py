@@ -13,6 +13,7 @@ import requests
 from device_detector import DeviceTypeDetector
 from discovery_engine import DiscoveryEngine, DiscoveryError
 from inventory import DiscoveryInventory
+from jsonio import find_scan, load_json
 from inventory_merge import claim_unused_id, merge_inventories as merge_inventory_dicts
 from neighbors import CrawlScope, get_registry as get_neighbor_sources
 from snmp_probe import SnmpCredentials
@@ -23,10 +24,8 @@ from source_access import clean_source_ip
 from target_list import (WARN_TARGET_COUNT, make_resolver, parse_targets,
                          resolve_targets)
 try:
-    from app.collectors import get_registry as get_collector_registry
     from app.reports import get_registry as get_report_registry, get_report
 except ImportError:
-    from collectors import get_registry as get_collector_registry
     from reports import get_registry as get_report_registry, get_report
 try:
     from app.credentials import parse_credential_form
@@ -69,6 +68,7 @@ DEVICE_TYPES = [
     ('cisco_xe', 'Cisco IOS-XE'),
     ('cisco_nxos', 'Cisco NX-OS'),
     ('cisco_xr', 'Cisco IOS-XR'),
+    ('cisco_asa', 'Cisco ASA / ASAv'),
     ('arista_eos', 'Arista EOS'),
     ('juniper_junos', 'Juniper JunOS'),
     ('paloalto_panos', 'Palo Alto PAN-OS'),
@@ -98,29 +98,9 @@ def index():
          "enabled_by_default": s.enabled_by_default}
         for s in sorted(get_neighbor_sources().values(), key=lambda s: s.name)
     ]
-    optional_collectors = [
-        {"name": c.name, "label": c.label, "description": c.description,
-         "enabled_by_default": c.enabled_by_default}
-        for c in sorted(get_collector_registry().values(), key=lambda c: c.name)
-        if c.optional
-    ]
     return render_template('index.html', device_types=DEVICE_TYPES, version=VERSION,
                          report_registry=_get_report_info(),
-                         neighbor_sources=sources,
-                         optional_collectors=optional_collectors)
-
-
-def _skipped_collectors(form):
-    """Optional collectors left unticked on the scan form.
-
-    Only a form that showed the choice can skip anything; a request without
-    the marker field runs every collector.
-    """
-    if form.get('collector_choice') != '1':
-        return set()
-    chosen = set(form.getlist('collectors'))
-    return {name for name, c in get_collector_registry().items()
-            if c.optional and name not in chosen}
+                         neighbor_sources=sources)
 
 
 @app.route('/scan/start', methods=['POST'])
@@ -178,7 +158,6 @@ def scan_start():
     # Neighbour sources: which sightings are allowed to feed the crawl.
     submitted_sources = request.form.getlist('neighbor_sources')
     neighbor_sources = set(submitted_sources) if submitted_sources else None
-    skip_collectors = _skipped_collectors(request.form)
 
     try:
         crawl_scope = CrawlScope(
@@ -202,8 +181,8 @@ def scan_start():
     base_inventory = None
     continue_from = request.form.get('continue_from', '').strip()
     if continue_from:
-        base_path = os.path.join(INVENTORY_DIR, os.path.basename(continue_from))
-        if not os.path.exists(base_path):
+        base_path = find_scan(INVENTORY_DIR, continue_from)
+        if not base_path:
             return jsonify({"error": f"Previous scan not found: {continue_from}"}), 400
         try:
             base_inventory = DiscoveryInventory.load(base_path)
@@ -249,7 +228,6 @@ def scan_start():
             allow_telnet=allow_telnet,
             source_ip=source_ip or None,
             connect_timeout=connect_timeout,
-            skip_collectors=skip_collectors,
         )
         inventory = engine.discover()
         inventory.save(INVENTORY_DIR)
@@ -324,8 +302,8 @@ def merge_inventories_route():
 
     loaded = []
     for name in filenames:
-        path = os.path.join(INVENTORY_DIR, os.path.basename(name))
-        if not os.path.exists(path):
+        path = find_scan(INVENTORY_DIR, name)
+        if not path:
             return jsonify({"error": f"Scan not found: {name}"}), 404
         try:
             loaded.append(DiscoveryInventory.load(path).to_dict())
@@ -340,14 +318,14 @@ def merge_inventories_route():
 
     claim_unused_id(merged_data, INVENTORY_DIR)
     merged = DiscoveryInventory(merged_data)
-    merged.save(INVENTORY_DIR)
+    saved_path = merged.save(INVENTORY_DIR)
 
     registry = get_report_registry()
     available = [r.name for r in registry.values() if r.can_generate(merged_data)]
 
     return jsonify({
         "inventory_key": merged.discovery_id,
-        "filename": f"{merged.discovery_id}.json",
+        "filename": os.path.basename(saved_path),
         "device_count": len(merged.devices),
         "merged_from": merged_data.get("merged_from", []),
         "merge_conflicts": merged_data.get("merge_conflicts", []),
@@ -372,14 +350,13 @@ def load_inventory():
     """Load an inventory file for report generation. Returns JSON."""
     if 'file' in request.files and request.files['file'].filename:
         f = request.files['file']
-        data = json.load(f)
+        data = load_json(f)
         inventory = DiscoveryInventory(data)
-        check_path = os.path.join(INVENTORY_DIR, f"{inventory.discovery_id}.json")
-        if not os.path.exists(check_path):
+        if not find_scan(INVENTORY_DIR, inventory.discovery_id):
             inventory.save(INVENTORY_DIR)
     elif 'filename' in request.form:
-        filepath = os.path.join(INVENTORY_DIR, request.form['filename'])
-        if not os.path.exists(filepath):
+        filepath = find_scan(INVENTORY_DIR, request.form['filename'])
+        if not filepath:
             return jsonify({"error": "Inventory file not found"}), 404
         inventory = DiscoveryInventory.load(filepath)
     else:
@@ -399,8 +376,8 @@ def load_inventory():
 @app.route('/api/reports/available/<key>')
 def api_reports_available(key):
     """Return which reports can be generated for this inventory."""
-    filepath = os.path.join(INVENTORY_DIR, f"{key}.json")
-    if not os.path.exists(filepath):
+    filepath = find_scan(INVENTORY_DIR, key)
+    if not filepath:
         return jsonify({"error": "Inventory not found"}), 404
 
     inventory = DiscoveryInventory.load(filepath)
@@ -422,27 +399,29 @@ def api_reports_available(key):
 @app.route('/export/inventory/<key>')
 def export_inventory(key):
     """Download discovery inventory JSON."""
-    filepath = os.path.join(INVENTORY_DIR, f"{key}.json")
-    if not os.path.exists(filepath):
+    filepath = find_scan(INVENTORY_DIR, key)
+    if not filepath:
         return "Inventory not found", 404
+    gz = filepath.endswith(".gz")
     return send_file(filepath,
-                     mimetype='application/json',
+                     mimetype='application/gzip' if gz else 'application/json',
                      as_attachment=True,
-                     download_name=f"{key}.json")
+                     download_name=os.path.basename(filepath))
 
 
 @app.route('/export/archive/<key>')
 def export_archive(key):
     """Download full ZIP archive (inventory + configs)."""
-    filepath = os.path.join(INVENTORY_DIR, f"{key}.json")
-    if not os.path.exists(filepath):
+    filepath = find_scan(INVENTORY_DIR, key)
+    if not filepath:
         return "Inventory not found", 404
 
     inventory = DiscoveryInventory.load(filepath)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         # Include inventory JSON
-        zf.write(filepath, "inventory.json")
+        zf.write(filepath, "inventory.json.gz" if filepath.endswith(".gz")
+                 else "inventory.json")
 
         # Include device configs if available
         for hostname, device in inventory.devices.items():
@@ -467,8 +446,8 @@ def health():
 @app.route('/export/report/<key>/<report_name>')
 def export_report(key, report_name):
     """Generate and download a report for a given inventory."""
-    filepath = os.path.join(INVENTORY_DIR, f"{key}.json")
-    if not os.path.exists(filepath):
+    filepath = find_scan(INVENTORY_DIR, key)
+    if not filepath:
         return "Inventory not found", 404
 
     report = get_report(report_name)

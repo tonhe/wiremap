@@ -15,8 +15,10 @@ a year.
 """
 import re
 from collections import OrderedDict, defaultdict
+from ipaddress import IPv4Address, IPv4Network, AddressValueError
 
 from .base import BaseReport
+from .internet_edge import _device_addresses, _is_public_ip
 from .findings import (
     CRITICAL, WARNING, INFO, AGGREGATE_HEADERS, DETAIL_SHEET,
     make_finding, overfire_check, aggregate_rows, summary_count_rows,
@@ -55,6 +57,64 @@ _NOT_WAN_RE = re.compile(
     r"^(?:Loopback|Null|NVI|Vlan|VirtualPortGroup|Embedded-Service|"
     r"BDI|Virtual-Access|Virtual-Template|Dialer|Tunnel)", re.I)
 _MGMT_RE = re.compile(r"^GigabitEthernet0$|^Management|^mgmt", re.I)
+# A router interface with no CDP neighbour is only treated as a WAN circuit
+# with evidence: a public address, a BGP peer on its subnet, ip nat outside,
+# or a description that names a circuit.
+_WAN_DESC_RE = re.compile(
+    r"(?<![a-z])(?:wan|mpls|inet|internet|isp|dci|megaport)(?![a-z])", re.I)
+_NAT_OUTSIDE_RE = re.compile(r"^\s+ip\s+nat\s+outside\b")
+
+
+def _parent(name):
+    return name.split(".")[0]
+
+
+def _nat_outside_interfaces(device):
+    names = set()
+    config = _parsed(device, "config").get("config")
+    current = None
+    for line in (config if isinstance(config, str) else "").splitlines():
+        if line.startswith("interface "):
+            current = canonical_ifname(line.split(None, 1)[1].strip())
+        elif line and not line[0].isspace():
+            current = None
+        elif current and _NAT_OUTSIDE_RE.match(line):
+            names.add(current)
+    stats = _parsed(device, "edge_services").get("nat_statistics") or {}
+    names.update(canonical_ifname(n) for n in stats.get("outside_interfaces") or [])
+    return names
+
+
+def _wan_evidence(device, counters):
+    """{interface: reason} for interfaces that look like a WAN circuit."""
+    evidence = {}
+    peers = []
+    for p in _parsed(device, "routing_detail").get("bgp_summary", []):
+        try:
+            peers.append(IPv4Address(str(p.get("neighbor", "")).strip()))
+        except (AddressValueError, ValueError):
+            pass
+    for addr in _device_addresses(device):
+        name = canonical_ifname(addr["interface"])
+        if _is_public_ip(addr["ip"]):
+            evidence.setdefault(name, f"public address {addr['ip']}")
+            continue
+        try:
+            net = IPv4Network(f"{addr['ip']}/{addr['prefix']}", strict=False)
+        except (AddressValueError, ValueError):
+            continue
+        if net.prefixlen < 16:
+            continue
+        peer = next((p for p in peers if p in net and str(p) != addr["ip"]), None)
+        if peer:
+            evidence.setdefault(name, f"BGP peer {peer}")
+    for name in _nat_outside_interfaces(device):
+        evidence.setdefault(name, "ip nat outside")
+    for name, row in counters.items():
+        m = _WAN_DESC_RE.search(row.get("description") or "")
+        if m:
+            evidence.setdefault(name, f"description ({m.group(0)})")
+    return evidence
 
 
 def _parsed(device, name):
@@ -107,6 +167,8 @@ class Device:
         self.policies = defaultdict(list)
         for p in self.qos.get("policies", []):
             self.policies[(p["interface"], p["direction"])].append(p)
+        self.wan_evidence = (_wan_evidence(device, self.counters)
+                             if self.family in ROUTER_FAMILIES else {})
         es = _parsed(device, "edge_services")
         self.acl_names = ({a.get("name") for a in es.get("access_lists", [])}
                           if "access_lists" in es else None)
@@ -250,6 +312,8 @@ class Device:
                 if _NOT_WAN_RE.match(name) or _MGMT_RE.match(name):
                     continue
                 intf = self.interfaces.get(name) or {}
+                if not intf.get("neighbor_class"):
+                    intf = self.interfaces.get(_parent(name)) or intf
                 nclass = intf.get("neighbor_class") or "none"
                 if nclass == "switch":
                     role = "Router LAN (to switch)"
@@ -257,10 +321,18 @@ class Device:
                     role = f"Router to {nclass}"
                 elif nclass in VOICE_CLASSES:
                     continue
+                elif self.wan_reason(name):
+                    role = "Router WAN/DCI"
+                elif _parent(name).startswith("Port-channel"):
+                    role = "Router LAN (no CDP neighbour)"
                 else:
-                    role = "Router WAN/DCI (no CDP neighbour)"
+                    role = "Router, unclassified (no CDP neighbour)"
                 rows.append((name, role, intf.get("neighbor", "")))
         return rows
+
+    def wan_reason(self, name):
+        """Why an interface counts as WAN; a subinterface inherits its parent's."""
+        return self.wan_evidence.get(name) or self.wan_evidence.get(_parent(name), "")
 
 
 def _devices(inventory_data):
@@ -441,19 +513,25 @@ def class_catalog(devices):
 
 
 def _drift_findings(pcat):
+    """One finding per device carrying a policy-map that exists in more than
+    one version, so the Findings row counts and lists every device."""
     out = []
     for name, variants in sorted(pcat.items()):
         if len(variants) < 2:
             continue
         sizes = sorted((len(v["devices"]) for v in variants.values()), reverse=True)
-        out.append(make_finding(
-            "", WARNING, "Policy-map has multiple versions",
-            (f"{name} exists in {len(variants)} different versions across the "
-             f"fleet (devices per version: {', '.join(map(str, sizes))}). See "
-             f"the Policy Catalog sheet."),
-            finding_type="qos:policy_drift",
-            aggregate_key=f"{name}: {len(variants)} versions",
-        ))
+        key = (f"Policy-map {name} exists in {len(variants)} versions (devices "
+               f"per version: {', '.join(map(str, sizes))}); see the Policy Catalog")
+        ranked = sorted(variants.values(), key=lambda v: -len(v["devices"]))
+        for idx, v in enumerate(ranked, 1):
+            for host in sorted(v["devices"]):
+                out.append(make_finding(
+                    host, WARNING, "Policy-map has multiple versions",
+                    (f"{name} on this device is version {idx} of {len(variants)}; "
+                     f"see the Policy Catalog sheet."),
+                    finding_type="qos:policy_drift",
+                    aggregate_key=key,
+                ))
     return out
 
 
@@ -462,9 +540,11 @@ def analyze(inventory_data):
     findings = []
     for dev in devices:
         findings += _device_findings(dev)
+    overfire_check(findings, len(devices))
+    # Drift is a fact about the fleet, not a per-device heuristic, so it is
+    # left out of the over-fire ratio.
     pcat = policy_catalog(devices)
     findings += _drift_findings(pcat)
-    overfire_check(findings, len(devices))
     return {"devices": devices, "findings": findings, "policy_catalog": pcat,
             "class_catalog": class_catalog(devices)}
 
@@ -497,7 +577,8 @@ VOICE_HEADERS = ["Device", "Interface", "Neighbour", "Neighbour Type", "Voice VL
                  "Trust State", "Trust Device", "QoS Status", "Auto-QoS",
                  "Ingress Policy", "Ingress EF (pkts)", "Ingress CS3 (pkts)",
                  "Output Drops", "Counters", "Flag"]
-UPLINK_HEADERS = ["Device", "Interface", "Role", "Neighbour", "Egress Policy",
+UPLINK_HEADERS = ["Device", "Interface", "Role", "Neighbour", "WAN Evidence",
+                  "Egress Policy",
                   "Priority Class", "Priority Rate", "Priority Drops", "Queue Drops",
                   "Output Drops", "Output Rate (bps)", "Queueing Strategy",
                   "Counters", "Flag"]
@@ -523,7 +604,10 @@ def _posture_row(dev):
     macros = sorted({i["auto_qos_macro"] for i in dev.interfaces.values()
                      if i.get("auto_qos_macro")})
     dmap = (dev.qos.get("maps") or {}).get("dscp_output_q") or {}
-    if not dmap:
+    off = bool((dev.qos.get("qos_global") or {}).get("deep_skipped")) and dev.classic
+    if off:
+        map_state = "QoS off"
+    elif not dmap:
         map_state = "n/a"
     else:
         map_state = "Default" if dmap == DEFAULT_DSCP_OUTPUT_Q else "Modified"
@@ -532,9 +616,10 @@ def _posture_row(dev):
             ("Yes: " + "; ".join(macros)) if auto and macros else _yes_no(auto),
             by_class["phone"], by_class["vg"], by_class["ap"],
             f"{trusted} of {len(voice)}" if voice else "",
-            ", ".join(access), ", ".join(uplink_egress),
-            "n/a" if tuned is None else ("Tuned" if tuned else "Default"),
-            map_state, dmap.get(EF, "n/a"), dev.uptime]
+            ", ".join(access) or ("" if dev.policies else "No policies attached"),
+            ", ".join(uplink_egress),
+            "QoS off" if off else ("n/a" if tuned is None else ("Tuned" if tuned else "Default")),
+            map_state, "QoS off" if off else dmap.get(EF, "n/a"), dev.uptime]
 
 
 def _voice_rows(dev):
@@ -569,7 +654,9 @@ def _uplink_rows(dev):
                 flags.append("No priority class")
         if eg["priority_drops"]:
             flags.append("Priority drops")
-        rows.append([dev.hostname, name, role, neighbor, eg["policy"],
+        rows.append([dev.hostname, name, role, neighbor,
+                     dev.wan_reason(name) if role == "Router WAN/DCI" else "",
+                     eg["policy"],
                      eg["priority_class"], eg["priority_rate"],
                      _blank(eg["priority_drops"]), _blank(dev.queue_drops(name)),
                      _blank(counters.get("output_drops")),
@@ -626,12 +713,26 @@ def _error_rows(inventory_data):
             rows.append([hostname, cmd, errors.get(cmd, ""), kind])
         if qos.get("collector_failed") and not qos.get("failed_commands"):
             rows.append([hostname, "", qos.get("collector_error", ""), "failed"])
+        skipped_cmds = qos.get("skipped_commands") or []
+        if skipped_cmds:
+            reason = (qos.get("qos_global") or {}).get("deep_skipped", "")
+            rows.append([hostname, f"{len(skipped_cmds)} per-port QoS commands",
+                         f"not run: {reason}", "skipped"])
         sel = qos.get("queue_stats_ports") or {}
-        if sel.get("capped"):
-            rows.append([hostname, "per-port queue counters",
-                         (f"capped at {sel.get('cap', QUEUE_STATS_CAP)} of "
-                          f"{sel.get('eligible')} eligible ports; uplinks were "
-                          f"collected first"), "capped"])
+        if sel.get("capped") and not sel.get("not_run"):
+            skipped = sel.get("skipped")
+            text = (f"capped at {sel.get('cap', QUEUE_STATS_CAP)} of "
+                    f"{sel.get('eligible')} eligible ports; uplinks were "
+                    f"collected first")
+            if skipped is not None:
+                uplinks = {i["interface"] for i in qos.get("interfaces", [])
+                           if i.get("is_uplink")}
+                missed = [p for p in skipped if p in uplinks]
+                text += (f". {len(skipped)} skipped"
+                         + (f", including uplinks {', '.join(missed)}" if missed
+                            else ", no uplinks among them")
+                         + f": {', '.join(skipped)}")
+            rows.append([hostname, "per-port queue counters", text, "capped"])
     return rows
 
 

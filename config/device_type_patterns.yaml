@@ -52,6 +52,16 @@ device_types:
       - "Cisco IOS XR"
     priority: 95
     
+  # Cisco ASA and ASAv (also ASA code on Firepower hardware)
+  cisco_asa:
+    platforms:
+      - cisco asa
+      - asa5
+      - asav
+    system_descriptions:
+      - "Adaptive Security Appliance"
+    priority: 98
+
   # Cisco IOS (Traditional/Legacy)
   cisco_ios:
     platforms:

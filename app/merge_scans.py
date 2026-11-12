@@ -4,7 +4,7 @@ Same merge the Saved Scans tab runs, for files that never went through the
 UI -- scans copied off another host, or run on different boxes at one site.
 
     python app/merge_scans.py scan-a.json scan-b.json -o merged.json
-    python app/merge_scans.py inventories/             # every .json in it
+    python app/merge_scans.py inventories/             # every scan in it
 
 Inside the container:
 
@@ -17,7 +17,6 @@ redaction and may carry secrets in clear text.
 """
 import argparse
 import glob
-import json
 import os
 import sys
 
@@ -30,18 +29,21 @@ try:
     from app.inventory import DiscoveryInventory
     from app.inventory_merge import claim_unused_id, merge_inventories
     from app.redact import redact_config
+    from app.jsonio import is_scan_file, load_json, write_json
 except ImportError:
     from inventory import DiscoveryInventory
     from inventory_merge import claim_unused_id, merge_inventories
     from redact import redact_config
+    from jsonio import is_scan_file, load_json, write_json
 
 
 def expand_paths(paths):
-    """Files as given; directories expand to the .json files inside them."""
+    """Files as given; directories expand to the scan files inside them."""
     files = []
     for path in paths:
         if os.path.isdir(path):
-            files.extend(sorted(glob.glob(os.path.join(path, "*.json"))))
+            files.extend(sorted(glob.glob(os.path.join(path, "*.json"))
+                                + glob.glob(os.path.join(path, "*.json.gz"))))
         else:
             files.append(path)
     # The same file named twice would merge with itself.
@@ -76,12 +78,8 @@ def redact_configs(inventory):
 
 def write_output(merged, output):
     """Write to a file path, or into a directory under the merged scan's id."""
-    if output and not os.path.isdir(output) and output.endswith(".json"):
-        parent = os.path.dirname(os.path.abspath(output))
-        os.makedirs(parent, exist_ok=True)
-        with open(output, "w") as f:
-            json.dump(merged, f, indent=2, default=str)
-        return output
+    if output and not os.path.isdir(output) and is_scan_file(output):
+        return write_json(merged, output)
     directory = output or "."
     claim_unused_id(merged, directory)
     return DiscoveryInventory(merged).save(directory)
@@ -93,7 +91,7 @@ def main(argv=None):
     parser.add_argument("paths", nargs="+",
                         help="scan JSON files, or directories of them")
     parser.add_argument("-o", "--output",
-                        help="output .json file, or a directory (default: "
+                        help="output .json or .json.gz file, or a directory (default: "
                              "current directory, named after the merged scan)")
     parser.add_argument("--no-redact", action="store_true",
                         help="keep configs exactly as stored in the sources")
@@ -106,9 +104,8 @@ def main(argv=None):
     loaded = []
     for path in files:
         try:
-            with open(path) as f:
-                data = json.load(f)
-        except (OSError, ValueError) as e:
+            data = load_json(path)
+        except (OSError, EOFError, ValueError) as e:
             parser.error(f"could not read {path}: {e}")
         if not isinstance(data, dict) or "devices" not in data:
             parser.error(f"{path} is not a wiremap scan (no devices key)")

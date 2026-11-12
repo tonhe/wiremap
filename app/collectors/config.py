@@ -20,12 +20,14 @@ _COMMANDS = {
     "cisco_ios": "show running-config",
     "cisco_xe": "show running-config",
     "cisco_nxos": "show running-config",
+    "cisco_asa": "show running-config",
     "arista_eos": "show running-config",
     "juniper_junos": "show configuration",
     "extreme": "show configuration",
     "vyos": "show configuration commands",
-    # Plain "show run-config" is paged and interactive on AireOS.
-    "cisco_wlc": "show run-config startup-commands",
+    # Plain "show run-config" is paged and interactive on AireOS; the wlc
+    # collector asks for this same form, so the dump runs once per controller.
+    "cisco_wlc": "show run-config commands",
     "watchguard_fireware": "show configuration",
     "paloalto_panos": "show config running",
 }
@@ -40,6 +42,7 @@ class ConfigCollector(BaseCollector):
     # Custom collect so the raw output is redacted too; the batch path
     # stores raw output exactly as the device returned it.
     needs_custom_collect = True
+    serves_asa = True
 
     def get_commands(self, device_type: str) -> list[str]:
         return [_COMMANDS.get(device_type, _DEFAULT_COMMAND)]
