@@ -84,6 +84,20 @@ def test_every_pager_wording_is_answered(pager):
     assert "More" not in out and "continue" not in out
 
 
+@pytest.mark.parametrize("question", [
+    "Would you like to display the next 15 entries? (y/n)",
+    "Would you like to display more entries? (y/n)",
+])
+def test_display_more_questions_are_answered_yes(question):
+    seen = []
+    ch = FakeChannel(["show traplog\nentry 1\n" + question, f"\nentry 2\n{PROMPT}"])
+    clock = Clock()
+    out = ws.send_paged(ch, "show traplog", clock=clock, sleep=clock.sleep,
+                        on_question=seen.append)
+    assert ch.written[1] == "y\n" and seen == []
+    assert "entry 1" in out and "entry 2" in out and "(y/n)" not in out
+
+
 def test_a_stuck_pager_is_left_after_a_timeout():
     with pytest.raises(ws.WlcReadTimeout) as err:
         _send(["show sysinfo\nrow\nHit (q)uit to stop", f"\n{PROMPT}"], cmd="show sysinfo",

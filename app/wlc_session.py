@@ -27,7 +27,7 @@ PROMPT_RE = re.compile(r"\([^()\n]*\)\s*>\s*$")
 # <ctrl-z> to abort"), so anything after --More is accepted.
 PAUSES = [
     (re.compile(r"--\s*More\b[^\n]*$", re.I), " "),
-    (re.compile(r"Would you like to display the next[^\n]*\(y/n\)\s*$", re.I), "y\n"),
+    (re.compile(r"Would you like to display\b[^\n]*\(y/n\)\s*$", re.I), "y\n"),
     (re.compile(r"Press (?:Enter|RETURN) to continue[^\n]*$", re.I), "\n"),
     (re.compile(r"Press any key to continue[^\n]*$", re.I), " "),
     (re.compile(r"\(y/n\)\s*$", re.I), "n\n"),
