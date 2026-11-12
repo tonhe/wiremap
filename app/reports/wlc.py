@@ -17,6 +17,9 @@ from functools import cached_property
 from .base import BaseReport
 from .findings import format_device_list
 from . import wlc_checks as checks
+from . import wlc_hygiene as hygiene
+from . import wlc_services as svc
+from . import wlc_wireless as wl
 
 try:
     from app.collectors import wlc_platform as P
@@ -360,7 +363,7 @@ CONTROLLER_HEADERS = LEAD + [
     "Location", "Management IP", "Serial", "AireOS Version", "Field Recovery Image",
     "Primary Boot Image", "Backup Boot Image", "Uptime", "Last Reset Reason",
     "Max APs Supported", "Licensed AP Count", "APs Joined", "AP Licence Used %",
-    "Clients Total", "WLANs Configured", "WLANs Enabled", "Dynamic Interfaces", "HA Mode",
+    "Clients Total", "Clients 2.4 GHz", "Clients 5 GHz", "WLANs Configured", "WLANs Enabled", "Dynamic Interfaces", "HA Mode",
     "Redundancy State", "Redundancy Peer", "Mobility Group", "Country Codes", "Time",
     "NTP State", "CPU %", "Memory Free %", "Temperature (C)", "Fans", "Power Supplies",
     "Config Saved", "Collected At (UTC)"]
@@ -408,6 +411,7 @@ def _controller_row(c):
         mem_free = 100 - info["memory_current"]
     cpu = (c.cpu or {}).get("current_pct")
     peer = (c.redundancy_detail or {}).get("peer_redundancy_mgmt_ip") or ""
+    counts = wl.wireless(c).client_counts
     return c.lead() + [
         info.get("location", NA) if c.sysinfo else NA, c.mgmt_ip, c.serial or NA,
         c.version or NA, info.get("field_recovery", NA) if c.sysinfo else NA,
@@ -415,7 +419,9 @@ def _controller_row(c):
         info.get("uptime", NA) if c.sysinfo else NA,
         info.get("last_reset", NA) if c.sysinfo else NA, na(info.get("max_aps")),
         na(c.licensed_aps), na(c.ap_count), na(_pct(c.ap_count, c.licensed_aps)),
-        na(info.get("clients")), NA if wlans is None else len(wlans), na(enabled),
+        na(info.get("clients")),
+        NA if counts is None else counts.get("2.4"), NA if counts is None else counts.get("5"),
+        NA if wlans is None else len(wlans), na(enabled),
         na(dynamic), ha_mode(c),
         _join([red.get("local_state"), red.get("peer_state") and f"peer {red['peer_state']}"])
         if c.redundancy else NA, peer if c.redundancy_detail else NA, na(c.mobility_group),
@@ -618,9 +624,59 @@ def _summary_rows(findings, ctrl_list):
             ("WLANs (enabled / disabled)",
              f"{enabled} / {len(wlan_rows) - enabled}" if wlan_rows else NA),
             ("Unique SSIDs", len(ssids) if wlan_rows else NA),
-            ("Clients", sum(clients) if clients else NA)):
+            ("Clients", sum(clients) if clients else NA),
+            ("Clients 2.4 / 5 GHz", _band_totals(ctrl_list)),
+            ("APs by mode", _ap_modes(ctrl_list)),
+            ("RADIUS servers", _radius_total(ctrl_list)),
+            ("Mobility peers (up / down)", _mobility_totals(ctrl_list)),
+            ("Certificates expiring within 90 days", _expiring(ctrl_list))):
         rows.append([label, "", value, "", "", ""])
     return rows
+
+
+def _band_totals(ctrl_list):
+    counts = [wl.wireless(c).client_counts for c in ctrl_list]
+    counts = [x for x in counts if x is not None]
+    if not counts:
+        return NA
+    return f"{sum(x.get('2.4') or 0 for x in counts)} / {sum(x.get('5') or 0 for x in counts)}"
+
+
+def _ap_modes(ctrl_list):
+    modes = defaultdict(int)
+    for c in ctrl_list:
+        for ap in wl.wireless(c).aps:
+            mode = (ap["general"] or {}).get("mode")
+            if mode:
+                modes[mode] += 1
+    return _join(f"{m} {n}" for m, n in sorted(modes.items())) or NA
+
+
+def _radius_total(ctrl_list):
+    ips = {(srv["ip"], srv["port"]) for c in ctrl_list
+           for srv in (svc.services(c).radius or {}).get("servers", [])}
+    collected = any(svc.services(c).radius is not None for c in ctrl_list)
+    return len(ips) if collected else NA
+
+
+def _mobility_totals(ctrl_list):
+    peers = [p for c in ctrl_list for p in (svc.services(c).mobility or {}).get("peers") or []]
+    if not any(svc.services(c).mobility is not None for c in ctrl_list):
+        return NA
+    up = sum(1 for p in peers if p.get("control_up") and p.get("data_up"))
+    return f"{up} / {len(peers) - up}"
+
+
+def _expiring(ctrl_list):
+    if not any(svc.services(c).certs_collected for c in ctrl_list):
+        return NA
+    n = 0
+    for c in ctrl_list:
+        for cert in svc.services(c).certificates:
+            days = svc._days_left(cert, c.collected_at.date())
+            if days is not None and days < 90:
+                n += 1
+    return n
 
 
 def _error_rows(ctrl_list):
@@ -642,6 +698,8 @@ def analyze(inventory_data):
     for c in ctrl_list:
         findings += checks.lifecycle_findings(c, life["controllers"][c.key], today)
         findings += checks.platform_findings(c)
+        findings += wl.findings(c, life, today)
+        findings += svc.findings(c, today)
     return {"controllers": ctrl_list, "findings": findings, "lifecycle": life}
 
 
@@ -657,7 +715,33 @@ def build_tabular(inventory_data, analysis=None):
     sheets["Interfaces"] = (INTERFACE_HEADERS, [r for c in ctrl_list for r in _interface_rows(c)])
     sheets["Ports and Uplinks"] = (PORT_HEADERS,
                                    [r for c in ctrl_list for r in _port_rows(c, known)])
+    sheets["WLANs"] = (wl.WLAN_HEADERS, [r for c in ctrl_list for r in wl.wlan_rows(c)])
+    sheets["AP Groups"] = (wl.APGROUP_HEADERS, [r for c in ctrl_list for r in wl.apgroup_rows(c)])
+    sheets["RF Global"] = (wl.RF_GLOBAL_HEADERS,
+                           [r for c in ctrl_list for r in wl.rf_global_rows(c)])
+    sheets["RF Profiles"] = (wl.RF_PROFILE_HEADERS,
+                             [r for c in ctrl_list for r in wl.rf_profile_rows(c)])
+    sheets["Radios"] = (wl.RADIO_HEADERS, [r for c in ctrl_list for r in wl.radio_rows(c)])
+    sheets["Access Points"] = (wl.AP_HEADERS, [r for c in ctrl_list
+                                               for r in wl.ap_rows(c, known, analysis["lifecycle"])])
+    sheets["AP Join Issues"] = (wl.JOIN_HEADERS, [r for c in ctrl_list for r in wl.join_rows(c)])
+    sheets["Clients"] = (wl.CLIENT_HEADERS, [r for c in ctrl_list for r in wl.client_rows(c)])
+    names = svc.server_names(inventory_data)
+    sheets["AAA Servers"] = (svc.AAA_HEADERS, [r for c in ctrl_list for r in svc.aaa_rows(c, names)])
+    sheets["ACLs"] = (svc.ACL_HEADERS, [r for c in ctrl_list for r in svc.acl_rows(c)])
+    sheets["ACL Rules"] = (svc.ACL_RULE_HEADERS, [r for c in ctrl_list for r in svc.acl_rule_rows(c)])
+    sheets["Security and WIPS"] = (svc.SECURITY_HEADERS, [svc.security_row(c) for c in ctrl_list])
+    sheets["Mobility"] = (svc.MOBILITY_HEADERS, [r for c in ctrl_list for r in svc.mobility_rows(c)])
+    sheets["FlexConnect"] = (svc.FLEX_HEADERS, [r for c in ctrl_list for r in svc.flex_rows(c)])
+    sheets["QoS and Services"] = (svc.QOS_HEADERS, [r for c in ctrl_list for r in svc.qos_rows(c)])
+    sheets["Management Plane"] = (svc.MGMT_HEADERS, [svc.mgmt_row(c) for c in ctrl_list])
+    today = ctrl_list[0].collected_at.date() if ctrl_list else datetime.now(timezone.utc).date()
+    sheets["Certificates"] = (svc.CERT_HEADERS,
+                              [r for c in ctrl_list for r in svc.cert_rows(c, today)])
     sheets["Health and Capacity"] = (HEALTH_HEADERS, [_health_row(c) for c in ctrl_list])
+    sheets["Configuration Hygiene"] = (hygiene.HYGIENE_HEADERS, hygiene.hygiene_rows(ctrl_list))
+    sheets["Relationships"] = (hygiene.RELATION_HEADERS,
+                               hygiene.relationship_rows(ctrl_list, inventory_data))
     errors = _error_rows(ctrl_list)
     if errors:
         sheets["Collection Errors"] = (ERROR_HEADERS, errors)
@@ -667,8 +751,9 @@ def build_tabular(inventory_data, analysis=None):
 class WlcReport(BaseReport):
     name = "wlc"
     label = "Cisco WLC"
-    description = ("AireOS controller platform, lifecycle, redundancy, interfaces, ports, "
-                   "health and assessment checks")
+    description = ("AireOS controller platform, lifecycle, redundancy, WLANs, RF, access "
+                   "points, clients, AAA, ACLs, WIPS, mobility, management plane and "
+                   "assessment checks")
     category = "Compliance & Config"
     required_collectors = [COLLECTOR]
     supported_formats = ["xlsx", "json", "csv", "xml"]

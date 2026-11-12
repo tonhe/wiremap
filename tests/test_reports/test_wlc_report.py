@@ -93,10 +93,14 @@ def _rows(sheet, headers=None):
 
 def test_sheets_in_spec_order_and_lead_columns():
     sheets = _sheets()
-    assert list(sheets) == ["Summary", "Controllers", "Lifecycle", "Redundancy", "Interfaces",
-                            "Ports and Uplinks", "Health and Capacity", "Collection Errors"]
+    assert list(sheets) == [
+        "Summary", "Controllers", "Lifecycle", "Redundancy", "Interfaces", "Ports and Uplinks",
+        "WLANs", "AP Groups", "RF Global", "RF Profiles", "Radios", "Access Points",
+        "AP Join Issues", "Clients", "AAA Servers", "ACLs", "ACL Rules", "Security and WIPS",
+        "Mobility", "FlexConnect", "QoS and Services", "Management Plane", "Certificates",
+        "Health and Capacity", "Configuration Hygiene", "Relationships", "Collection Errors"]
     for name, (headers, _) in sheets.items():
-        if name != "Summary":
+        if name not in ("Summary",):
             assert headers[:3] == ["Controller", "Site", "Model"], name
 
 
