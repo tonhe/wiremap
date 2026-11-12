@@ -47,6 +47,9 @@ _ERROR_PATTERNS = [
     (re.compile(r"^[ \t]*(?:%[ \t]*)?invalid command", re.I | re.M), NOT_APPLICABLE),
     (re.compile(r"^[ \t]*syntax error", re.I | re.M), NOT_APPLICABLE),
     (re.compile(r"^[ \t]*command not found", re.I | re.M), NOT_APPLICABLE),
+    # AireOS answers both an unknown command and one hidden from a read-only
+    # account with "Incorrect usage", and a bad argument with "Incorrect input!".
+    (re.compile(r"^[ \t]*Incorrect (?:usage|input)\b", re.M), NOT_APPLICABLE),
     (re.compile(r"^[ \t]*ERROR:\s", re.M), FAILED),
 ]
 

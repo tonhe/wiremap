@@ -17,12 +17,15 @@ import zipfile
 from .base import BaseReport
 
 try:
+    from app.collectors.errors import error_reason
     from app.redact import redact_config_counted
 except ImportError:
+    from collectors.errors import error_reason
     from redact import redact_config_counted
 
 SUMMARY_NAME = "SUMMARY.txt"
 ASA_RUNNING_CONFIG = "show running-config"
+WLC_RUN_CONFIG = "show run-config commands"
 _ASA_CONTEXT_CONFIG = re.compile(r"^context (\S+): show running-config$")
 
 
@@ -70,8 +73,9 @@ def _device_configs(device, hostname=""):
     """[(file name, config text, redacted flag)] for one device: its
     running-config, and on a multiple-context ASA one file per context.
 
-    An ASA's running-config is also kept by the asa collector, so a scan
-    without the opt-in config collector still archives firewall configs.
+    An ASA's running-config is also kept by the asa collector, and a
+    controller's by the wlc collector, so a scan without the opt-in config
+    collector still archives firewall and controller configs.
     """
     cd = device.get("collector_data", {})
     parsed = (cd.get("config") or {}).get("parsed") or {}
@@ -81,6 +85,10 @@ def _device_configs(device, hostname=""):
     asa_raw = (cd.get("asa") or {}).get("raw") or {}
     if not out and asa_raw.get(ASA_RUNNING_CONFIG):
         out.append((_file_name(hostname), asa_raw[ASA_RUNNING_CONFIG], None))
+    # A controller's configuration is kept by the wlc collector as well.
+    wlc_config = ((cd.get("wlc") or {}).get("raw") or {}).get(WLC_RUN_CONFIG)
+    if not out and wlc_config and not error_reason(wlc_config):
+        out.append((_file_name(hostname), wlc_config, None))
     for key, text in sorted(asa_raw.items()):
         m = _ASA_CONTEXT_CONFIG.match(key)
         if m and text:

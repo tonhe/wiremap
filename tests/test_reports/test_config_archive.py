@@ -125,3 +125,19 @@ def test_config_collector_text_wins_over_the_asa_copy():
 def test_nothing_to_archive():
     data = {"devices": {"LAB-SW-01": {"collector_data": {"config": {"parsed": {}}}}}}
     assert not ConfigArchiveReport().can_generate(data)
+
+
+
+def test_controller_config_comes_from_the_wlc_collector():
+    data = {"devices": {
+        "lab-wlc-01": {"collector_data": {"wlc": {"raw": {
+            "show run-config commands": "config sysname lab-wlc-01\n"
+                                          "config radius auth add 1 192.0.2.50 1812 ascii Plain123\n"}}}},
+        "lab-wlc-02": {"collector_data": {"wlc": {"raw": {
+            "show run-config commands": "Incorrect usage. Use the '?' or <TAB> key to list commands."}}}},
+    }}
+    assert ConfigArchiveReport().can_generate(data)
+    zf = _zip(data)
+    assert set(zf.namelist()) == {"lab-wlc-01.txt", "SUMMARY.txt"}
+    text = zf.read("lab-wlc-01.txt").decode()
+    assert "Plain123" not in text and "config sysname lab-wlc-01" in text

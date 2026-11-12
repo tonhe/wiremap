@@ -37,6 +37,7 @@ try:
     from app.scan_timing import collector_ms, summarize as summarize_timing
     from app.asa_identity import (ASA_TYPE, ASA_PROBE, FAILOVER_PROBE, ROLE_STANDALONE,
                               asa_hostname, is_asa, parse_unit, unit_key)
+    from app.wlc_session import WLC_TYPE, SYSINFO, WlcConnection, prompt_name, system_name
     from app import target_outcomes
 except ImportError:
     from connection_manager import (ConnectionManager, ConnectionError,
@@ -67,6 +68,7 @@ except ImportError:
     from scan_timing import collector_ms, summarize as summarize_timing
     from asa_identity import (ASA_TYPE, ASA_PROBE, FAILOVER_PROBE, ROLE_STANDALONE,
                               asa_hostname, is_asa, parse_unit, unit_key)
+    from wlc_session import WLC_TYPE, SYSINFO, WlcConnection, prompt_name, system_name
     import target_outcomes
 try:
     from app.credentials import Credential, CredentialChain
@@ -710,6 +712,14 @@ class DiscoveryEngine:
             prompt_facts = ConnectionManager.get_prompt_facts(conn)
             hostname = prompt_facts["hostname"]
             ha_state = prompt_facts["ha_state"]
+            if device_type == WLC_TYPE:
+                # A read-only account cannot turn paging off, and the prompt
+                # reads (Cisco Controller) until someone names the box.
+                conn = WlcConnection(conn)
+                hostname = (system_name(ConnectionManager.run_commands(
+                    conn, [SYSINFO]).get(SYSINFO))
+                    or prompt_name(conn.find_prompt()) or hostname or ip)
+                ha_state = None
             asa_unit = None
             if device_type == ASA_TYPE:
                 # Both units of a pair answer to one hostname; the standby

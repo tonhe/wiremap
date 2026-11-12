@@ -71,3 +71,12 @@ def test_long_whitespace_runs_stay_linear():
 
 def test_error_on_indented_line_still_detected():
     assert is_error_output("show ip vrf\n   % Invalid input detected\n") is True
+
+
+def test_aireos_incorrect_usage_is_not_applicable():
+    from app.collectors.errors import classify_error, NOT_APPLICABLE
+    text = "Incorrect usage. Use the '?' or <TAB> key to list commands."
+    assert classify_error(text) == (text, NOT_APPLICABLE)
+    bad = "Incorrect input! Use 'show wlan summary' to see WLAN IDs."
+    assert classify_error(bad)[1] == NOT_APPLICABLE
+    assert classify_error("Description...... Incorrect usage of VLAN") is None

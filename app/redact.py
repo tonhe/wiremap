@@ -9,6 +9,7 @@ REDACTED before anything is stored.
 Redaction is line based: every line is kept and only the secret token is
 swapped out, so line counts, diffs and the config-reading reports still work.
 """
+import hashlib
 import re
 
 REDACTED = "<REDACTED>"
@@ -53,7 +54,7 @@ _RULES = [
     # Untyped "... password <x>" mid-line: ip ftp, ppp chap/pap, ip http
     # client, l2tp tunnel, cts credentials, LDAP bind. Policy knobs that
     # take a keyword after "password" are not secrets.
-    re.compile(r"(?<![\w-])password\s+"
+    re.compile(r"(?<![\w-])(?<!mgmtuser )(?<!netuser )password\s+"
                r"(?!(?:encryption|strength-check|secure-mode|policy|restriction|"
                r"prompt|history|length|min-length|max-length|lifetime|reuse|"
                r"change|expire|expiry|required|complexity|aging|lockout|"
@@ -126,7 +127,26 @@ _RULES = [
     re.compile(r"^\s*config\s+snmp\s+community\s+create\s+" + _S, _I),
     re.compile(r"^\s*config\s+radius\s+(?:auth|acct)\s+add\s+\S+\s+\S+\s+\S+\s+"
                r"(?:ascii|hex)\s+" + _S, _I),
-    re.compile(r"^\s*config\s+mgmtuser\s+add\s+\S+\s+" + _S, _I),
+    re.compile(r"^\s*config\s+mgmtuser\s+(?:add|password)\s+\S+\s+" + _S, _I),
+    re.compile(r"^\s*config\s+netuser\s+(?:add|password)\s+\S+\s+" + _S, _I),
+    re.compile(r"^\s*config\s+tacacs\s+(?:auth|acct|athr)\s+add\s+\S+\s+\S+\s+\S+\s+"
+               r"(?:ascii|hex)\s+" + _S, _I),
+    # Key wrap: "config radius auth keywrap add <fmt> <KEK> <MACK> <index>"
+    re.compile(r"^\s*config\s+radius\s+(?:auth|acct)\s+keywrap\s+add\s+(?:ascii|hex)\s+" + _S, _I),
+    re.compile(r"^\s*config\s+radius\s+(?:auth|acct)\s+keywrap\s+add\s+(?:ascii|hex)\s+\S+\s+"
+               + _S, _I),
+    re.compile(r"^\s*config\s+snmp\s+v3user\s+create\s+\S+\s+\S+\s+\S+\s+\S+\s+" + _S, _I),
+    re.compile(r"^\s*config\s+snmp\s+v3user\s+create\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+"
+               + _S, _I),
+    re.compile(r"^\s*config\s+ap\s+mgmtuser\s+add\b.*?\bsecret\s+" + _S, _I),
+    # "config flexconnect group G radius server auth add primary <ip> <port> <secret>"
+    re.compile(r"^\s*config\s+flexconnect\s+group\s+\S+\s+radius\s+server\s+\S+\s+add\s+"
+               r"(?:primary|secondary)\s+\S+\s+\d+\s+" + _S, _I),
+    re.compile(r"^\s*config\s+local-auth\b.*?\b(?:psk|key|pac-key)\s+" + _S, _I),
+    re.compile(r"^\s*config\s+mobility\s+group\s+member\s+hash\s+\S+\s+" + _S, _I),
+    # show wlan: "PSK Key.......... <x>" on code that prints it
+    re.compile(r"^\s*(?:Pre-?Shared Key|PSK(?: Key)?)\.{3,}[ \t]*(?![. \t])"
+               r"(?!(?:Enabled|Disabled|Not Configured|Configured|None)\s*$)" + _S, _I),
 ]
 
 # PAN-OS / VyOS "set ..." lines and brace-style lines ending in ';'.
@@ -266,6 +286,45 @@ def redact_line(line):
     return _replace(line, merged)
 
 
+_AIREOS_COMMUNITY = re.compile(r"^\s*config\s+snmp\s+community\s+create\s+(\S+)", _I | re.M)
+_AIREOS_SNMP_LINE = re.compile(r"^\s*config\s+snmp\s", _I)
+
+
+def aireos_communities(text):
+    """Community names an AireOS config creates."""
+    return sorted({m.group(1) for m in _AIREOS_COMMUNITY.finditer(text or "")
+                   if m.group(1) != REDACTED})
+
+
+def mask_names(text, names, only_lines=None):
+    """Replace each whole-word occurrence of names with REDACTED.
+
+    AireOS names a community once on its create line and again on every
+    line that sets its access, address or mode, so masking the create line
+    alone would leave it in clear further down.
+    """
+    names = [n for n in names if n and n != REDACTED]
+    if not text or not names:
+        return text, 0
+    pattern = re.compile(r"(?<!\S)(?:" + "|".join(
+        re.escape(n) for n in sorted(names, key=len, reverse=True)) + r")(?!\S)")
+    if only_lines is None:
+        return pattern.subn(REDACTED, text)
+    out, count = [], 0
+    for line in text.splitlines(keepends=True):
+        if only_lines.match(line):
+            line, n = pattern.subn(REDACTED, line)
+            count += n
+        out.append(line)
+    return "".join(out), count
+
+
+def pseudonym(name, prefix="user"):
+    """A stable stand-in for a name that must not be kept, such as a guest
+    account: the same name always maps to the same token."""
+    return f"{prefix}-{hashlib.sha256(str(name).encode()).hexdigest()[:10]}"
+
+
 def redact_config_counted(text):
     """Redact text and count the secret tokens that were still in clear.
 
@@ -280,11 +339,14 @@ def redact_config_counted(text):
         merged = _merged_spans(line)
         count += sum(1 for s, e in merged if line[s:e] != REDACTED)
         out.append(_replace(line, merged) if merged else line)
-    return "".join(out), count
+    masked, extra = mask_names("".join(out), aireos_communities(text),
+                               _AIREOS_SNMP_LINE)
+    return masked, count + extra
 
 
 def redact_config(text):
     """Return text with secret tokens replaced by REDACTED, line by line."""
     if not text:
         return text
-    return "".join(redact_line(line) for line in text.splitlines(keepends=True))
+    out = "".join(redact_line(line) for line in text.splitlines(keepends=True))
+    return mask_names(out, aireos_communities(text), _AIREOS_SNMP_LINE)[0]

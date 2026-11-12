@@ -433,3 +433,67 @@ def test_asa_secret_forms(line, expected):
 def test_already_masked_values_are_left_alone(line):
     assert redact_line(line) == line
     assert redact_config_counted(line + "\n")[1] == 0
+
+
+
+# --- AireOS (WLC) -------------------------------------------------------------
+
+@pytest.mark.parametrize("line,expected", [
+    ("config radius acct add 2 192.0.2.6 1813 hex 0a0b0c",
+     f"config radius acct add 2 192.0.2.6 1813 hex {R}"),
+    ("config radius auth keywrap add ascii KekValue1 MackValue2 1",
+     f"config radius auth keywrap add ascii {R} {R} 1"),
+    ("config tacacs auth add 1 192.0.2.7 49 ascii TacSecret",
+     f"config tacacs auth add 1 192.0.2.7 49 ascii {R}"),
+    ("config tacacs athr add 1 192.0.2.7 49 ascii TacSecret",
+     f"config tacacs athr add 1 192.0.2.7 49 ascii {R}"),
+    ("config wlan security wpa akm psk set-key ascii LabPsk123 3",
+     f"config wlan security wpa akm psk set-key ascii {R} 3"),
+    ("config snmp v3user create lab-v3 rw hmacsha aescfb128 AuthKey1 PrivKey2",
+     f"config snmp v3user create lab-v3 rw hmacsha aescfb128 {R} {R}"),
+    ("config mgmtuser add lab-admin AdminPw1 read-write",
+     f"config mgmtuser add lab-admin {R} read-write"),
+    ("config mgmtuser password lab-admin AdminPw2", f"config mgmtuser password lab-admin {R}"),
+    ("config netuser add guest1 GuestPw1 wlan 2 userType guest lifetime 86400",
+     f"config netuser add guest1 {R} wlan 2 userType guest lifetime 86400"),
+    ("config ap mgmtuser add username lab-ap password ApPw1 secret ApSecret2 all",
+     f"config ap mgmtuser add username lab-ap password {R} secret {R} all"),
+    ("config flexconnect group LAB-FLEX radius server auth add primary 192.0.2.8 1812 FlexSecret",
+     f"config flexconnect group LAB-FLEX radius server auth add primary 192.0.2.8 1812 {R}"),
+    ("config local-auth eap-profile method fast pac-key PacKey1 LAB-EAP",
+     f"config local-auth eap-profile method fast pac-key {R} LAB-EAP"),
+    ("config mobility group member hash 192.0.2.9 a1b2c3d4e5",
+     f"config mobility group member hash 192.0.2.9 {R}"),
+    ("config certificate generate csr-webauth LAB password CertPw1",
+     f"config certificate generate csr-webauth LAB password {R}"),
+    ("PSK Key.......................................... LabPsk123",
+     f"PSK Key.......................................... {R}"),
+    ("PSK Key.......................................... Disabled",
+     "PSK Key.......................................... Disabled"),
+])
+def test_aireos_lines(line, expected):
+    assert redact_line(line) == expected
+
+
+def test_aireos_community_masked_on_every_snmp_line():
+    from app.redact import aireos_communities, mask_names
+    config = ("config snmp community create LabComm\n"
+              "config snmp community accessmode rw LabComm\n"
+              "config snmp community ipaddr 192.0.2.0 255.255.255.0 LabComm\n"
+              "config wlan create 1 LabComm-ssid LabComm\n")
+    out = redact_config(config)
+    assert "LabComm" not in out.split("config wlan")[0]
+    assert out.count(R) == 3
+    # Only SNMP lines: a WLAN that happens to share the word keeps it.
+    assert out.endswith("config wlan create 1 LabComm-ssid LabComm\n")
+    _, count = redact_config_counted(config)
+    assert count == 3
+    assert aireos_communities(config) == ["LabComm"]
+    assert mask_names("a LabComm b", ["LabComm"]) == (f"a {R} b", 1)
+
+
+def test_pseudonym_is_stable_and_hides_the_name():
+    from app.redact import pseudonym
+    assert pseudonym("guest1") == pseudonym("guest1")
+    assert pseudonym("guest1") != pseudonym("guest2")
+    assert "guest1" not in pseudonym("guest1") and pseudonym("guest1").startswith("user-")

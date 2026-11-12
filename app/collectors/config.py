@@ -25,8 +25,9 @@ _COMMANDS = {
     "juniper_junos": "show configuration",
     "extreme": "show configuration",
     "vyos": "show configuration commands",
-    # Plain "show run-config" is paged and interactive on AireOS.
-    "cisco_wlc": "show run-config startup-commands",
+    # Plain "show run-config" is paged and interactive on AireOS; the wlc
+    # collector asks for this same form, so the dump runs once per controller.
+    "cisco_wlc": "show run-config commands",
     "watchguard_fireware": "show configuration",
     "paloalto_panos": "show config running",
 }
