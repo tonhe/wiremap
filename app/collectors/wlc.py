@@ -351,6 +351,7 @@ class WlcCollector(BaseCollector):
             try:
                 raw[cmd] = connection.send_command(cmd)
             except Exception as e:
+                logger.warning(f"wlc: '{cmd}' failed: {e}")
                 raw[cmd] = send_failure_output(e)
 
         for cmd in CONTROLLER_COMMANDS:

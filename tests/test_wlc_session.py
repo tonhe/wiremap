@@ -73,6 +73,18 @@ def test_silence_times_out_from_the_last_data():
         _send(["show ap summary\nrow 1\n"], timeout=5)
 
 
+def test_timeout_names_the_last_line_printed():
+    with pytest.raises(ws.WlcReadTimeout) as err:
+        _send(["show run-config\nPress Enter to continue or <Ctrl-Z> to abort\r\n"], timeout=5)
+    assert "last line: 'Press Enter to continue or <Ctrl-Z> to abort'" in str(err.value)
+
+
+def test_last_line():
+    assert ws.last_line("a\r\nb\r\n\r\n") == "b"
+    assert ws.last_line("") == ""
+    assert ws.last_line("x" * 300) == "x" * 120
+
+
 def test_only_show_commands_are_sent():
     with pytest.raises(ValueError):
         _send([], cmd="config ap reset all")

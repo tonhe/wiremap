@@ -55,6 +55,13 @@ def _clean(buf, command):
     return "\n".join(lines).strip("\n")
 
 
+def last_line(buf, limit=120):
+    """The last thing the controller printed, to name a question nobody answered."""
+    lines = [ln.strip() for ln in re.sub(r"\x08+ *\x08*", "", buf).replace("\r", "\n").split("\n")]
+    lines = [ln for ln in lines if ln]
+    return lines[-1][:limit] if lines else ""
+
+
 def send_paged(conn, command, read_timeout=None, clock=time.monotonic, sleep=time.sleep):
     """Run command and return its output, answering every pause.
 
@@ -90,7 +97,8 @@ def send_paged(conn, command, read_timeout=None, clock=time.monotonic, sleep=tim
             continue
         if clock() - last_data > timeout:
             raise WlcReadTimeout(
-                f"no prompt after {timeout}s waiting for output of {command}")
+                f"no prompt after {timeout}s waiting for output of {command}; "
+                f"last line: {last_line(buf)!r}")
         sleep(0.1)
 
 

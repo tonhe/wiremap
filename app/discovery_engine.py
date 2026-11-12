@@ -38,6 +38,7 @@ try:
     from app.asa_identity import (ASA_TYPE, ASA_PROBE, FAILOVER_PROBE, ROLE_STANDALONE,
                               asa_hostname, is_asa, parse_unit, unit_key)
     from app.wlc_session import WLC_TYPE, SYSINFO, WlcConnection, prompt_name, system_name
+    from app.command_progress import ProgressConnection
     from app import target_outcomes
 except ImportError:
     from connection_manager import (ConnectionManager, ConnectionError,
@@ -69,6 +70,7 @@ except ImportError:
     from asa_identity import (ASA_TYPE, ASA_PROBE, FAILOVER_PROBE, ROLE_STANDALONE,
                               asa_hostname, is_asa, parse_unit, unit_key)
     from wlc_session import WLC_TYPE, SYSINFO, WlcConnection, prompt_name, system_name
+    from command_progress import ProgressConnection
     import target_outcomes
 try:
     from app.credentials import Credential, CredentialChain
@@ -798,6 +800,7 @@ class DiscoveryEngine:
                 "ip": ip,
                 "hostname": hostname,
             })
+            conn = ProgressConnection(conn, self._progress_cb, ip, hostname)
 
             # Split collectors into batch (standard) and custom (need connection)
             batch_collectors = {}

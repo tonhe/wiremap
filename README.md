@@ -12,7 +12,7 @@
 - **SSH, Telnet, or Auto-detect** -- Tries SSH first, falls back to Telnet automatically
 - **Recursive BFS Crawling** -- Discovers neighbors hop-by-hop from a seed device with configurable depth (0-10, including crawl from targets)
 - **Multi-threaded** -- Parallel device collection with configurable concurrent workers (1-20, default 10), persisted in Settings
-- **Async with Live Progress** -- Scans run in the background with real-time Server-Sent Events (SSE) streaming authentication, fallback, data collection, neighbor discovery, and completion status to a live console panel
+- **Async with Live Progress** -- Scans run in the background with real-time Server-Sent Events (SSE) streaming authentication, fallback, data collection, neighbor discovery, and completion status to a live console panel. Above the console, each device being collected shows the command it is on, how many it has run and how long the current one has taken; commands that take 30 seconds or more, and commands that fail, are written to the console and to `logs/app.log`
 - **Cancellable Scans** -- Cancel a running scan gracefully; in-progress devices finish and partial results are saved
 - **L3 Neighbor Discovery** -- Optionally discover OSPF, EIGRP, BGP, and ISIS neighbors alongside CDP/LLDP
 - **Device Type Auto-detection** -- YAML-based pattern matching against CDP platform strings and LLDP system descriptions
