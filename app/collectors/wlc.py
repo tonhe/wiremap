@@ -325,7 +325,6 @@ class WlcCollector(BaseCollector):
     description = ("Controller platform, HA, interfaces, WLANs, RF, access points, AAA, "
                    "mobility and management plane from AireOS controllers")
     enabled_by_default = True
-    optional = True
     needs_custom_collect = True
     needs_device_context = True
 
@@ -351,7 +350,6 @@ class WlcCollector(BaseCollector):
             try:
                 raw[cmd] = connection.send_command(cmd)
             except Exception as e:
-                logger.warning(f"wlc: '{cmd}' failed: {e}")
                 raw[cmd] = send_failure_output(e)
 
         for cmd in CONTROLLER_COMMANDS:

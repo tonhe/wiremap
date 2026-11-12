@@ -16,6 +16,10 @@ try:
     from app.credentials import Credential
 except ImportError:
     from credentials import Credential
+try:
+    from app.wlc_session import WLC_TYPE, looks_like_aireos
+except ImportError:
+    from wlc_session import WLC_TYPE, looks_like_aireos
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +140,49 @@ def _connect_handler(**params):
     return ConnectHandler(**params)
 
 
+# Drivers an untyped host is tried on before the AireOS look-ahead.
+_AIREOS_CANDIDATES = frozenset({"cisco_ios", "cisco_xe", "cisco_nxos"})
+AIREOS_PROBE_TIMEOUT = 8
+
+
+def _aireos_probe(host, username, password, timeout=AIREOS_PROBE_TIMEOUT,
+                  disabled_algorithms=None):
+    """Log in over SSH and read what the device prints, sending nothing.
+
+    An AireOS controller asks for User: again after the SSH login, which no
+    IOS-family driver expects; that, or an "(name) >" prompt, gives it away.
+    """
+    import paramiko
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(host, username=username, password=password, timeout=timeout,
+                       banner_timeout=timeout, auth_timeout=timeout,
+                       look_for_keys=False, allow_agent=False,
+                       disabled_algorithms=disabled_algorithms)
+        channel = client.invoke_shell()
+        channel.settimeout(0.5)
+        seen = ""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                data = channel.recv(4096)
+            except socket.timeout:
+                continue
+            if not data:
+                break
+            seen += data.decode("utf-8", errors="replace")
+            if looks_like_aireos(seen):
+                return True
+        return False
+    except Exception as e:
+        logger.debug(f"AireOS look-ahead on {host} failed: {type(e).__name__}: {e}")
+        return False
+    finally:
+        client.close()
+
+
 class ConnectionError(Exception):
     """Raised when connection fails.
 
@@ -244,6 +291,7 @@ class ConnectionManager:
         self.allow_fallback = allow_fallback
         self.effective_device_type = None
         self._legacy_ssh = False
+        self._aireos_checked = False
 
     def _build_device_params(self, device_type: str = None,
                              credential=None) -> dict:
@@ -366,6 +414,13 @@ class ConnectionManager:
                                             fallback_occurred=fallback_occurred)
                 if reason == failures.AUTH:
                     raise self._auth_error(attempts)
+                if self._may_be_aireos(proto, effective_dt, reason, attempts):
+                    wlc, wlc_reason = self._try_aireos(proto, attempts, rejected)
+                    if wlc is not None:
+                        return ConnectionResult(connection=wlc, protocol_used=proto,
+                                                fallback_occurred=fallback_occurred)
+                    if wlc_reason == failures.AUTH:
+                        raise self._auth_error(attempts)
                 if reason in _NETWORK_LAYER:
                     # Another driver will hit the same closed port.
                     break
@@ -419,6 +474,34 @@ class ConnectionManager:
         if len(rejected) < len(self.credentials):
             return None, reason or failures.OTHER
         return None, failures.AUTH
+
+    def _may_be_aireos(self, proto, device_type, reason, attempts):
+        """An untyped SSH login an IOS driver could not finish, on a session
+        that got past TCP: worth one look for an AireOS controller."""
+        if self._aireos_checked or not self.allow_fallback or proto != "ssh":
+            return False
+        if device_type not in _AIREOS_CANDIDATES:
+            return False
+        if reason in (failures.AUTH, failures.REFUSED, failures.LEGACY_CRYPTO):
+            return False
+        message = (attempts[-1].get("message") or "").lower() if attempts else ""
+        return "tcp connection" not in message
+
+    def _try_aireos(self, proto, attempts, rejected):
+        self._aireos_checked = True
+        cred = next((c for c in self.credentials if c.number not in rejected), None)
+        if cred is None:
+            return None, None
+        self._acquire_login_slot()
+        legacy = LEGACY_DISABLED_ALGORITHMS if self._legacy_ssh else None
+        if not _aireos_probe(self.host, cred.username, cred.password,
+                             disabled_algorithms=legacy):
+            return None, None
+        logger.info(f"{self.host} answers like an AireOS controller; trying {WLC_TYPE}")
+        conn, reason = self._try_credentials(proto, WLC_TYPE, attempts, rejected)
+        if conn is not None:
+            self.effective_device_type = WLC_TYPE
+        return conn, reason
 
     def _logged_in_as(self, cred):
         self.credential = cred

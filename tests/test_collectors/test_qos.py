@@ -371,9 +371,9 @@ class FakeConn:
 
 # --- registry and gating -------------------------------------------------
 
-def test_registered_optional_and_on_by_default():
+def test_registered_and_always_run():
     collector = get_registry()["qos"]
-    assert collector.optional is True
+    assert not hasattr(collector, "optional")
     assert collector.enabled_by_default is True
     assert collector.needs_custom_collect is True
     assert collector.needs_device_context is True
@@ -709,6 +709,57 @@ def test_collect_cat9k_runs_capped_queue_stats_per_member():
     # Rejected queue-stat commands are recorded, not parsed.
     rejected = [c for c in parsed["failed_commands"] if "qos queue stats" in c]
     assert len(rejected) == QUEUE_STATS_CAP - 1
+
+
+def test_classic_switch_with_qos_off_skips_the_per_port_commands():
+    outputs = dict(_classic_outputs(), **{
+        MLS_QOS: "QoS is disabled\nQoS ip packet dscp rewrite is enabled\n",
+        POLICY_MAP_INTERFACE: "", AUTO_QOS: ""})
+    conn = FakeConn(outputs)
+    ctx = _context(neighbors=[_phone("Gi1/0/5")])
+    parsed = QosCollector().collect(conn, "cisco_ios", context=ctx)["parsed"]
+    sent = [c for c, _ in conn.sent]
+    assert sent == [POLICY_MAP_INTERFACE, CLASS_MAP, POLICY_MAP, AUTO_QOS, MLS_QOS]
+    assert parsed["qos_global"]["mls_qos_enabled"] is False
+    assert parsed["qos_global"]["deep_skipped"] == "QoS is disabled globally"
+    assert parsed["skipped_commands"] == [MLS_INTERFACE, MLS_QUEUEING, MLS_STATISTICS,
+                                          MLS_QUEUE_SET, MLS_DSCP_MAP, MLS_COS_MAP]
+    assert not parsed.get("failed_commands")
+    ports = {i["interface"]: i for i in parsed["interfaces"]}
+    assert ports["GigabitEthernet1/0/5"]["neighbor_class"] == "phone"
+
+
+def test_unknown_model_without_mls_still_runs_everything():
+    conn = FakeConn({POLICY_MAP_INTERFACE: ""})
+    QosCollector().collect(conn, "cisco_ios", context={"model": "LAB-BOX"})
+    assert MLS_COS_MAP in [c for c, _ in conn.sent]
+
+
+def test_cat9k_without_a_policy_skips_queue_counters():
+    control_plane_only = (
+        " Control Plane \n\n  Service-policy input: system-cpp-policy\n\n"
+        "    Class-map: system-cpp-police-data (match-any)\n"
+        "      0 packets, 0 bytes\n")
+    outputs = {POLICY_MAP_INTERFACE: control_plane_only, CLASS_MAP: "", POLICY_MAP: "",
+               AUTO_QOS: "AutoQoS not enabled on any interface\n"}
+    conn = FakeConn(outputs)
+    neighbors = [_switch("Gi1/0/48"), _phone("Gi1/0/1")]
+    parsed = QosCollector().collect(
+        conn, "cisco_xe", context=_context(neighbors, model="C9300-48P"))["parsed"]
+    sent = [c for c, _ in conn.sent]
+    assert sent == [POLICY_MAP_INTERFACE, CLASS_MAP, POLICY_MAP, AUTO_QOS]
+    assert parsed["qos_global"]["deep_skipped"] == "no QoS policy attached to any interface"
+    assert parsed["skipped_commands"][0] == FED_POLICY_SUMMARY
+    assert len(parsed["skipped_commands"]) == 3
+    assert parsed["queue_stats_ports"]["not_run"] == parsed["qos_global"]["deep_skipped"]
+
+
+def test_cat9k_with_auto_qos_but_no_policy_output_still_runs_queue_counters():
+    outputs = {POLICY_MAP_INTERFACE: "", AUTO_QOS: SHOW_AUTO_QOS}
+    conn = FakeConn(outputs)
+    QosCollector().collect(conn, "cisco_xe",
+                           context=_context([_switch("Gi1/0/48")], model="C9300-48P"))
+    assert FED_POLICY_SUMMARY in [c for c, _ in conn.sent]
 
 
 def test_collect_router_without_classic_commands():

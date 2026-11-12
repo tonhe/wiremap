@@ -37,8 +37,10 @@ try:
     from app.scan_timing import collector_ms, summarize as summarize_timing
     from app.asa_identity import (ASA_TYPE, ASA_PROBE, FAILOVER_PROBE, ROLE_STANDALONE,
                               asa_hostname, is_asa, parse_unit, unit_key)
-    from app.wlc_session import WLC_TYPE, SYSINFO, WlcConnection, prompt_name, system_name
+    from app.wlc_session import (WLC_TYPE, SYSINFO, WlcConnection, looks_like_aireos,
+                                  prompt_name, system_name)
     from app.command_progress import ProgressConnection
+    from app.command_issues import IssueLog
     from app import target_outcomes
 except ImportError:
     from connection_manager import (ConnectionManager, ConnectionError,
@@ -69,8 +71,10 @@ except ImportError:
     from scan_timing import collector_ms, summarize as summarize_timing
     from asa_identity import (ASA_TYPE, ASA_PROBE, FAILOVER_PROBE, ROLE_STANDALONE,
                               asa_hostname, is_asa, parse_unit, unit_key)
-    from wlc_session import WLC_TYPE, SYSINFO, WlcConnection, prompt_name, system_name
+    from wlc_session import (WLC_TYPE, SYSINFO, WlcConnection, looks_like_aireos,
+                             prompt_name, system_name)
     from command_progress import ProgressConnection
+    from command_issues import IssueLog
     import target_outcomes
 try:
     from app.credentials import Credential, CredentialChain
@@ -156,6 +160,13 @@ class DiscoveryError(Exception):
         self.error_type = error_type
 
 
+def _prompt_or_blank(conn):
+    try:
+        return conn.find_prompt() or ""
+    except Exception:
+        return ""
+
+
 class DiscoveryEngine:
     """Orchestrates BFS discovery using ConnectionManager and Collectors."""
 
@@ -182,8 +193,7 @@ class DiscoveryEngine:
                  allow_telnet: bool = False,
                  source_ip=None,
                  credentials=None,
-                 connect_timeout: int = DEFAULT_CONNECT_TIMEOUT,
-                 skip_collectors=None):
+                 connect_timeout: int = DEFAULT_CONNECT_TIMEOUT):
         self.seed_ip = seed_ip
         self.connect_timeout = int(connect_timeout or DEFAULT_CONNECT_TIMEOUT)
         self.seed_device_type = seed_device_type
@@ -281,6 +291,8 @@ class DiscoveryEngine:
         self._login_limiter = LoginRateLimiter(max_logins_per_minute)
         # hostname -> per-device timing record (see app.scan_timing).
         self.timing: dict = {}
+        # Problems met while sending commands (see app.command_issues).
+        self.command_issues = IssueLog()
         self._timing_lock = threading.Lock()
         # Local address used to reach the seed, and any management ACL on
         # the seed that does not permit it.
@@ -300,13 +312,9 @@ class DiscoveryEngine:
         self._progress_cb = progress_callback or (lambda event: None)
         self._cancelled = cancelled
 
-        # Every collector runs, except optional ones the operator left out.
-        registry = get_registry()
-        skip = set(skip_collectors or ())
-        self.skipped_collectors = sorted(
-            n for n, c in registry.items() if n in skip and c.optional)
-        self._collectors = {n: c for n, c in registry.items()
-                            if n not in self.skipped_collectors}
+        # Every collector runs; each decides from the device type whether it
+        # applies.
+        self._collectors = dict(get_registry())
 
         # Device detector for neighbor type classification
         if device_detector is None:
@@ -364,7 +372,6 @@ class DiscoveryEngine:
             "max_depth": self.max_depth,
             "connection_protocol": self.protocol,
             "collectors_enabled": list(self._collectors.keys()),
-            "collectors_skipped": list(self.skipped_collectors),
             "filters": self.filters,
             # Lets the inventory report tell a host-list target from a seed.
             "target_ips": [ip for ip, _ in (self.target_hosts or [])],
@@ -529,6 +536,8 @@ class DiscoveryEngine:
             peak_logins_per_minute=self._login_limiter.peak_per_minute,
             timing=timing,
             slowest=slowest,
+            command_issues=self.command_issues.entries(),
+            command_issue_counts=self.command_issues.counts(),
         )
         target_line = self._reconcile_targets(inventory, failed)
         inventory.update_scan_summary(
@@ -673,7 +682,10 @@ class DiscoveryEngine:
             connect_started = time.monotonic()
             result = conn_mgr.connect()
             connect_ms = _ms_since(connect_started)
-            conn = result.connection
+            # Tracked from the first command, so a device stuck before its
+            # name is known still shows what it is waiting on.
+            conn = ProgressConnection(result.connection, self._progress_cb, ip, ip,
+                                      issues=self.command_issues)
             login_cred = conn_mgr.credential
             self._credentials.mark_success(login_cred)
             if result.fallback_occurred:
@@ -691,25 +703,26 @@ class DiscoveryEngine:
                 "login_user": login_cred.username if login_cred else None,
                 "credential_set": login_cred.number if login_cred else None,
             })
+            # An untyped AireOS controller is found by the connection manager
+            # when the IOS driver cannot finish its login, or here when it
+            # did and landed on a "(name) >" prompt.
+            if not device_type and conn_mgr.effective_device_type == WLC_TYPE:
+                device_type = WLC_TYPE
+            elif (conn_mgr.allow_fallback
+                  and conn_mgr.effective_device_type in CISCO_FAMILY_TYPES
+                  and looks_like_aireos(_prompt_or_blank(conn))):
+                logger.info("the prompt identifies cisco_wlc; reconnecting")
+                conn_mgr, result, conn = self._reopen_as(
+                    WLC_TYPE, conn, ip, login_cred, result, known)
+                device_type = WLC_TYPE
             # An untyped firewall logs in on the IOS driver without
             # complaint; it is reopened on the ASA driver before anything
             # else, including the hostname de-duplication below.
             if (not device_type or device_type in CISCO_FAMILY_TYPES) and is_asa(
                     ConnectionManager.run_commands(conn, [ASA_PROBE]).get(ASA_PROBE)):
                 logger.info("show version identifies cisco_asa; reconnecting")
-                conn.disconnect()
-                conn_mgr = ConnectionManager(
-                    host=ip, device_type=ASA_TYPE,
-                    username=self.username, password=None,
-                    credentials=[login_cred] if login_cred else self._credentials.ordered(),
-                    protocol=result.protocol_used, allow_fallback=False,
-                    platform=known.get("platform"),
-                    login_limiter=self._login_limiter,
-                    allow_telnet=self.allow_telnet,
-                    connect_timeout=self.connect_timeout,
-                )
-                result = conn_mgr.connect()
-                conn = result.connection
+                conn_mgr, result, conn = self._reopen_as(
+                    ASA_TYPE, conn, ip, login_cred, result, known)
                 device_type = ASA_TYPE
             prompt_facts = ConnectionManager.get_prompt_facts(conn)
             hostname = prompt_facts["hostname"]
@@ -717,7 +730,7 @@ class DiscoveryEngine:
             if device_type == WLC_TYPE:
                 # A read-only account cannot turn paging off, and the prompt
                 # reads (Cisco Controller) until someone names the box.
-                conn = WlcConnection(conn)
+                conn.wrap(WlcConnection)
                 hostname = (system_name(ConnectionManager.run_commands(
                     conn, [SYSINFO]).get(SYSINFO))
                     or prompt_name(conn.find_prompt()) or hostname or ip)
@@ -800,7 +813,7 @@ class DiscoveryEngine:
                 "ip": ip,
                 "hostname": hostname,
             })
-            conn = ProgressConnection(conn, self._progress_cb, ip, hostname)
+            conn.named(hostname)
 
             # Split collectors into batch (standard) and custom (need connection)
             batch_collectors = {}
@@ -1125,6 +1138,25 @@ class DiscoveryEngine:
     def _current_access_line(self):
         return summary_line(self.source_ip, self.source_ip_method,
                             self.source_access)
+
+    def _reopen_as(self, device_type, conn, ip, login_cred, result, known):
+        """Log in again on the driver the device turned out to need, with the
+        credential set that already worked."""
+        conn.disconnect()
+        conn_mgr = ConnectionManager(
+            host=ip, device_type=device_type,
+            username=self.username, password=None,
+            credentials=[login_cred] if login_cred else self._credentials.ordered(),
+            protocol=result.protocol_used, allow_fallback=False,
+            platform=known.get("platform"),
+            login_limiter=self._login_limiter,
+            allow_telnet=self.allow_telnet,
+            connect_timeout=self.connect_timeout,
+        )
+        result = conn_mgr.connect()
+        conn = ProgressConnection(result.connection, self._progress_cb, ip, ip,
+                                  issues=self.command_issues)
+        return conn_mgr, result, conn
 
     def _maybe_learn_source_ip(self, conn, device_type, ip, protocol,
                                username=None):

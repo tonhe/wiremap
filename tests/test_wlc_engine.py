@@ -18,7 +18,7 @@ def _no_snmp_network(monkeypatch):
     monkeypatch.setattr(mod, "snmp_collect_all", lambda walker: {})
 
 
-def _discover(prompt, sysinfo=SYSINFO_OUT, wrapped=None):
+def _discover(prompt, sysinfo=SYSINFO_OUT, wrapped=None, events=None):
     sent = []
     conn = MagicMock()
     conn.find_prompt.return_value = prompt
@@ -39,7 +39,8 @@ def _discover(prompt, sysinfo=SYSINFO_OUT, wrapped=None):
 
     engine = DiscoveryEngine(
         seed_ip="192.0.2.30", seed_device_type="cisco_wlc", username="admin",
-        password="admin", max_depth=0, protocol="ssh", inventory_dir=None, max_workers=1)
+        password="admin", max_depth=0, protocol="ssh", inventory_dir=None, max_workers=1,
+        progress_callback=events.append if events is not None else None)
     with patch.object(ConnectionManager, "connect", autospec=True, side_effect=connect), \
             patch("app.discovery_engine.WlcConnection", side_effect=wrap):
         inventory = engine.discover()
@@ -55,6 +56,17 @@ def test_default_prompt_is_replaced_by_system_name():
     assert len(wrapped) == 1
 
 
+def test_commands_are_reported_from_login_before_the_name_is_known():
+    events = []
+    _discover("(Cisco Controller) >", wrapped=[], events=events)
+    names = [e["event"] for e in events]
+    first = next(e for e in events if e["event"] == "command_running")
+    assert first["command"] == SYSINFO and first["hostname"] == "192.0.2.30"
+    assert names.index("command_running") < names.index("collecting_data")
+    later = [e for e in events if e["event"] == "command_running"][1:]
+    assert later and all(e["hostname"] == "lab-wlc-01" for e in later)
+
+
 def test_no_system_name_falls_back_to_the_prompt_then_the_address():
     inventory, _ = _discover("(lab-wlc-02) >", sysinfo="", wrapped=[])
     assert "lab-wlc-02" in inventory.devices
@@ -66,7 +78,7 @@ def test_wrapper_routes_send_command_through_paging():
     raw = MagicMock()
     with patch("app.wlc_session.send_paged", return_value="out") as paged:
         assert WlcConnection(raw).send_command("show ap summary", read_timeout=30) == "out"
-    paged.assert_called_once_with(raw, "show ap summary", 120)
+    assert paged.call_args.args == (raw, "show ap summary", 120)
     raw.send_command.assert_not_called()
 
 

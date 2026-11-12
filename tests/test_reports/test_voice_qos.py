@@ -120,6 +120,23 @@ def test_old_scan_without_qos_cannot_generate():
         {"devices": {"SW": {"collector_data": {"cdp_lldp": {"parsed": {}}}}}})
 
 
+# --- QoS off: per-port commands not run --------------------------------------
+
+def test_qos_off_switch_shows_qos_off_and_why_commands_were_not_run():
+    qos = _classic([_phone_port("GigabitEthernet1/0/5", trust="")], mls=False,
+                   dmap={}, queue_set_tuned=None,
+                   deep_skipped="QoS is disabled globally")
+    qos["skipped_commands"] = ["show mls qos interface", "show mls qos queue-set"]
+    sheets = _sheets(_inv(SW1=_device(qos)))
+    [row] = _rows(sheets, "Switch QoS Posture")
+    assert row["mls qos"] == "Off"
+    assert (row["Queue-Set"], row["DSCP-to-Queue Map"], row["EF Queue"]) == (
+        "QoS off", "QoS off", "QoS off")
+    [err] = _rows(sheets, "Collection Errors")
+    assert err["Command"] == "2 per-port QoS commands"
+    assert err["Error"] == "not run: QoS is disabled globally" and err["Kind"] == "skipped"
+
+
 # --- findings ---------------------------------------------------------------
 
 def test_mls_qos_disabled_with_voice_endpoints():

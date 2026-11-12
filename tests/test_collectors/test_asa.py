@@ -23,7 +23,7 @@ def _collect(fake, role="active"):
 
 def test_registered_and_only_for_asa():
     c = get_registry()["asa"]
-    assert c.optional and c.serves_asa and c.needs_custom_collect
+    assert c.serves_asa and c.needs_custom_collect
     assert c.applies_to("cisco_asa") and not c.applies_to("cisco_ios")
     assert c.get_commands("cisco_ios") == []
     assert AsaCollector().collect(fx.FakeAsa({}), "cisco_ios")["parsed"]["not_applicable"]

@@ -68,6 +68,67 @@ def test_unknown_question_is_answered_no():
     assert out.endswith("done")
 
 
+@pytest.mark.parametrize("pager", [
+    "--More-- or (q)uit",
+    "--More or (q)uit current module or <ctrl-z> to abort",
+    # As a slow link can deliver it: cut off mid-line.
+    "--More or (q)uit current module or <ctrl-z> to ab",
+    "Press Enter to continue or <Ctrl-Z> to abort",
+    "Press any key to continue (Q to quit)",
+])
+def test_every_pager_wording_is_answered(pager):
+    out, ch = _send([f"show sysinfo\nSystem Name.... lab-wlc-01\n{pager}",
+                     f"\nProduct Version.... 8.10.185.0\n{PROMPT}"], cmd="show sysinfo")
+    assert ch.written[1] in (" ", "\n")
+    assert "lab-wlc-01" in out and "8.10.185.0" in out
+    assert "More" not in out and "continue" not in out
+
+
+def test_a_stuck_pager_is_left_after_a_timeout():
+    with pytest.raises(ws.WlcReadTimeout) as err:
+        _send(["show sysinfo\nrow\nHit (q)uit to stop", f"\n{PROMPT}"], cmd="show sysinfo",
+              timeout=5)
+    assert "session recovered; last line: 'Hit (q)uit to stop'" in str(err.value)
+
+
+def test_a_stuck_question_is_declined_after_a_timeout():
+    ch = FakeChannel(["show sysinfo\nProceed? (yes/no)", f"\n{PROMPT}"])
+    clock = Clock()
+    with pytest.raises(ws.WlcReadTimeout) as err:
+        ws.send_paged(ch, "show sysinfo", 5, clock=clock, sleep=clock.sleep)
+    assert ch.written[1] == "n\n"
+    assert "session recovered" in str(err.value)
+
+
+def test_silence_with_nothing_to_back_out_of_is_not_recovered():
+    with pytest.raises(ws.WlcReadTimeout) as err:
+        _send(["show sysinfo\nrow 1\n"], cmd="show sysinfo", timeout=5)
+    assert "session not recovered" in str(err.value)
+
+
+def test_a_pager_that_never_lets_go_is_not_recovered():
+    with pytest.raises(ws.WlcReadTimeout) as err:
+        _send(["show sysinfo\nHit (q)uit to stop"], cmd="show sysinfo", timeout=5)
+    assert "session not recovered" in str(err.value)
+
+
+def test_unknown_question_is_reported_and_known_pauses_are_not():
+    seen = []
+    ch = FakeChannel(["show sysinfo\nrow\n--More-- or (q)uit", "\nReally? (y/N)",
+                      f"\ndone\n{PROMPT}"])
+    clock = Clock()
+    ws.send_paged(ch, "show sysinfo", clock=clock, sleep=clock.sleep, on_question=seen.append)
+    assert seen == ["Really? (y/N)"]
+
+
+def test_wrapper_keeps_questions_until_taken():
+    ch = FakeChannel(["show sysinfo\nReally? (y/N)", f"\ndone\n{PROMPT}"])
+    conn = ws.WlcConnection(ch)
+    conn.send_command("show sysinfo")
+    assert conn.take_notes() == ["Really? (y/N)"]
+    assert conn.take_notes() == []
+
+
 def test_silence_times_out_from_the_last_data():
     with pytest.raises(ws.WlcReadTimeout):
         _send(["show ap summary\nrow 1\n"], timeout=5)
@@ -75,8 +136,8 @@ def test_silence_times_out_from_the_last_data():
 
 def test_timeout_names_the_last_line_printed():
     with pytest.raises(ws.WlcReadTimeout) as err:
-        _send(["show run-config\nPress Enter to continue or <Ctrl-Z> to abort\r\n"], timeout=5)
-    assert "last line: 'Press Enter to continue or <Ctrl-Z> to abort'" in str(err.value)
+        _send(["show ap summary\nCollecting AP data, please wait\r\n"], timeout=5)
+    assert str(err.value).endswith("last line: 'Collecting AP data, please wait'")
 
 
 def test_last_line():

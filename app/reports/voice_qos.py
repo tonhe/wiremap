@@ -604,7 +604,10 @@ def _posture_row(dev):
     macros = sorted({i["auto_qos_macro"] for i in dev.interfaces.values()
                      if i.get("auto_qos_macro")})
     dmap = (dev.qos.get("maps") or {}).get("dscp_output_q") or {}
-    if not dmap:
+    off = bool((dev.qos.get("qos_global") or {}).get("deep_skipped")) and dev.classic
+    if off:
+        map_state = "QoS off"
+    elif not dmap:
         map_state = "n/a"
     else:
         map_state = "Default" if dmap == DEFAULT_DSCP_OUTPUT_Q else "Modified"
@@ -615,8 +618,8 @@ def _posture_row(dev):
             f"{trusted} of {len(voice)}" if voice else "",
             ", ".join(access) or ("" if dev.policies else "No policies attached"),
             ", ".join(uplink_egress),
-            "n/a" if tuned is None else ("Tuned" if tuned else "Default"),
-            map_state, dmap.get(EF, "n/a"), dev.uptime]
+            "QoS off" if off else ("n/a" if tuned is None else ("Tuned" if tuned else "Default")),
+            map_state, "QoS off" if off else dmap.get(EF, "n/a"), dev.uptime]
 
 
 def _voice_rows(dev):
@@ -710,8 +713,13 @@ def _error_rows(inventory_data):
             rows.append([hostname, cmd, errors.get(cmd, ""), kind])
         if qos.get("collector_failed") and not qos.get("failed_commands"):
             rows.append([hostname, "", qos.get("collector_error", ""), "failed"])
+        skipped_cmds = qos.get("skipped_commands") or []
+        if skipped_cmds:
+            reason = (qos.get("qos_global") or {}).get("deep_skipped", "")
+            rows.append([hostname, f"{len(skipped_cmds)} per-port QoS commands",
+                         f"not run: {reason}", "skipped"])
         sel = qos.get("queue_stats_ports") or {}
-        if sel.get("capped"):
+        if sel.get("capped") and not sel.get("not_run"):
             skipped = sel.get("skipped")
             text = (f"capped at {sel.get('cap', QUEUE_STATS_CAP)} of "
                     f"{sel.get('eligible')} eligible ports; uplinks were "

@@ -688,27 +688,6 @@
                         </p>
                     </div>
 
-                    {% macro optional_collector_choice() %}
-                    {% if optional_collectors %}
-                    <div class="form-group">
-                        <label>Optional Collectors</label>
-                        <input type="hidden" name="collector_choice" value="1">
-                        <div class="checkbox-grid">
-                            {% for col in optional_collectors %}
-                            <label title="{{ col.description }}">
-                                <input type="checkbox" name="collectors" value="{{ col.name }}"
-                                       {% if col.enabled_by_default %}checked{% endif %}> {{ col.label }}
-                            </label>
-                            {% endfor %}
-                        </div>
-                        <p style="font-size: 12px; color: var(--text-muted); margin: 6px 0 0 0;">
-                            QoS adds roughly a minute per 100 classic IOS switches. Untick it for a
-                            faster run when the QoS report is not needed.
-                        </p>
-                    </div>
-                    {% endif %}
-                    {% endmacro %}
-                    {{ optional_collector_choice() }}
 
                     <details style="margin-bottom: 16px;">
                         <summary style="cursor: pointer; font-size: 13px; color: var(--text-muted);">
@@ -1030,7 +1009,6 @@ fw1.example.com paloalto_panos"></textarea>
                         </p>
                     </div>
 
-                    {{ optional_collector_choice() }}
 
                     <div class="form-group">
                         <label style="display: flex; align-items: center; font-weight: normal; cursor: pointer;">
@@ -1508,13 +1486,11 @@ fw1.example.com paloalto_panos"></textarea>
                              since: Date.now()};
             renderActive();
         });
-        _eventSource.addEventListener('command_slow', function(e) {
+        _eventSource.addEventListener('command_issue', function(e) {
             var d = JSON.parse(e.data);
-            logEvent(d.hostname + ': \'' + d.command + '\' took ' + d.seconds + 's', 'warn');
-        });
-        _eventSource.addEventListener('command_failed', function(e) {
-            var d = JSON.parse(e.data);
-            logEvent(d.hostname + ': \'' + d.command + '\' failed after ' + d.seconds + 's — ' + d.error, 'fail');
+            var took = (d.seconds !== null && d.seconds !== undefined) ? ' (' + d.seconds + 's)' : '';
+            var type = d.severity === 'error' ? 'fail' : d.severity === 'warning' ? 'warn' : 'muted';
+            logEvent(d.hostname + ': [' + d.kind + '] \'' + d.command + '\'' + took + ' — ' + d.detail, type);
         });
         _eventSource.addEventListener('device_complete', function(e) {
             var d = JSON.parse(e.data);

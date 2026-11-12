@@ -181,7 +181,6 @@ class AsaCollector(BaseCollector):
     description = ("Platform, failover, interfaces, policy, VPN, certificates and "
                    "management plane from ASA and ASAv firewalls")
     enabled_by_default = True
-    optional = True
     serves_asa = True
     needs_custom_collect = True
     needs_device_context = True
