@@ -199,3 +199,39 @@ def test_engine_shares_one_limiter_with_every_connection(monkeypatch, tmp_path):
     assert seen[0] is seen[1] is eng._login_limiter
     assert eng._login_limiter.per_minute == 600
     assert inv.to_dict()["scan_summary"]["max_logins_per_minute"] == 600
+
+
+def test_every_host_list_entry_uses_the_selected_protocol(monkeypatch, tmp_path):
+    # Telnet-only hosts: SSH is refused, Telnet logs in (#54).
+    attempts = []
+
+    def handler(**params):
+        attempts.append((params["host"], params["device_type"]))
+        if not params["device_type"].endswith("_telnet"):
+            _refused()
+        return FakeConn(hostname="lab-vg" + params["host"].rsplit(".", 1)[1])
+
+    monkeypatch.setattr(cmod, "_connect_handler", handler)
+    targets = [("192.0.2.31", "cisco_ios"), ("192.0.2.32", "cisco_ios")]
+    inv = _engine(tmp_path, target_hosts=targets, seed_ip="192.0.2.31",
+                  protocol="telnet", max_workers=1).discover()
+    assert sorted(attempts) == [("192.0.2.31", "cisco_ios_telnet"),
+                                ("192.0.2.32", "cisco_ios_telnet")]
+    assert {"lab-vg31", "lab-vg32"} <= set(inv.devices)
+
+
+def test_discovered_neighbours_still_use_auto(monkeypatch, tmp_path):
+    protocols = {}
+    real_init = cmod.ConnectionManager.__init__
+
+    def spy_init(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        protocols[self.host] = self.protocol
+
+    monkeypatch.setattr(cmod.ConnectionManager, "__init__", spy_init)
+    monkeypatch.setattr(cmod, "_connect_handler", _refused)
+    eng = _engine(tmp_path, protocol="telnet")
+    inv = engine_mod.DiscoveryInventory.create("192.0.2.41")
+    eng._discover_device("192.0.2.40", None, 1, inv)
+    eng._discover_device("192.0.2.41", "cisco_ios", 0, inv)
+    assert protocols == {"192.0.2.40": "auto", "192.0.2.41": "telnet"}

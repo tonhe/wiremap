@@ -662,9 +662,10 @@ class DiscoveryEngine:
                     known.get("platform")):
                 return []
 
-            # Seed host uses user-selected protocol; discovered neighbors use auto
-            is_seed = (ip == self.seed_ip and depth == 0)
-            proto = self.protocol if is_seed else "auto"
+            # Hosts the operator named (the seed, or every host-list entry)
+            # use the selected protocol; discovered neighbors use auto. The
+            # first layer holds exactly the operator's hosts.
+            proto = self.protocol if depth == 0 else "auto"
             # A device type supplied by the operator (host list or seed) is
             # authoritative -- trying other platforms contradicts the request.
             explicit_type = bool(device_type)
